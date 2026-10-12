@@ -49,8 +49,8 @@
  * https://dev.mysql.com/doc/heatwave/en/heatwave-errors.html (1001, 1142, 1144)
  * https://github.com/Shannon-Data/ShannonBase/issues/924
  */
-#ifndef SHANNON_LOG_BINLOG_PARSER_H
-#define SHANNON_LOG_BINLOG_PARSER_H
+#ifndef __SHANNONBASE_LOG_BINLOG_PARSER_H__
+#define __SHANNONBASE_LOG_BINLOG_PARSER_H__
 
 #include <vector>
 #include "storage/rapid_engine/populate/log_commons.h"

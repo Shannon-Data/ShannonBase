@@ -1,5 +1,5 @@
-#ifndef SHANNONBASE_BINLOG_RECOVERY_H
-#define SHANNONBASE_BINLOG_RECOVERY_H
+#ifndef __SHANNONBASE_BINLOG_RECOVERY_H__
+#define __SHANNONBASE_BINLOG_RECOVERY_H__
 #include <functional>
 #include "storage/rapid_engine/populate/log_commons.h"
 #include "storage/rapid_engine/recovery/notification_tracker.h"

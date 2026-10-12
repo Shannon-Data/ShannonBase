@@ -78,6 +78,7 @@ SET(SHANNON_IMCS_SOURCES
    imcs/row0row.cpp
    imcs/storage0index.cpp
    resource_management/res_mgmt.cpp
+  resource_management/io_scheduler.cpp
    utils/utils.cpp
    utils/SIMD.cpp
    utils/memory_pool.cpp

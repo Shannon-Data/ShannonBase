@@ -147,6 +147,10 @@ class WorkGovernor {
       m_cv.wait_for(lock, std::chrono::milliseconds(20));
     }
   }
+  size_t limit(WorkClass kind) const {
+    std::lock_guard lock(m_mutex);
+    return m_limits[index(kind)];
+  }
   Snapshot snapshot(WorkClass kind) const {
     std::lock_guard lock(m_mutex);
     return m_states[index(kind)].stats;
@@ -192,6 +196,13 @@ class WorkGovernor {
   uint64_t m_next_ticket{0};
   bool m_stopping{false};
 };
+
+// Conservative physical pool sizing, independent of the number of tables.
+// This is a planning estimate, not a second memory reservation or RSS limit.
+inline size_t make_apply_pool_size(size_t sync_limit, size_t pool_capacity) {
+  constexpr size_t worker_headroom = 8ULL * 1024 * 1024;
+  return std::max<size_t>(1, std::min({sync_limit, std::max<size_t>(1, pool_capacity / worker_headroom), size_t{32}}));
+}
 
 enum class CpuRole : size_t { TP, AP, SYNC, MAINT, COUNT };
 struct CpuTopologyEntry {

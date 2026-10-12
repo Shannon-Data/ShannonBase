@@ -24,8 +24,8 @@
    The fundmental code for imcs. To get cache line size.
 */
 
-#ifndef __SHANNON_RAPID_ARCH_INFO_H__
-#define __SHANNON_RAPID_ARCH_INFO_H__
+#ifndef __SHANNONBASE_RAPID_ARCH_INFO_H__
+#define __SHANNONBASE_RAPID_ARCH_INFO_H__
 
 #define ALIGN_WORD(WORD, TYPE_SIZE) ((WORD + TYPE_SIZE - 1) & ~(TYPE_SIZE - 1))
 
@@ -34,6 +34,11 @@
 #define SHANNON_WINDOWS_PLATFORM
 #else
 #define SHANNON_POSIX_PLATFORM
+#endif
+
+// Linux-specific APIs must use this centralized OS capability macro.
+#if defined(__linux__)
+#define SHANNON_LINUX_PLATFORM
 #endif
 
 // clang-format off
@@ -220,4 +225,4 @@ constexpr int PREFETCH_AHEAD = 2;
 #endif  /* NO_PREFETCH */
 // clang-format on
 
-#endif  //__SHANNON_RAPID_ARCH_INFO_H__
+#endif  //__SHANNONBASE_RAPID_ARCH_INFO_H__

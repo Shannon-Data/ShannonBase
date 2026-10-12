@@ -26,8 +26,8 @@
 
    The fundmental code for imcs.
 */
-#ifndef SHANNONBASE_NOTIFICATION_TRACKER_H
-#define SHANNONBASE_NOTIFICATION_TRACKER_H
+#ifndef __SHANNONBASE_NOTIFICATION_TRACKER_H__
+#define __SHANNONBASE_NOTIFICATION_TRACKER_H__
 #include <cstdint>
 #include <mutex>
 #include <string>

@@ -12,8 +12,53 @@
 
 #include "storage/rapid_engine/executor/iterators/iterator.h"
 #include "storage/rapid_engine/resource_management/res_mgmt.h"
+#include "storage/rapid_engine/resource_management/io_scheduler.h"
 
 namespace ShannonBase::ResMgmt {
+TEST(RapidResourcesTest, SpillDevicesHaveIndependentDepthAndMoveOnlyOwnership) {
+  IoDepthGovernor governor;
+  auto first = governor.acquire(1, 1, std::chrono::milliseconds(0), [] { return false; });
+  ASSERT_TRUE(first);
+  EXPECT_FALSE(governor.acquire(1, 1, std::chrono::milliseconds(0), [] { return false; }));
+  auto other = governor.acquire(2, 1, std::chrono::milliseconds(0), [] { return false; });
+  ASSERT_TRUE(other);
+  auto moved = std::move(first);
+  first.reset();
+  EXPECT_EQ(2u, governor.snapshot().active);
+  moved.reset();
+  other.reset();
+  EXPECT_EQ(0u, governor.snapshot().active);
+  EXPECT_EQ(0u, governor.snapshot().waiting);
+  EXPECT_EQ(1u, governor.snapshot().rejected);
+}
+TEST(RapidResourcesTest, CancelledSpillWaiterDoesNotLeakAdmission) {
+  IoDepthGovernor governor;
+  auto held = governor.acquire(1, 1, std::chrono::milliseconds(0), [] { return false; });
+  ASSERT_TRUE(held);
+  std::atomic<bool> cancel{false};
+  auto waiter = std::async(std::launch::async, [&] {
+    return governor.acquire(1, 1, std::chrono::seconds(2), [&] { return cancel.load(); });
+  });
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  while (!governor.snapshot().waiting && std::chrono::steady_clock::now() < deadline) std::this_thread::yield();
+  EXPECT_EQ(1u, governor.snapshot().waiting);
+  cancel.store(true);
+  EXPECT_FALSE(waiter.get());
+  held.reset();
+  EXPECT_EQ(0u, governor.snapshot().active);
+  EXPECT_EQ(0u, governor.snapshot().waiting);
+  EXPECT_TRUE(governor.acquire(1, 1, std::chrono::milliseconds(0), [] { return false; }));
+}
+
+TEST(RapidResourcesTest, ApplyPoolRespectsAdmissionAndMemoryPlanningBounds) {
+  constexpr size_t mib = 1024 * 1024;
+  EXPECT_EQ(1u, make_apply_pool_size(1, 2048 * mib));
+  EXPECT_EQ(2u, make_apply_pool_size(2, 2048 * mib));
+  EXPECT_EQ(2u, make_apply_pool_size(16, 16 * mib));
+  EXPECT_EQ(32u, make_apply_pool_size(1024, 2048 * mib));
+  EXPECT_EQ(1u, make_apply_pool_size(2, mib));
+}
+
 TEST(RapidResourcesTest, WorkAdmissionAndMoveReleaseExactlyOnce) {
   WorkGovernor governor;
   ASSERT_TRUE(governor.configure(IsolationMode::SOFT, {1, 1, 1}));

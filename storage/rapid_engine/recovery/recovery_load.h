@@ -23,8 +23,8 @@
 
    The fundmental code for imcs.
 */
-#ifndef SHANNONBASE_RECOVERY_LOAD_H
-#define SHANNONBASE_RECOVERY_LOAD_H
+#ifndef __SHANNONBASE_RECOVERY_LOAD_H__
+#define __SHANNONBASE_RECOVERY_LOAD_H__
 /**
  * Persist secondary_load information for ShannonBase restart recovery.
  */
@@ -103,4 +103,4 @@ class LoadFlagManager {
 };
 }  // namespace Recovery
 }  // namespace ShannonBase
-#endif  // SHANNONBASE_RECOVERY_LOAD_H
+#endif  // __SHANNONBASE_RECOVERY_LOAD_H__

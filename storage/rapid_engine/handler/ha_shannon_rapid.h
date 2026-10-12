@@ -24,8 +24,8 @@
    Copyright (c) 2023, Shannon Data AI and/or its affiliates.
     */
 
-#ifndef __PLUGIN_SECONDARY_ENGINE_SHANNON_HA_RAPID_H__
-#define __PLUGIN_SECONDARY_ENGINE_SHANNON_HA_RAPID_H__
+#ifndef __SHANNONBASE_HA_SHANNON_RAPID_H__
+#define __SHANNONBASE_HA_SHANNON_RAPID_H__
 #include <memory>
 #include <mutex>
 #include <string>
@@ -228,4 +228,4 @@ class ha_rapid : public handler {
 
 }  // namespace ShannonBase
 
-#endif  // __PLUGIN_SECONDARY_ENGINE_SHANNON_HA_RAPID_H__
+#endif  // __SHANNONBASE_HA_SHANNON_RAPID_H__
