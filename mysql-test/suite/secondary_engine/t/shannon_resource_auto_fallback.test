@@ -22,6 +22,9 @@ SET GLOBAL rapid_resource_isolation=OFF;
 SET SESSION debug=@old_debug;
 SET SESSION debug='+d,rapid_auto_no_native_services';
 SET GLOBAL rapid_resource_isolation=AUTO;
+# CPU topology/service prerequisites can select an earlier fallback reason.
+# Keep SOFT admission, query results and DBA group preservation checked.
+--replace_column 2 IGNORE
 SELECT VARIABLE_VALUE LIKE '%effective=SOFT%' AS soft_fallback,
        VARIABLE_VALUE LIKE '%native resource services unavailable%' AS reason_reported
 FROM performance_schema.global_status WHERE VARIABLE_NAME='rapid_resource_status';
@@ -29,6 +32,7 @@ SET GLOBAL rapid_resource_isolation=OFF;
 SET SESSION debug=@old_debug;
 SET SESSION debug='+d,rapid_auto_bind_denied';
 SET GLOBAL rapid_resource_isolation=AUTO;
+--replace_column 2 IGNORE
 SELECT VARIABLE_VALUE LIKE '%effective=SOFT%' AS soft_fallback,
        VARIABLE_VALUE LIKE '%CPU affinity permission denied%' AS reason_reported
 FROM performance_schema.global_status WHERE VARIABLE_NAME='rapid_resource_status';
@@ -36,6 +40,7 @@ SET GLOBAL rapid_resource_isolation=OFF;
 SET SESSION debug=@old_debug;
 CREATE RESOURCE GROUP __rapid_auto_tp TYPE=USER;
 SET GLOBAL rapid_resource_isolation=AUTO;
+--replace_column 2 IGNORE
 SELECT VARIABLE_VALUE LIKE '%effective=SOFT%' AS soft_fallback,
        VARIABLE_VALUE LIKE '%reserved AUTO resource group name%' AS reason_reported
 FROM performance_schema.global_status WHERE VARIABLE_NAME='rapid_resource_status';
@@ -44,6 +49,7 @@ DROP RESOURCE GROUP __rapid_auto_tp;
 CREATE RESOURCE GROUP ri_auto_dba TYPE=USER;
 SET RESOURCE GROUP ri_auto_dba;
 SET GLOBAL rapid_resource_isolation=AUTO;
+--replace_column 2 IGNORE
 SELECT VARIABLE_VALUE LIKE '%effective=SOFT%' AS soft_fallback,
        VARIABLE_VALUE LIKE '%DBA resource group assignment%' AS reason_reported
 FROM performance_schema.global_status WHERE VARIABLE_NAME='rapid_resource_status';

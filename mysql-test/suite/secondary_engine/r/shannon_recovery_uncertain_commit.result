@@ -13,9 +13,14 @@ DELETE FROM t WHERE id=2;
 COMMIT;
 # Kill and restart: --rapid_reload_on_restart=ON
 USE sh_recovery_uncertain;
+include/wait_for_pattern_in_file.inc [sh_recovery_uncertain.t recovery eligibility is revoked or cannot be verified; automatic recovery stopped]
+SELECT COUNT(*) AS automatically_loaded FROM performance_schema.rpd_table_id WHERE SCHEMA_NAME='sh_recovery_uncertain' AND TABLE_NAME='t';
+automatically_loaded
+0
 SELECT VARIABLE_VALUE FROM performance_schema.global_status WHERE VARIABLE_NAME='rapid_recovery_primary_reloads';
 VARIABLE_VALUE
-1
+0
+ALTER TABLE t SECONDARY_LOAD;
 SET use_secondary_engine=OFF;
 SELECT id,v FROM t ORDER BY id;
 id	v

@@ -30,6 +30,7 @@
  * table.
  */
 #include "storage/rapid_engine/imcs/table.h"
+#include "scope_guard.h"
 
 #include <algorithm>
 #include <chrono>
@@ -1369,6 +1370,8 @@ void Table::update_statistics(bool force) {
 }
 
 size_t Table::garbage_collect(uint64 min_active_scn) {
+  // A queued task's retention watermark may be stale by the time it runs.
+  min_active_scn = std::min(min_active_scn, TransactionCoordinator::instance().get_gc_safe_scn());
   size_t total_freed = 0;
 
   // 1. Snapshot the IMCU list under a shared lock to avoid data race with compact().
@@ -1385,12 +1388,15 @@ size_t Table::garbage_collect(uint64 min_active_scn) {
     // this IMCU and start mutating while the purge ran; try_acquire_reader()
     // tests and reserves in one step, and the pin is dropped afterwards.
     if (!imcu->try_acquire_reader()) continue;
-    total_freed += imcu->garbage_collect(min_active_scn);
-    imcu->release_reader();
+    auto unpin = create_scope_guard([&] { imcu->release_reader(); });
+    {
+      std::unique_lock mutation_lock(imcu->mutation_mutex());
+      total_freed += imcu->garbage_collect(min_active_scn);
+    }
   }
 
-  // 3. update global version count.
-  m_metadata.version_count.fetch_sub(total_freed);
+  // CU purge returns versions and varlen reclaim returns blocks; neither is
+  // the table's deleted-row count. Do not subtract mixed units from it.
 
   return total_freed;
 }

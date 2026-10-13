@@ -1,0 +1,9 @@
+# Copyright (c) 2026, Shannon Data AI and/or its affiliates.
+--loose-rapid_schema_embedding=OFF
+--log-bin
+--binlog-format=ROW
+--binlog-row-image=FULL
+--binlog-row-metadata=FULL
+--sync-binlog=1
+--innodb-flush-log-at-trx-commit=1
+--debug=d,rapid_committed_catalog_bad_alloc

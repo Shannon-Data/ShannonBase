@@ -1,0 +1,33 @@
+# Copyright (c) 2026, Shannon Data AI and/or its affiliates.
+--source include/have_debug.inc
+--disable_query_log
+--disable_result_log
+SET use_secondary_engine=OFF;
+CREATE TABLE review_timeout(id INT PRIMARY KEY,v INT) SECONDARY_ENGINE=rapid;
+INSERT INTO review_timeout VALUES(1,10);
+ALTER TABLE review_timeout SECONDARY_LOAD;
+SET use_secondary_engine=FORCED;
+SELECT v FROM review_timeout;
+SET use_secondary_engine=OFF;
+SET GLOBAL debug='+d,secondary_engine_rapid_propagation_stall';
+UPDATE review_timeout SET v=11;
+SET use_secondary_engine=FORCED;
+SET @started=NOW(6);
+--error ER_SECONDARY_ENGINE
+SELECT v FROM review_timeout;
+SET @scan_elapsed=TIMESTAMPDIFF(MICROSECOND,@started,NOW(6));
+SET @started=NOW(6);
+--error ER_SECONDARY_ENGINE_PLUGIN
+SELECT COUNT(*) FROM review_timeout;
+SET @count_elapsed=TIMESTAMPDIFF(MICROSECOND,@started,NOW(6));
+SET GLOBAL debug='-d,secondary_engine_rapid_propagation_stall';
+--sleep 7
+--enable_result_log
+--enable_query_log
+SELECT @scan_elapsed < 2000000 AS scan_bounded,@count_elapsed < 2000000 AS count_bounded;
+SELECT v FROM review_timeout;
+--disable_query_log
+SET use_secondary_engine=OFF;
+ALTER TABLE review_timeout SECONDARY_UNLOAD;
+DROP TABLE review_timeout;
+--enable_query_log

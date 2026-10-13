@@ -1,0 +1,52 @@
+# Copyright (c) 2026, Shannon Data AI and/or its affiliates.
+--source include/have_debug.inc
+--disable_query_log
+SET use_secondary_engine=OFF;
+SET GLOBAL rapid_max_purger_timeout=1;
+SET GLOBAL rapid_gc_interval_scn=1;
+CREATE TABLE review_gc(id INT PRIMARY KEY,v INT) SECONDARY_ENGINE=rapid;
+INSERT INTO review_gc VALUES(1,10);
+ALTER TABLE review_gc SECONDARY_LOAD;
+--connect (old,localhost,root,,test)
+SET use_secondary_engine=OFF;
+# Build the RR view through InnoDB alone, without the Rapid snapshot callback.
+START TRANSACTION;
+SELECT v INTO @old_value FROM review_gc;
+--connection default
+--let $runs_before= query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_gc_total_runs', Value, 1)
+--let $purged_before= query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_gc_total_purged_versions', Value, 1)
+--let $i= 40
+while ($i) {
+  UPDATE review_gc SET v=v+1;
+  --dec $i
+}
+SET use_secondary_engine=FORCED;
+SELECT v INTO @new_value FROM review_gc;
+SET use_secondary_engine=OFF;
+--let $wait_condition= SELECT VARIABLE_VALUE > $runs_before FROM performance_schema.global_status WHERE VARIABLE_NAME='rapid_gc_total_runs'
+--source include/wait_condition.inc
+--let $purged_now= query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_gc_total_purged_versions', Value, 1)
+--let $assert_text= Primary-only old ReadView must protect Rapid versions
+--let $assert_cond= $purged_now = $purged_before
+--source include/assert.inc
+--connection old
+SET use_secondary_engine=FORCED;
+--enable_query_log
+SELECT v FROM review_gc;
+--disable_query_log
+COMMIT;
+SET use_secondary_engine=OFF;
+--connection default
+--let $wait_condition= SELECT VARIABLE_VALUE > $purged_before FROM performance_schema.global_status WHERE VARIABLE_NAME='rapid_gc_total_purged_versions'
+--source include/wait_condition.inc
+SET use_secondary_engine=FORCED;
+--enable_query_log
+SELECT v FROM review_gc;
+--disable_query_log
+SET use_secondary_engine=OFF;
+ALTER TABLE review_gc SECONDARY_UNLOAD;
+DROP TABLE review_gc;
+SET GLOBAL rapid_max_purger_timeout=DEFAULT;
+SET GLOBAL rapid_gc_interval_scn=DEFAULT;
+--disconnect old
+--enable_query_log

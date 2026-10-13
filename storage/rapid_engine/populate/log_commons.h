@@ -51,7 +51,10 @@
  * change_record_buff_t is self-describing through Source::COPY_INFO or
  * Source::REDO_LOG and the worker dispatches directly from that source.
  *
- * COPY_INFO is the current real-time producer. The REDO parser/dispatch entry is
+ * COPY_INFO row images can be produced by notification hooks or committed
+ * binlog decoding. CopyInfoMode travels with each record and preserves its
+ * transaction and backpressure semantics independently of the configured backend.
+ * The REDO parser/dispatch entry is
  * retained so redo-based or mixed-source propagation can be connected without
  * changing the buffer ABI. If both producers feed the buffer, the resulting
  * stream is naturally hybrid; no separate HYBRID mode state is required.
@@ -127,14 +130,31 @@ namespace Populate {
 // running flag of pop thread.
 extern std::atomic<bool> shannon_propagation_thread_started;
 
-// The source tag is the single dispatch discriminator for buffered changes.
-// There is intentionally no independent global propagation-mode state.
+// Source selects the record format/parser; COPY_INFO has two producer modes.
 enum class Source : uint8 {
   UN_KNOWN = 0,
-  REDO_LOG,        /** serialized InnoDB redo/mtr records */
-  COPY_INFO,       /** direct SQL/InnoDB row-image DML notification */
-  COMMITTED_BINLOG /** recovery-only committed row images */
+  REDO_LOG, /** serialized InnoDB redo/mtr records */
+  COPY_INFO /** detached MySQL row images from notification or committed binlog */
 };
+
+enum class CopyInfoMode : uint8 { NOTIFICATION = 0, COMMITTED_BINLOG };
+
+// Loads and unloads hold shared ownership through publication or worker shutdown.
+// A mode change takes exclusive ownership and requires no loaded tables or active
+// propagation. try_lock in the sysvar callbacks avoids waiting while holding
+// MySQL global system-variable locks.
+inline std::shared_mutex propagation_mode_mutex;
+
+// The configured backend is sampled at load admission and stays fixed until
+// all tables have been unloaded and propagation has stopped.
+inline std::atomic<CopyInfoMode> configured_change_propagation_mode{CopyInfoMode::NOTIFICATION};
+
+constexpr bool propagation_query_supported(CopyInfoMode mode, bool autocommit, bool explicit_transaction) {
+  return mode == CopyInfoMode::NOTIFICATION || (autocommit && !explicit_transaction);
+}
+constexpr bool propagation_backend_available(CopyInfoMode mode) {
+  return mode == CopyInfoMode::NOTIFICATION || mode == CopyInfoMode::COMMITTED_BINLOG;
+}
 
 // it's an iterterface struct to store all the info of changed data. such as where it comes from
 // data and its length, etc.
@@ -142,6 +162,7 @@ typedef struct SHANNON_ALIGNAS change_record_buff_t {
   using off_page_data_t =
       std::map<size_t, std::pair<size_t, std::shared_ptr<uchar[]>>>;  //<field_id, <length, off_page_data>>
   Source m_source;                                                    // data source
+  CopyInfoMode m_copy_info_mode{CopyInfoMode::NOTIFICATION};
   size_t m_size;
   enum class OperType : uint8 { UNSET = 0, INSERT, DELETE, UPDATE } m_oper{OperType::UNSET};  // oper type
   table_id_t m_table_id{0};
@@ -190,6 +211,10 @@ typedef struct SHANNON_ALIGNAS change_record_buff_t {
   change_record_buff_t(change_record_buff_t &&other) noexcept = default;
   change_record_buff_t &operator=(change_record_buff_t &&other) noexcept = default;
   ~change_record_buff_t() = default;
+
+  inline bool is_committed_binlog() const noexcept {
+    return m_source == Source::COPY_INFO && m_copy_info_mode == CopyInfoMode::COMMITTED_BINLOG;
+  }
 
   inline uchar *get_buff0() const { return m_buff0.get(); }
   inline uchar *get_buff1() const { return m_buff1.get(); }

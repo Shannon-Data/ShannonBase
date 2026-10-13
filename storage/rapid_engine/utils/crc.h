@@ -30,9 +30,12 @@
 #include <cstring>
 
 #include "storage/rapid_engine/include/rapid_const.h"
+#if defined(SHANNON_X86_PLATFORM) && (defined(__GNUC__) || defined(__clang__))
+#include <nmmintrin.h>
+#define SHANNON_RUNTIME_CRC32 1
+#endif
 namespace ShannonBase {
 namespace Utils {
-#if !defined(SHANNON_CRC32_HW_SUPPORTED)
 // Software table (CRC32C)
 static const std::array<uint32_t, 256> &crc32c_table() {
   static const std::array<uint32_t, 256> table = []() {
@@ -48,19 +51,18 @@ static const std::array<uint32_t, 256> &crc32c_table() {
   }();
   return table;
 }
-#endif
 
-#if defined(SHANNON_CRC32_HW_SUPPORTED)
+#if defined(SHANNON_RUNTIME_CRC32) || defined(SHANNON_CRC32_HW_SUPPORTED)
+#if defined(SHANNON_RUNTIME_CRC32)
 __attribute__((target("sse4.2")))
 #endif
 inline uint32_t
-crc32c_compute(const void *data, size_t len, uint32_t seed) {
+crc32c_hardware(const void *data, size_t len, uint32_t seed) {
   const uint8_t *p = static_cast<const uint8_t *>(data);
   uint32_t crc = ~seed;
 
-#if defined(SHANNON_CRC32_HW_SUPPORTED)
   // ---- 64-bit fast path ----
-#if defined(SHANNON_CRC32_U64_SUPPORTED)
+#if defined(SHANNON_CRC32_U64_SUPPORTED) || defined(__x86_64__)
   uint64_t crc64 = crc;
 
   while (len >= 8) {
@@ -86,14 +88,27 @@ crc32c_compute(const void *data, size_t len, uint32_t seed) {
     crc = _mm_crc32_u8(crc, *p++);
   }
 
-#else
-  const auto &table = crc32c_table();
-  while (len--) {
-    crc = (crc >> 8) ^ table[(crc ^ *p++) & 0xFF];
-  }
-#endif
   return ~crc;
 }
+#endif
+
+inline uint32_t crc32c_compute(const void *data, size_t len, uint32_t seed) {
+#if defined(SHANNON_RUNTIME_CRC32)
+  static const bool supported = [] {
+    __builtin_cpu_init();
+    return __builtin_cpu_supports("sse4.2") != 0;
+  }();
+  if (supported) return crc32c_hardware(data, len, seed);
+#elif defined(SHANNON_CRC32_HW_SUPPORTED)
+  return crc32c_hardware(data, len, seed);
+#endif
+  const auto *p = static_cast<const uint8_t *>(data);
+  uint32_t crc = ~seed;
+  const auto &table = crc32c_table();
+  while (len--) crc = (crc >> 8) ^ table[(crc ^ *p++) & 0xFF];
+  return ~crc;
+}
+
 }  // namespace Utils
 }  // namespace ShannonBase
 #endif  // __SHANNONBASE_CRC_H__

@@ -24,6 +24,7 @@
    Copyright (c) 2023, 2024, 2025 Shannon Data AI and/or its affiliates.
 */
 #include "storage/rapid_engine/imcs/imcu.h"
+#include "storage/rapid_engine/monitor/rapid_monitor.h"
 
 #include <limits.h>
 #include <chrono>
@@ -1129,38 +1130,29 @@ bool Imcu::rollback_transaction(Transaction::ID txn_id) {
 }
 
 size_t Imcu::garbage_collect(uint64 min_active_scn) {
-  size_t freed = 0;
-  // 1. purge TxnJ.
-  if (m_header.txn_journal) freed += m_header.txn_journal->purge(min_active_scn);
-  // 2. clear version of every column.
-  for (auto &[col_idx, cu] : m_column_units) {
-    if (cu) {  // Add null check
-      freed += cu->purge_versions(nullptr, min_active_scn);
-    }
-  }
-  // 3. return varlen blocks whose values are all dead.
-  //
-  // Retiring a varlen value only decrements its block's live count; the block
-  // itself goes back to the table's sub-pool in VarlenDataPool::reclaim(),
-  // which until now had no caller at all. That left an UPDATE/DELETE workload
-  // on a VARCHAR or TEXT column unable to reuse a byte of what it retired --
-  // and a sub-pool is carved from the shared pool once and never expands, so
-  // the table eventually ran out of room while holding nothing but garbage.
-  // It also left m_retired_refs, whose only pruning happens inside reclaim(),
-  // growing one entry per retired value for the life of the table.
-  //
-  // This runs after purge_versions() on purpose: a value stays referenced
-  // until the version that holds it is gone, so reclaiming first would find
-  // every block still live.
-  for (auto &[col_idx, cu] : m_column_units) {
-    if (cu && cu->has_varlen_pool()) {
-      freed += cu->get_varlen_pool()->reclaim();
-    }
-  }
-  // 4. update statistics.
-  m_header.version_count = 0;  // estimate_version_count();
+  const auto start = std::chrono::steady_clock::now();
+  const auto &cfg = shannon_rpd_engine_cfg;
+  size_t versions = m_header.txn_journal ? m_header.txn_journal->get_entry_count() : 0;
+  for (const auto &[column, cu] : m_column_units)
+    if (cu) versions += cu->get_version_count(nullptr);
+  const size_t rows = get_row_count();
+  if (versions < cfg.gc_min_version || (rows && static_cast<double>(versions) / rows < cfg.gc_version_ratio_threshold))
+    return 0;
+
+  const size_t limit = static_cast<size_t>(std::min<ulonglong>(cfg.gc_batch_size, SIZE_MAX));
+  size_t purged = 0;
+  if (m_header.txn_journal) purged = m_header.txn_journal->purge(min_active_scn, limit);
+  for (auto &[column, cu] : m_column_units)
+    if (cu && purged < limit) purged += cu->purge_versions(nullptr, min_active_scn, limit - purged);
+
+  // Reclaimed varlen blocks have a different unit from MVCC versions.
+  for (auto &[column, cu] : m_column_units)
+    if (cu && cu->has_varlen_pool()) cu->get_varlen_pool()->reclaim();
   m_header.last_gc_time = std::chrono::system_clock::now();
-  return freed;
+  const auto duration =
+      std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count();
+  RapidMonitor::rapid_counter_gc_run(0, purged, min_active_scn, duration);
+  return purged;
 }
 
 std::shared_ptr<Imcu> Imcu::compact() {

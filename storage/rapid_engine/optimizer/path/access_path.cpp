@@ -385,13 +385,12 @@ unique_ptr_destroy_only<RowIterator> PathGenerator::CreateIteratorFromAccessPath
   WalkAccessPaths(
       top_path, top_join, WalkAccessPathPolicy::ENTIRE_TREE, [&memory_operators](const AccessPath *path, const JOIN *) {
         if (path->vectorized && (path->type == AccessPath::SORT || path->type == AccessPath::HASH_JOIN ||
-                                 path->type == AccessPath::AGGREGATE || path->type == AccessPath::TEMPTABLE_AGGREGATE))
+                                 path->type == AccessPath::AGGREGATE || path->type == AccessPath::TEMPTABLE_AGGREGATE ||
+                                 path->type == AccessPath::WINDOW))
           ++memory_operators;
         return false;
       });
-  ResMgmt::PlanningMemoryScope memory_scope(
-      thd, static_cast<size_t>(std::min<ulonglong>(shannon_rpd_engine_cfg.query_memory_size_max, SIZE_MAX)),
-      memory_operators);
+  ResMgmt::PlanningMemoryScope memory_scope(thd, ResMgmt::system_memory_limits().query, memory_operators);
 
   unique_ptr_destroy_only<RowIterator> ret;
   Mem_root_array<IteratorToBeCreated> todo(mem_root);

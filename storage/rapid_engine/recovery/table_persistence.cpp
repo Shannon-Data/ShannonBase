@@ -22,6 +22,7 @@
    Copyright (c) 2023, 2024, Shannon Data AI and/or its affiliates.
 */
 #include "storage/rapid_engine/recovery/table_persistence.h"
+#include "storage/rapid_engine/utils/try_operation.h"
 
 #include <algorithm>
 #include <atomic>
@@ -47,12 +48,15 @@
 #include <unistd.h>  // fdatasync, close
 #endif
 
+#include "scope_guard.h"
 #include "sql/log.h"                          // sql_print_warning
 #include "storage/innobase/include/ut0dbg.h"  // DBUG_PRINT, UNIV_SQL_NULL
+#include "storage/rapid_engine/autopilot/loader.h"
 #include "storage/rapid_engine/imcs/cu.h"
 #include "storage/rapid_engine/imcs/imcu.h"
 #include "storage/rapid_engine/imcs/table.h"
 #include "storage/rapid_engine/recovery/binlog_recovery.h"
+#include "storage/rapid_engine/recovery/native_stream.h"
 #include "storage/rapid_engine/utils/crc.h"
 
 namespace ShannonBase {
@@ -165,7 +169,13 @@ TablePersistenceManager::TablePersistenceManager(const std::string &dir, const s
       m_store(Recovery::CheckpointStores::current()) {}
 bool TablePersistenceManager::open() {
   if (!Recovery::DurableFileSystem::create_directories(m_partition_dir)) return false;
-  bool restored = m_store->restore(m_db_name, m_tbl_name, m_partition_dir);
+  // A provider restore may replace the table directory. Check local revocation
+  // evidence first so restore cannot erase the reason this image was rejected.
+  if (recovery_tainted()) {
+    require_recovery();
+    return true;
+  }
+  bool restored = Utils::try_bool_operation([&] { return m_store->restore(m_db_name, m_tbl_name, m_partition_dir); });
   DBUG_EXECUTE_IF("rapid_checkpoint_store_restore_error", { restored = false; });
   if (!restored) {
     require_recovery();
@@ -176,19 +186,114 @@ bool TablePersistenceManager::open() {
 bool TablePersistenceManager::reset_epoch() {
   std::lock_guard checkpoint(m_checkpoint_mutex);
   std::lock_guard gate(m_notifications.mutex());
+  require_recovery();
   if (!m_store->erase(m_db_name, m_tbl_name)) return false;
   for (auto generation : list_manifest_generations())
     if (!remove_generation(generation)) return false;
+  std::error_code state_error;
+  const bool removed = fs::remove(table_state_path(), state_error);
+  if (state_error || (removed && !Recovery::DurableFileSystem::sync_directory(table_state_path()))) return false;
   m_notifications.reset();
   m_recovery_required.store(false);
   clear_recovery_taint();
   return true;
 }
-bool TablePersistenceManager::revoke_fast_recovery() {
-  m_notifications.invalidate();
-  require_recovery();
-  return mark_recovery_taint();
+
+namespace {
+constexpr uint32_t TABLE_STATE_MAGIC = 0x53545052u;
+constexpr uint16_t TABLE_STATE_VERSION = 1u;
+constexpr size_t TABLE_STATE_BYTES = 44;
+bool valid_table_state(const RecoveryTableState &state) {
+  if (state.persisted_scn < state.snapshot_scn ||
+      state.stale_reason > static_cast<uint8_t>(stale_reason_t::UNIDENTIFIED_ERROR))
+    return false;
+  return (state.state == PersistedLoadState::AVAILABLE && state.stale_reason == 0) ||
+         (state.state == PersistedLoadState::STALE && state.stale_reason != 0);
 }
+}  // namespace
+
+bool TablePersistenceManager::persist_table_state(const RecoveryTableState &state) {
+  std::lock_guard checkpoint(m_checkpoint_mutex);
+  return persist_table_state_locked(state);
+}
+
+bool TablePersistenceManager::persist_table_state_locked(RecoveryTableState state) {
+  if (!valid_table_state(state)) return false;
+  if (state.state == PersistedLoadState::STALE) require_recovery();
+  if (recovery_required() && state.state == PersistedLoadState::AVAILABLE) {
+    state.state = PersistedLoadState::STALE;
+    state.stale_reason = static_cast<uint8_t>(stale_reason_t::RELOAD_REQUIRED);
+  }
+  DBUG_EXECUTE_IF("rapid_table_state_write_error", { return false; });
+  std::string bytes;
+  append_pod(bytes, TABLE_STATE_MAGIC);
+  append_pod(bytes, TABLE_STATE_VERSION);
+  append_pod(bytes, state.table_id);
+  append_pod(bytes, state.generation);
+  append_pod(bytes, state.snapshot_scn);
+  append_pod(bytes, state.persisted_scn);
+  append_pod(bytes, static_cast<uint8_t>(state.state));
+  append_pod(bytes, state.stale_reason);
+  append_pod(bytes, Utils::crc32c_compute(bytes.data(), bytes.size(), 0));
+  if (!Recovery::DurableFileSystem::create_directories(m_partition_dir)) return false;
+  return Recovery::DurableFileSystem::persist_file(table_state_path(), bytes);
+}
+
+bool TablePersistenceManager::checkpoint_table_state(uint64_t table_id) {
+  std::lock_guard checkpoint(m_checkpoint_mutex);
+  auto info = RpdMirror::Registry::find(m_db_name + "." + m_tbl_name);
+  if (!info) return true;
+  const auto meta = info->meta_copy();
+  const bool stale = recovery_required() || meta.load_status == load_status_t::STALE_RPDGSTABSTATE;
+  // Loading/recovery progress is volatile; only stable terminal states are
+  // checkpointed. reset_epoch() removes old state before an explicit load.
+  if (!stale && meta.load_status != load_status_t::AVAIL_RPDGSTABSTATE) return true;
+  RecoveryTableState state;
+  state.table_id = table_id;
+  state.generation = latest_generation();
+  state.snapshot_scn = meta.snapshot_scn;
+  state.persisted_scn = meta.persisted_scn;
+  // An initial load has no persisted frontier until its first data checkpoint.
+  if (state.persisted_scn == 0) state.snapshot_scn = 0;
+  if (stale) {
+    state.state = PersistedLoadState::STALE;
+    state.stale_reason = static_cast<uint8_t>(meta.stale_reason == stale_reason_t::OK ? stale_reason_t::RELOAD_REQUIRED
+                                                                                      : meta.stale_reason);
+  }
+  return persist_table_state_locked(state);
+}
+
+Result<RecoveryTableState> TablePersistenceManager::load_table_state() const {
+  RecoveryTableState state;
+  std::error_code ec;
+  if (!fs::exists(table_state_path(), ec)) return {ec ? ErrorCode::IO_ERROR : ErrorCode::NOT_FOUND, state};
+  std::ifstream input(table_state_path(), std::ios::binary);
+  if (!input.is_open()) return {ErrorCode::IO_ERROR, state};
+  char bytes[TABLE_STATE_BYTES];
+  if (!input.read(bytes, sizeof(bytes)) || input.peek() != std::char_traits<char>::eof() || input.bad())
+    return {ErrorCode::CORRUPTION, state};
+  ByteReader reader{bytes, sizeof(bytes)};
+  uint32_t magic = 0, crc = 0;
+  uint16_t version = 0;
+  uint8_t status = 0;
+  if (!reader.read_pod(magic) || !reader.read_pod(version) || magic != TABLE_STATE_MAGIC ||
+      version != TABLE_STATE_VERSION || !reader.read_pod(state.table_id) || !reader.read_pod(state.generation) ||
+      !reader.read_pod(state.snapshot_scn) || !reader.read_pod(state.persisted_scn) || !reader.read_pod(status) ||
+      !reader.read_pod(state.stale_reason) || !reader.read_pod(crc) ||
+      crc != Utils::crc32c_compute(bytes, sizeof(bytes) - sizeof(crc), 0))
+    return {ErrorCode::CORRUPTION, state};
+  state.state = static_cast<PersistedLoadState>(status);
+  if (!valid_table_state(state)) return {ErrorCode::CORRUPTION, state};
+  return {ErrorCode::OK, state};
+}
+bool TablePersistenceManager::revoke_fast_recovery() noexcept {
+  // Keep live reads/checkpoints fenced even if invalidation or persistence fails.
+  require_recovery();
+  const bool disabled = Utils::try_operation([&] { m_notifications.invalidate(); });
+  const bool durable = mark_recovery_taint();
+  return disabled && durable;
+}
+
 namespace {
 /** Write a marker: content is irrelevant, durable existence is the fact. */
 bool persist_taint_marker(const fs::path &path) {
@@ -200,23 +305,47 @@ bool persist_taint_marker(const fs::path &path) {
 
 bool taint_marker_present(const fs::path &path) {
   std::error_code ec;
+  const auto directory = fs::status(path.parent_path(), ec);
+  if (ec) return ec != std::errc::no_such_file_or_directory;
+  if (!fs::exists(directory)) return false;
+  if (!fs::is_directory(directory)) return true;
   const bool present = fs::exists(path, ec);
-  return present && !ec;
+  // An unreadable marker directory cannot certify an untainted image.
+  return present || bool(ec);
 }
 }  // namespace
 
-bool TablePersistenceManager::mark_recovery_taint() {
-  if (!m_store->invalidate(m_db_name, m_tbl_name)) return false;
-  bool primary_unwritable = false;
-  DBUG_EXECUTE_IF("rapid_taint_marker_primary_error", { primary_unwritable = true; });
-  if (!primary_unwritable && persist_taint_marker(recovery_taint_path())) return true;
+bool TablePersistenceManager::mark_recovery_taint() noexcept {
+  const bool invalidated = Utils::try_bool_operation([&] {
+    DBUG_EXECUTE_IF("rapid_checkpoint_store_invalidate_error", { return false; });
+    return m_store->invalidate(m_db_name, m_tbl_name);
+  });
+  const bool primary = Utils::try_bool_operation([&] {
+    DBUG_EXECUTE_IF("rapid_taint_marker_primary_error", { return false; });
+    return persist_taint_marker(recovery_taint_path());
+  });
+  if (primary) return invalidated;
   // The table's own directory could not record it; the separate tree may still
   // be able to, and one readable copy is all recovery needs.
-  return persist_taint_marker(recovery_taint_alt_path());
+  const bool alternate = Utils::try_bool_operation([&] {
+    DBUG_EXECUTE_IF("rapid_taint_marker_alternate_error", { return false; });
+    return persist_taint_marker(recovery_taint_alt_path());
+  });
+  return invalidated && alternate;
 }
 
 bool TablePersistenceManager::recovery_tainted() const {
-  return taint_marker_present(recovery_taint_path()) || taint_marker_present(recovery_taint_alt_path());
+  bool tainted = true;
+  if (!Utils::try_operation([&] {
+        DBUG_EXECUTE_IF("rapid_taint_marker_inspect_error", { return; });
+        tainted = taint_marker_present(recovery_taint_path()) || taint_marker_present(recovery_taint_alt_path());
+        if (!tainted) {
+          const auto state = load_table_state();
+          tainted = state.ok() ? state.value.state == PersistedLoadState::STALE : state.error != ErrorCode::NOT_FOUND;
+        }
+      }))
+    return true;
+  return tainted;
 }
 
 void TablePersistenceManager::clear_recovery_taint() {
@@ -294,6 +423,8 @@ bool TablePersistenceManager::persist_manifest(const RecoveryManifest &manifest)
   append_pod(out, manifest.table_id);
   append_pod(out, manifest.generation);
   append_pod(out, manifest.schema_fingerprint);
+  append_pod(out, manifest.snapshot_scn);
+  append_pod(out, manifest.persisted_scn);
   append_str(out, manifest.binlog.file);
   append_pod(out, manifest.binlog.offset);
   append_str(out, manifest.binlog.prefix_digest);
@@ -328,10 +459,13 @@ Result<RecoveryManifest> TablePersistenceManager::load_manifest(uint64_t generat
   uint32_t magic = 0;
   uint16_t ver = 0;
   if (!r.read_pod(magic) || magic != MANIFEST_MAGIC) return {ErrorCode::CORRUPTION, m};
-  if (!r.read_pod(ver) || ver != MANIFEST_FORMAT_VER) return {ErrorCode::CORRUPTION, m};
+  if (!r.read_pod(ver) || (ver != 2u && ver != MANIFEST_FORMAT_VER)) return {ErrorCode::CORRUPTION, m};
   if (!r.read_pod(m.table_id)) return {ErrorCode::CORRUPTION, m};
   if (!r.read_pod(m.generation)) return {ErrorCode::CORRUPTION, m};
+  if (m.generation != generation) return {ErrorCode::CORRUPTION, m};
   if (!r.read_pod(m.schema_fingerprint)) return {ErrorCode::CORRUPTION, m};
+  if (ver >= 3u && (!r.read_pod(m.snapshot_scn) || !r.read_pod(m.persisted_scn) || m.persisted_scn < m.snapshot_scn))
+    return {ErrorCode::CORRUPTION, m};
   if (!r.read_str(m.binlog.file) || !r.read_pod(m.binlog.offset) || !r.read_str(m.binlog.prefix_digest) ||
       !m.binlog.valid())
     return {ErrorCode::CORRUPTION, m};
@@ -340,16 +474,25 @@ Result<RecoveryManifest> TablePersistenceManager::load_manifest(uint64_t generat
   if (!r.read_pod(count)) return {ErrorCode::CORRUPTION, m};
   if (count > (1u << 20)) return {ErrorCode::CORRUPTION, m};
   m.imcus.reserve(count);
+  std::unordered_set<uint32_t> imcu_ids;
   for (uint32_t i = 0; i < count; ++i) {
     ManifestImcuEntry e;
     uint8_t st = 0;
     if (!r.read_pod(e.imcu_id)) return {ErrorCode::CORRUPTION, m};
     if (!r.read_pod(st)) return {ErrorCode::CORRUPTION, m};
     e.state = static_cast<ManifestImcuState>(st);
+    if (e.state != ManifestImcuState::NEVER_CHECKPOINTED && e.state != ManifestImcuState::CHECKPOINTED)
+      return {ErrorCode::CORRUPTION, m};
+    if (!imcu_ids.insert(e.imcu_id).second) return {ErrorCode::CORRUPTION, m};
     if (!r.read_pod(e.snapshot_sequence)) return {ErrorCode::CORRUPTION, m};
     if (!r.read_pod(e.snapshot_size)) return {ErrorCode::CORRUPTION, m};
     if (!r.read_pod(e.snapshot_crc)) return {ErrorCode::CORRUPTION, m};
     if (!r.read_str(e.snapshot_file)) return {ErrorCode::CORRUPTION, m};
+    if (e.state == ManifestImcuState::CHECKPOINTED &&
+        (e.snapshot_size < SNAP_FILE_HEADER_SIZE || e.snapshot_file != "checkpoint-" + std::to_string(generation) +
+                                                                           "/imcu_" + std::to_string(e.imcu_id) +
+                                                                           ".snap"))
+      return {ErrorCode::CORRUPTION, m};
     m.imcus.push_back(std::move(e));
   }
 
@@ -500,11 +643,10 @@ bool TablePersistenceManager::read_imcu_metadata(std::istream &in, Imcu *imcu) c
   return in.good();
 }
 
-bool TablePersistenceManager::serialize_imcu(Imcu *imcu, uint64_t snapshot_sequence, std::string &out) const {
+bool TablePersistenceManager::serialize_imcu(Imcu *imcu, uint64_t snapshot_sequence, std::ostream &snap) const {
   const uint32_t imcu_id = imcu->get_imcu_id();
   const uint32_t col_count = static_cast<uint32_t>(imcu->get_column_count());
 
-  std::ostringstream snap(std::ios::binary);
   if (!write_snap_header(snap, imcu_id, col_count, snapshot_sequence)) return false;
   if (!write_imcu_metadata(snap, imcu)) return false;
 
@@ -522,7 +664,7 @@ bool TablePersistenceManager::serialize_imcu(Imcu *imcu, uint64_t snapshot_seque
     snap.write(reinterpret_cast<const char *>(&cu_size_placeholder), sizeof(cu_size_placeholder));
 
     auto data_start = snap.tellp();
-    const int ser_ret = cu->serialize(snap, row_count);
+    const int ser_ret = cu->serialize(snap, row_count, true);
     if (ser_ret != ShannonBase::SHANNON_SUCCESS) {
       DBUG_PRINT("cu_recovery", ("serialize_imcu: CU %u serialize failed", c));
       return false;
@@ -540,7 +682,6 @@ bool TablePersistenceManager::serialize_imcu(Imcu *imcu, uint64_t snapshot_seque
     DBUG_PRINT("cu_recovery", ("serialize_imcu: stream error"));
     return false;
   }
-  out = snap.str();
   return true;
 }
 
@@ -609,62 +750,89 @@ bool TablePersistenceManager::checkpoint(Imcu *trigger, uint64_t snapshot_sequen
     }
   }
 
+  std::vector<uint64_t> versions;
+  versions.reserve(imcus.size());
+  for (const auto &im : imcus) versions.push_back(im ? im->mutation_version() : 0);
   const uint64_t boundary = m_notifications.sequence();
   if (snapshot_sequence && snapshot_sequence != boundary) return false;
   auto position = m_notifications.position();
-  // The cut is now fixed: all IMCUs are frozen and no active/pending source
-  // notification preceded this boundary. Later producers may enqueue while
-  // serialization runs; their mutations wait on the IMCU/table locks and are
-  // replayed after this checkpoint's captured binlog position.
+  auto mirror = RpdMirror::Registry::find(m_db_name + "." + m_tbl_name);
+  const auto watermarks = mirror ? mirror->meta_copy() : rpd_table_meta_info_t{};
+  const uint64_t snapshot_scn = watermarks.snapshot_scn;
+  uint64_t persisted_scn = std::max(snapshot_scn, watermarks.persisted_scn);
+  for (const auto &im : imcus)
+    if (im) persisted_scn = std::max(persisted_scn, im->get_max_scn());
+  // Capture a tentative cut, then release mutation locks while streaming.
+  // Validation below rejects any generation changed after this boundary.
   notification_guard.unlock();
+  freeze_locks.clear();
+  // Optimistic cut: serialize one IMCU at a time, then validate that every
+  // mutation version and the source notification boundary stayed unchanged.
+  // A concurrent change discards the generation instead of freezing all CUs.
+  auto cleanup_tmp = create_scope_guard([&] { Recovery::DurableFileSystem::remove_directory(tmp_dir); });
   RecoveryManifest manifest;
   manifest.table_id = owner->meta().table_id;
   manifest.generation = gen;
   manifest.schema_fingerprint = compute_schema_fingerprint(owner->meta());
   manifest.binlog = position;
+  manifest.snapshot_scn = snapshot_scn;
+  manifest.persisted_scn = persisted_scn;
 
-  std::vector<std::pair<fs::path, std::string>> staged_snapshots;
   std::vector<fs::path> snap_files;
   snap_files.reserve(imcus.size());
-  for (const auto &im : imcus) {
+  for (size_t i = 0; i < imcus.size(); ++i) {
+    const auto &im = imcus[i];
     if (!im) continue;
-    std::string snap_data;
-    if (!serialize_imcu(im.get(), boundary, snap_data)) {
-      Recovery::DurableFileSystem::remove_directory(tmp_dir);
-      return false;
-    }
-
     const uint32_t imcu_id = im->get_imcu_id();
     const fs::path snap_file = tmp_dir / ("imcu_" + std::to_string(imcu_id) + ".snap");
+    std::fstream output(snap_file, std::ios::binary | std::ios::out | std::ios::trunc);
+    if (!output) return false;
+    std::error_code permission_error;
+    fs::permissions(snap_file, fs::perms::owner_read | fs::perms::owner_write, fs::perm_options::replace,
+                    permission_error);
+    if (permission_error) return false;
+    {
+      std::unique_lock lock(im->mutation_mutex());
+      if (im->mutation_version() != versions[i] || im->has_uncommitted_changes() ||
+          !serialize_imcu(im.get(), boundary, output))
+        return false;
+    }
+    output.close();
+    if (!output) return false;
     snap_files.push_back(snap_file);
-
     ManifestImcuEntry e;
     e.imcu_id = imcu_id;
     e.state = ManifestImcuState::CHECKPOINTED;
     e.snapshot_sequence = boundary;
-    e.snapshot_size = snap_data.size();
-    e.snapshot_crc = Utils::crc32c_compute(snap_data.data(), snap_data.size(), 0);
+    std::ifstream input(snap_file, std::ios::binary);
+    char buffer[64 * 1024];
+    uint32_t crc = 0;
+    while (input) {
+      input.read(buffer, sizeof(buffer));
+      const auto bytes = input.gcount();
+      if (bytes > 0) {
+        e.snapshot_size += bytes;
+        crc = Utils::crc32c_compute(buffer, bytes, crc);
+      }
+    }
+    if (!input.eof()) return false;
+    e.snapshot_crc = crc;
     e.snapshot_file = "checkpoint-" + std::to_string(gen) + "/imcu_" + std::to_string(imcu_id) + ".snap";
     manifest.imcus.push_back(std::move(e));
-    staged_snapshots.emplace_back(snap_file, std::move(snap_data));
   }
-
-  // The freeze is over: the snapshot bytes are fixed, so the per-file flushes --
-  // the expensive part, one fdatasync per IMCU -- run with no IMCU lock held.
+  // Acquire the notification gate before mutation locks, matching the cut's
+  // lock order. Hold every lock only for validation, with no serialization/I/O.
+  notification_guard.lock();
+  if (!m_notifications.quiescent() || m_notifications.sequence() != boundary) return false;
+  for (const auto &im : imcus)
+    if (im) freeze_locks.emplace_back(im->mutation_mutex());
+  for (size_t i = 0; i < imcus.size(); ++i)
+    if (imcus[i] && (imcus[i]->mutation_version() != versions[i] || imcus[i]->has_uncommitted_changes())) return false;
   freeze_locks.clear();
+  notification_guard.unlock();
   table_list_lock.unlock();
-  if (!Recovery::BinlogRecovery::certify(position)) {
-    Recovery::DurableFileSystem::remove_directory(tmp_dir);
-    return false;
-  }
+  if (!Recovery::BinlogRecovery::certify(position)) return false;
   manifest.binlog = position;
-  for (const auto &[path, data] : staged_snapshots) {
-    if (!Recovery::DurableFileSystem::write_file_buffered(path, data)) {
-      Recovery::DurableFileSystem::remove_directory(tmp_dir);
-      return false;
-    }
-  }
-  staged_snapshots.clear();
 
   for (const auto &snap_file : snap_files) {
     if (!Recovery::DurableFileSystem::sync_file(snap_file)) {
@@ -692,7 +860,11 @@ bool TablePersistenceManager::checkpoint(Imcu *trigger, uint64_t snapshot_sequen
     return false;
   }
 
-  if (!m_store->publish(m_db_name, m_tbl_name, gen, m_partition_dir)) {
+  const bool stored = Utils::try_bool_operation([&] {
+    DBUG_EXECUTE_IF("rapid_checkpoint_store_publish_error", { return false; });
+    return m_store->publish(m_db_name, m_tbl_name, gen, m_partition_dir);
+  });
+  if (!stored) {
     remove_generation(gen);
     return false;
   }
@@ -704,6 +876,9 @@ bool TablePersistenceManager::checkpoint(Imcu *trigger, uint64_t snapshot_sequen
       return false;
     }
     m_notifications.checkpoint_published(boundary);
+    // Publish monitoring progress only after the files, manifest and provider
+    // have committed. Notification sequence and SCN are different clocks.
+    if (mirror) mirror->with_meta([&](rpd_table_meta_info_t &meta) { meta.persisted_scn = persisted_scn; });
   }
   gc_old_generations();
   DBUG_PRINT("cu_recovery", ("checkpoint generation %llu committed (boundary=%llu)", (unsigned long long)gen,
@@ -745,14 +920,13 @@ void TablePersistenceManager::gc_old_generations() {
   (void)Recovery::DurableFileSystem::sync_directory(snap_base / "checkpoint-orphan");  // fsyncs snap_base
 }
 
-struct MemStreamBuf : std::streambuf {
-  MemStreamBuf(const char *data, size_t size) {
-    char *p = const_cast<char *>(data);
-    setg(p, p, p + size);
-  }
-};
-
 Result<uint64_t> TablePersistenceManager::load_snapshot(Imcu *imcu, uint64_t generation) {
+  Result<uint64_t> result{ErrorCode::IO_ERROR, 0};
+  if (!Utils::try_operation([&] { result = load_snapshot_impl(imcu, generation); })) return {ErrorCode::IO_ERROR, 0};
+  return result;
+}
+
+Result<uint64_t> TablePersistenceManager::load_snapshot_impl(Imcu *imcu, uint64_t generation) {
   if (!imcu) return {ErrorCode::INTERNAL, 0};
 
   uint32_t imcu_id = imcu->get_imcu_id();
@@ -763,6 +937,10 @@ Result<uint64_t> TablePersistenceManager::load_snapshot(Imcu *imcu, uint64_t gen
     // No snapshot file — cold start requiring primary reload.
     return {ErrorCode::NOT_FOUND, 0};
   }
+  snap.seekg(0, std::ios::end);
+  const auto snapshot_size = snap.tellg();
+  if (snapshot_size < static_cast<std::streamoff>(SNAP_FILE_HEADER_SIZE)) return {ErrorCode::CORRUPTION, 0};
+  snap.seekg(0, std::ios::beg);
 
   uint32_t snap_imcu_id = 0, col_count = 0;
   uint64_t snap_lsn = 0;
@@ -794,34 +972,37 @@ Result<uint64_t> TablePersistenceManager::load_snapshot(Imcu *imcu, uint64_t gen
       return {ErrorCode::CORRUPTION, 0};  // truncated
     }
 
-    if (cu_size == 0) continue;  // placeholder (non-secondary column, no CU)
+    auto *cu = imcu->get_cu(c);
+    if (cu_size == 0) {
+      // Only NOT_SECONDARY columns may omit their native payload.
+      if (cu) return {ErrorCode::CORRUPTION, 0};
+      continue;
+    }
 
     // Bound the allocation BEFORE trusting the persisted length.
-    if (cu_size > MAX_CU_SNAPSHOT_SIZE) {
+    const auto position = snap.tellg();
+    if (position < 0 || position > snapshot_size || cu_size > static_cast<uint64_t>(snapshot_size - position) ||
+        cu_size > MAX_CU_SNAPSHOT_SIZE) {
       DBUG_PRINT("cu_recovery", ("snapshot CU %u size %llu exceeds cap", c, (unsigned long long)cu_size));
       return {ErrorCode::CORRUPTION, 0};
     }
 
-    auto *cu = imcu->get_cu(c);
     if (!cu) {
       DBUG_PRINT("cu_recovery", ("snapshot CU %u has data but no live CU — conflict", c));
       return {ErrorCode::CONFLICT, 0};
     }
 
-    // Read exactly cu_size bytes into a buffer, then wrap in istringstream.
-    std::vector<char> cu_buf(cu_size);
-    if (!snap.read(cu_buf.data(), static_cast<std::streamsize>(cu_size))) {
-      return {ErrorCode::CORRUPTION, 0};
-    }
-
-    MemStreamBuf msb(cu_buf.data(), cu_size);
-    std::istream cu_in(&msb);
-    int deser_ret = cu->deserialize(cu_in);
-    if (deser_ret != ShannonBase::SHANNON_SUCCESS) {
+    // Keep native column boundaries without retaining a second whole-CU copy.
+    Recovery::NativeColumnStream column(snap.rdbuf(), cu_size);
+    std::istream cu_in(&column);
+    int deser_ret = cu->deserialize(cu_in, imcu->get_row_count());
+    if (deser_ret != ShannonBase::SHANNON_SUCCESS || column.remaining() != 0) {
       DBUG_PRINT("cu_recovery", ("CU %u deserialize failed", c));
       return {ErrorCode::CORRUPTION, 0};
     }
   }
+
+  if (snap.peek() != std::char_traits<char>::eof() || snap.bad()) return {ErrorCode::CORRUPTION, 0};
 
   DBUG_PRINT("cu_recovery",
              ("loaded snapshot for IMCU %u  snap_lsn=%llu  cols=%u", imcu_id, (unsigned long long)snap_lsn, col_count));
@@ -846,7 +1027,10 @@ Result<size_t> TablePersistenceManager::recover(const std::vector<Imcu *> &imcus
 
       bool generation_valid = true;
       for (const auto &e : mres.value.imcus) {
-        if (e.state != ManifestImcuState::CHECKPOINTED) continue;
+        if (e.state != ManifestImcuState::CHECKPOINTED) {
+          generation_valid = false;
+          break;
+        }
         std::ifstream snap(snap_path(*it, e.imcu_id), std::ios::binary);
         if (!snap.is_open()) {
           generation_valid = false;
@@ -891,6 +1075,16 @@ Result<size_t> TablePersistenceManager::recover(const std::vector<Imcu *> &imcus
   }
 
   if (!has_manifest) return {ErrorCode::NOT_FOUND, 0};
+  // The generation describes the whole table. A fallback generation with a
+  // different topology must not be partially loaded into objects constructed
+  // from the newest manifest; take the source reload lane instead.
+  if (manifest.imcus.size() != imcus.size()) return {ErrorCode::CONFLICT, 0};
+  std::unordered_set<uint32_t> requested_ids;
+  for (const auto *imcu : imcus) {
+    if (!imcu || !requested_ids.insert(imcu->get_imcu_id()).second) return {ErrorCode::CONFLICT, 0};
+  }
+  for (const auto &entry : manifest.imcus)
+    if (!requested_ids.count(entry.imcu_id)) return {ErrorCode::CONFLICT, 0};
   if (has_manifest) {
     uint64_t current_table_id = 0;
     uint64_t current_fp = 0;

@@ -1,0 +1,9 @@
+--log-bin
+--binlog-format=ROW
+--binlog-row-image=FULL
+--sync-binlog=1
+--innodb-flush-log-at-trx-commit=1
+--rapid-reload-on-restart=ON
+--rapid-change-propagation-mode=COMMITTED_BINLOG
+--loose-rapid_schema_embedding=OFF
+--debug=d,rapid_table_state_test_tick

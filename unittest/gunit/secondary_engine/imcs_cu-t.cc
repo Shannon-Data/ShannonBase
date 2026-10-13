@@ -17,16 +17,143 @@
 #include <filesystem>
 #include <fstream>
 #include <memory>
+#include <sstream>
 
 #include "storage/rapid_engine/imcs/col0stats.h"
+#include "storage/rapid_engine/imcs/cu.h"
 #include "storage/rapid_engine/imcs/predicate.h"
-#include "storage/rapid_engine/recovery/table_persistence.h"
 #include "storage/rapid_engine/imcs/table0meta.h"
-#include "storage/rapid_engine/utils/memory_pool.h"
+#include "storage/rapid_engine/recovery/table_persistence.h"
 #include "storage/rapid_engine/utils/crc.h"
+#include "storage/rapid_engine/utils/memory_pool.h"
 
 namespace ShannonBase {
 namespace Imcs {
+
+namespace {
+std::shared_ptr<Utils::MemoryPool> native_pool() {
+  Utils::MemoryPool::Config config(64 * 1024 * 1024);
+  config.small_pool_ratio = 0.5;
+  config.auto_defragmentation = false;
+  return std::make_shared<Utils::MemoryPool>(config);
+}
+FieldMetadata native_field() {
+  FieldMetadata field;
+  field.field_id = 0;
+  field.type = MYSQL_TYPE_LONG;
+  field.pack_length = 4;
+  field.normalized_length = 4;
+  field.is_secondary_field = true;
+  field.encoding = Compress::ENCODING_TYPE::NONE;
+  field.compression_level = Compress::COMPRESS_LEVEL::NONE;
+  return field;
+}
+// Independent CU v2 record: two fixed-width integer slots and a valid CRC.
+std::string native_record(bool empty = false) {
+  std::string bytes;
+  auto pod = [&](auto value) { bytes.append(reinterpret_cast<const char *>(&value), sizeof(value)); };
+  pod(CU_SERIAL_MAGIC);
+  pod(uint16_t{2});
+  pod(uint8_t{0});   // flags
+  pod(uint32_t{0});  // column ID
+  pod(static_cast<uint8_t>(MYSQL_TYPE_LONG));
+  pod(static_cast<uint8_t>(Compress::ENCODING_TYPE::NONE));
+  pod(uint8_t{0});  // no compression
+  bytes.append(6, '\0');
+  pod(uint64_t{4});  // packed width
+  pod(uint64_t{4});  // slot width
+  pod(uint64_t{empty ? 0u : 8u});
+  pod(uint64_t{empty ? 0u : 2u});
+  pod(double{0});
+  pod(double{0});
+  pod(double{0});
+  pod(uint64_t{empty ? 0u : 8u});
+  if (!empty) {
+    pod(int32_t{11});
+    pod(int32_t{-22});
+  }
+  pod(Utils::crc32c_compute(bytes.data(), bytes.size(), 0));
+  return bytes;
+}
+void update_native_crc(std::string &bytes) {
+  const auto crc = Utils::crc32c_compute(bytes.data(), bytes.size() - sizeof(uint32_t), 0);
+  std::memcpy(bytes.data() + bytes.size() - sizeof(crc), &crc, sizeof(crc));
+}
+}  // namespace
+
+TEST(NativeCuPersistence, FixedWidthAndEmptyRecordsRoundTrip) {
+  auto pool = native_pool();
+  auto field = native_field();
+  for (bool empty : {false, true}) {
+    CU column(nullptr, field, 0, 2, pool);
+    const auto bytes = native_record(empty);
+    std::istringstream input(bytes);
+    ASSERT_EQ(column.deserialize(input, empty ? 0 : 2), SHANNON_SUCCESS);
+    std::ostringstream output;
+    ASSERT_EQ(column.serialize(output, empty ? 0 : 2, true), SHANNON_SUCCESS);
+    EXPECT_EQ(output.str(), bytes);
+  }
+}
+TEST(NativeCuPersistence, ValidCrcCannotHideShortRawPayload) {
+  auto pool = native_pool();
+  auto field = native_field();
+  CU column(nullptr, field, 0, 2, pool);
+  auto bytes = native_record();
+  const uint64_t short_size = 4;
+  std::memcpy(bytes.data() + 76, &short_size, sizeof(short_size));
+  bytes.erase(88, 4);
+  update_native_crc(bytes);
+  std::istringstream input(bytes);
+  EXPECT_NE(column.deserialize(input, 2), SHANNON_SUCCESS);
+}
+TEST(NativeCuPersistence, ColumnRowsMustMatchContainingChunk) {
+  auto pool = native_pool();
+  auto field = native_field();
+  CU column(nullptr, field, 0, 3, pool);
+  std::istringstream input(native_record());
+  EXPECT_NE(column.deserialize(input, 3), SHANNON_SUCCESS);
+}
+TEST(NativeCuPersistence, ValidCrcCannotChangeEncodingOrFlags) {
+  auto pool = native_pool();
+  auto field = native_field();
+  for (const size_t offset : {size_t{6}, size_t{12}}) {
+    CU column(nullptr, field, 0, 2, pool);
+    auto bytes = native_record();
+    bytes[offset] = offset == 6 ? char{0x40} : static_cast<char>(Compress::ENCODING_TYPE::VARLEN);
+    update_native_crc(bytes);
+    std::istringstream input(bytes);
+    EXPECT_NE(column.deserialize(input, 2), SHANNON_SUCCESS);
+  }
+}
+TEST(NativeCuPersistence, CompressedRecordNeedsAnExplicitCodec) {
+  auto pool = native_pool();
+  auto field = native_field();
+  CU column(nullptr, field, 0, 2, pool);
+  auto bytes = native_record();
+  bytes[6] = CU_FLAG_COMPRESSED;
+  update_native_crc(bytes);
+  std::istringstream input(bytes);
+  EXPECT_NE(column.deserialize(input, 2), SHANNON_SUCCESS);
+}
+TEST(NativeCuPersistence, InputExceptionsReturnFailure) {
+  auto pool = native_pool();
+  auto field = native_field();
+  CU column(nullptr, field, 0, 2, pool);
+  std::istringstream input("");
+  input.exceptions(std::ios::failbit | std::ios::badbit);
+  EXPECT_NO_THROW(EXPECT_NE(column.deserialize(input, 2), SHANNON_SUCCESS));
+}
+TEST(NativeCuPersistence, OutputExceptionsReturnFailure) {
+  class ThrowingBuffer : public std::streambuf {
+    std::streamsize xsputn(const char *, std::streamsize) override { throw std::bad_alloc(); }
+  } buffer;
+  auto pool = native_pool();
+  auto field = native_field();
+  CU column(nullptr, field, 0, 2, pool);
+  std::ostream output(&buffer);
+  output.exceptions(std::ios::badbit);
+  EXPECT_NO_THROW(EXPECT_NE(column.serialize(output, 2, true), SHANNON_SUCCESS));
+}
 
 // Test FieldMetadata structure
 TEST(FieldMetadataTest, BasicProperties) {
@@ -82,7 +209,7 @@ TEST(MemoryPoolTest, AllocateForCU) {
   size_t total_capacity = capacity * normalized_length;
   if (total_capacity < 64 * 1024) total_capacity = 64 * 1024;
 
-  void* ptr = mem_pool->allocate_auto(total_capacity);
+  void *ptr = mem_pool->allocate_auto(total_capacity);
   ASSERT_NE(ptr, nullptr);
 
   // Test deallocation
@@ -184,8 +311,7 @@ TEST(TablePersistenceManagerTest, ListManifestGenerationsAscendingAndFiltered) {
   // Contiguous generation numbers are not required; out-of-order creation still
   // lists ascending. A non-manifest file must be ignored.
   for (uint64_t g : {7ull, 1ull, 3ull}) {
-    std::ofstream out(ckpt / ("checkpoint-" + std::to_string(g) + ".manifest"),
-                      std::ios::binary | std::ios::trunc);
+    std::ofstream out(ckpt / ("checkpoint-" + std::to_string(g) + ".manifest"), std::ios::binary | std::ios::trunc);
     out.put('X');
   }
   {
@@ -216,17 +342,15 @@ TEST(TablePersistenceManagerTest, FallsBackToOlderGenerationWhenNewestCorrupt) {
 
   // No CHECKPOINTED IMCUs: the older manifest needs no snapshot files.
   std::string bytes;
-  auto append = [&bytes](const auto &value) {
-    bytes.append(reinterpret_cast<const char *>(&value), sizeof(value));
-  };
+  auto append = [&bytes](const auto &value) { bytes.append(reinterpret_cast<const char *>(&value), sizeof(value)); };
   auto append_string = [&bytes, &append](const std::string &value) {
     append(static_cast<uint32_t>(value.size()));
     bytes.append(value);
   };
   append(MANIFEST_MAGIC);
-  append(MANIFEST_FORMAT_VER);
-  append(uint64_t{0});  // table identity
-  append(uint64_t{1});  // generation
+  append(uint16_t{2});       // independent legacy fixture, without v3 SCN fields
+  append(uint64_t{0});       // table identity
+  append(uint64_t{1});       // generation
   append(uint64_t{0x1234});  // schema fingerprint
   append_string("binlog.000001");
   append(uint64_t{4});
@@ -258,4 +382,16 @@ TEST(TablePersistenceManagerTest, FallsBackToOlderGenerationWhenNewestCorrupt) {
 }
 
 }  // namespace Imcs
-}  // namespace ShannonBase</content>
+}  // namespace ShannonBase
+
+TEST(RapidCrcTest, BaselineDispatchMatchesSoftwareAndChunkedSeed) {
+  constexpr char value[] = "123456789";
+  const auto expected = 0xe3069283U;
+  EXPECT_EQ(expected, ShannonBase::Utils::crc32c_compute(value, 9, 0));
+  const auto prefix = ShannonBase::Utils::crc32c_compute(value, 4, 0);
+  EXPECT_EQ(expected, ShannonBase::Utils::crc32c_compute(value + 4, 5, prefix));
+  uint32_t software = ~0U;
+  for (size_t i = 0; i < 9; ++i)
+    software = (software >> 8) ^ ShannonBase::Utils::crc32c_table()[(software ^ value[i]) & 0xff];
+  EXPECT_EQ(expected, ~software);
+}

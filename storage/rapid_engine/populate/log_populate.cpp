@@ -27,6 +27,7 @@
 
 #include "storage/rapid_engine/populate/log_populate.h"
 #include "storage/rapid_engine/recovery/recovery.h"
+#include "storage/rapid_engine/utils/try_operation.h"
 
 #ifdef SHANNON_POSIX_PLATFORM
 #include <pthread.h>  // For pthread_setname_np
@@ -243,18 +244,9 @@ void QuarantinePropagationTable(table_id_t table_id) noexcept {
   auto *manager = table ? table->recovery_manager() : nullptr;
   if (manager) {
     manager->require_recovery();
-    try {
-      if (!manager->revoke_fast_recovery()) {
-        sql_print_error("Rapid could not durably revoke fast recovery for table %llu; restart requires primary reload",
-                        static_cast<unsigned long long>(table_id));
-      }
-    } catch (...) {
-      // Keep the live table fenced even when durable revocation fails.
-      try {
-        if (manager->notifications()) manager->notifications()->invalidate();
-      } catch (...) {
-      }
-      sql_print_error("Rapid recovery revocation failed for table %llu", static_cast<unsigned long long>(table_id));
+    if (!manager->revoke_fast_recovery()) {
+      sql_print_error("Rapid could not durably revoke fast recovery for table %llu; restart requires primary reload",
+                      static_cast<unsigned long long>(table_id));
     }
   }
   auto &shard = get_pop_shard(table_id);
@@ -351,7 +343,7 @@ static void table_worker_func(table_worker_context *ctx) {
       if (it != table_workers.end() && it->second.get() == ctx) table_workers.erase(it);
     }
   } registration_guard{ctx};
-  try {
+  const bool worker_completed = Utils::try_operation([&] {
 #ifdef SHANNON_POSIX_PLATFORM
     const std::string tname = "rapid_change_worker_" + std::to_string(ctx->table_key);
     pthread_setname_np(pthread_self(), tname.c_str());
@@ -497,7 +489,6 @@ static void table_worker_func(table_worker_context *ctx) {
             result = redo_log.apply_change(context, rec);
             break;
           case Source::COPY_INFO:
-          case Source::COMMITTED_BINLOG:
             result = copy_info_log.apply_change(context, rec, candidate.change_id);
             break;
           case Source::UN_KNOWN:
@@ -631,13 +622,14 @@ static void table_worker_func(table_worker_context *ctx) {
       // over; nothing else takes them back out.
       if (ctx->buffer) ctx->buffer->inflight_size.fetch_sub(abandoned_bytes, std::memory_order_acq_rel);
     }
-  } catch (...) {
+  });
+  if (!worker_completed) {
     // A partially applied change must never be retried as though no mutation
     // happened. Preserve the broken barrier until an explicit reload/recovery.
     ctx->should_stop.store(true, std::memory_order_release);
     MarkPropagationBufferBroken(ctx->buffer);
     abandon_table_work(ctx);
-    sql_print_error("Rapid propagation worker for table %llu stopped after an exception; reload required",
+    sql_print_error("Rapid propagation worker for table %llu stopped after an operation failed; reload required",
                     static_cast<unsigned long long>(ctx->table_key));
   }
 }
@@ -666,11 +658,12 @@ static void shared_apply_worker() {
       ctx->running = false;
       if (!apply_stopping && !ctx->should_stop.load() && !ctx->buffer->broken.load() && !ctx->buffer->detached.load() &&
           ctx->pending_size.load() && !ctx->scheduled) {
-        try {
-          DBUG_EXECUTE_IF("rapid_apply_pool_schedule_oom", { throw std::bad_alloc(); });
-          apply_ready.push_back(ctx);
+        bool force_failure = false;
+        DBUG_EXECUTE_IF("rapid_apply_pool_schedule_oom", { force_failure = true; });
+        const bool queued = !force_failure && Utils::try_operation([&] { apply_ready.push_back(ctx); });
+        if (queued) {
           ctx->scheduled = true;
-        } catch (...) {
+        } else {
           ctx->should_stop.store(true);
           MarkPropagationBufferBroken(ctx->buffer);
           scheduling_failed = true;
@@ -694,7 +687,7 @@ void table_worker_context::dispatch_to_table_worker(const table_id_t &table_key,
                                                     std::vector<change_candidate_t> &&batch, size_t bytes) {
   if (batch.empty()) return;
   bool appended = false;
-  try {
+  const bool dispatched = Utils::try_operation([&] {
     std::unique_lock lock(table_workers_mutex);
     if (buffer->detached.load() || buffer->broken.load()) {
       buffer->inflight_size.fetch_sub(bytes);
@@ -756,7 +749,8 @@ void table_worker_context::dispatch_to_table_worker(const table_id_t &table_key,
     } else {
       ctx->cv.notify_one();
     }
-  } catch (...) {
+  });
+  if (!dispatched) {
     // Thread/queue allocation failures belong to Rapid, never the source DML
     // or a process-wide unhandled exception. Revoke reads/recovery first.
     MarkPropagationBufferBroken(buffer);
@@ -1104,6 +1098,7 @@ int PopulatorImpl::write_impl(FILE *file [[maybe_unused]], uint64_t start_lsn, c
   const table_id_t table_key = changed_rec->m_table_id;
   const size_t rec_sz = changed_rec->m_size;
   const Source record_source = changed_rec->m_source;  // changed_rec is moved from below
+  const bool committed_binlog = changed_rec->is_committed_binlog();
   auto &shard = get_pop_shard(table_key);
 
   std::shared_ptr<table_pop_buffer_t> tbuf;
@@ -1114,15 +1109,16 @@ int PopulatorImpl::write_impl(FILE *file [[maybe_unused]], uint64_t start_lsn, c
   }
 
   if (!tbuf) {
-    try {
+    const bool created = Utils::try_operation([&] {
       std::unique_lock<std::shared_mutex> ulk(shard.mutex);
       auto [it, inserted] = shard.buffers.emplace(table_key, std::shared_ptr<table_pop_buffer_t>{});
       if (inserted || !it->second) it->second = std::make_shared<table_pop_buffer_t>();
       tbuf = it->second;
-    } catch (const std::bad_alloc &) {
+    });
+    if (!created) {
       // Buffer creation owns these allocations; never throw into primary DML.
       // Redo producers hold log latches, so keep their failure path free of I/O.
-      if (record_source == Source::COPY_INFO || record_source == Source::COMMITTED_BINLOG) {
+      if (record_source == Source::COPY_INFO) {
         QuarantinePropagationTable(table_key);
       } else {
         auto table = Imcs::Imcs::instance()->get_rpd_table_shared(table_key);
@@ -1143,8 +1139,8 @@ int PopulatorImpl::write_impl(FILE *file [[maybe_unused]], uint64_t start_lsn, c
   // as marking the buffer broken. (REDO_LOG records are produced under log latches
   // where durable file I/O must not run, so they only mark the buffer.)
   const auto quarantine_dropped = [&]() {
-    if (record_source == Source::COPY_INFO || record_source == Source::COMMITTED_BINLOG)
-      QuarantinePropagationTables({table_key});
+    if (record_source == Source::COPY_INFO)
+      QuarantinePropagationTable(table_key);
     else
       MarkPropagationBufferBroken(tbuf);
     RpdMirror::Registry::mark_stale(static_cast<uint>(table_key), stale_reason_t::RELOAD_REQUIRED);
@@ -1153,7 +1149,6 @@ int PopulatorImpl::write_impl(FILE *file [[maybe_unused]], uint64_t start_lsn, c
   bool invalid_record = changed_rec->m_size == 0 || changed_rec->m_buff0 == nullptr;
   switch (changed_rec->m_source) {
     case Source::COPY_INFO:
-    case Source::COMMITTED_BINLOG:
       // Row-image propagation must keep the real primary creator transaction.
       // commit_scn==0 is valid: it represents an ACTIVE Rapid MVCC version.
       invalid_record = invalid_record || !DML::CopyInfoParser::validate_record(*changed_rec);
@@ -1245,7 +1240,7 @@ int PopulatorImpl::write_impl(FILE *file [[maybe_unused]], uint64_t start_lsn, c
   tbuf->pending_flush.store(true, std::memory_order_release);
   os_event_set(log_sys->rapid_events[0]);
 
-  if (record_source == Source::COMMITTED_BINLOG) {
+  if (committed_binlog) {
     // The producer is the binlog reader, never the primary writer. Retain the
     // row and cursor on temporary saturation; backpressure belongs here.
     *changed_rec = std::move(item.record);

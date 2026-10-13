@@ -24,6 +24,7 @@
    Copyright (c) 2023, 2024, 2025 Shannon Data AI and/or its affiliates.
 */
 #include "storage/rapid_engine/autopilot/loader.h"
+#include "storage/rapid_engine/populate/log_commons.h"
 #ifdef SHANNON_POSIX_PLATFORM
 #include <pthread.h>  // For pthread_setname_np
 #else
@@ -1081,6 +1082,12 @@ bool SelfLoadManager::can_load_table(uint64_t table_size) {
 int SelfLoadManager::perform_self_load(const std::string &schema, const std::string &table) {
   if (Recovery::RecoveryFramework::instance().restart_in_progress()) return HA_ERR_GENERIC;
   if (ShannonBase::shannon_loaded_tables->get(schema, table)) return SHANNON_SUCCESS;
+  // Automatic self-load must not bypass a restart recovery failure that
+  // requires an explicit SECONDARY_LOAD. Check before memory eviction or MDL.
+  auto *scheduler = Recovery::CheckpointScheduler::global();
+  auto *recovery = scheduler ? scheduler->recovery_manager() : nullptr;
+  auto manager = recovery ? recovery->table_manager(schema, table) : nullptr;
+  if (manager && (manager->recovery_required() || manager->recovery_tainted())) return HA_ERR_GENERIC;
   auto table_info = RpdMirror::Registry::find(schema + "." + table);
   if (!table_info) return HA_ERR_GENERIC;
 
@@ -1118,7 +1125,7 @@ int SelfLoadManager::perform_self_load(const std::string &schema, const std::str
   if (!source_table) return HA_ERR_GENERIC;
 
   const bool committed_binlog =
-      Populate::configured_change_propagation_mode.load() == Populate::ChangePropagationMode::COMMITTED_BINLOG;
+      Populate::configured_change_propagation_mode.load() == Populate::CopyInfoMode::COMMITTED_BINLOG;
   Recovery::BinlogPosition baseline;
   if (committed_binlog) {
     MDL_request fence;
@@ -1241,7 +1248,7 @@ int SelfLoadManager::perform_self_unload(const std::string &schema, const std::s
                                                     /*error_if_not_loaded=*/false,
                                                     /*is_partition=*/table_info->partitioned);
   if (result == SHANNON_SUCCESS &&
-      Populate::configured_change_propagation_mode.load() == Populate::ChangePropagationMode::COMMITTED_BINLOG)
+      Populate::configured_change_propagation_mode.load() == Populate::CopyInfoMode::COMMITTED_BINLOG)
     shannon_loaded_tables->erase(schema.c_str(), table.c_str());
   if (result == SHANNON_SUCCESS) {
     // update state to unloaded.

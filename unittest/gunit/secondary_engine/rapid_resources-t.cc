@@ -8,6 +8,7 @@
 #include <future>
 #include <thread>
 #include <vector>
+#include "storage/rapid_engine/utils/memory_pool.h"
 #include "storage/rapid_engine/utils/utils.h"
 
 #include "storage/rapid_engine/executor/iterators/iterator.h"
@@ -15,6 +16,89 @@
 #include "storage/rapid_engine/resource_management/io_scheduler.h"
 
 namespace ShannonBase::ResMgmt {
+TEST(RapidResourcesTest, SystemPoolPolicyUsesActualRootCapacity) {
+  constexpr size_t mib = 1024 * 1024;
+  const auto limits = system_memory_limits(2048 * mib);
+  EXPECT_EQ(256 * mib, limits.pool);
+  EXPECT_EQ(192 * mib, limits.query_total);
+  EXPECT_EQ(64 * mib, limits.query);
+  EXPECT_EQ(16 * mib, limits.operation);
+  EXPECT_EQ(0u, system_memory_limits(1).pool);
+  EXPECT_LE(system_memory_limits(SIZE_MAX).pool, SIZE_MAX / 8);
+}
+class RapidSystemPoolTest : public ::testing::Test {
+ protected:
+  std::shared_ptr<Utils::MemoryPool> root;
+  void SetUp() override {
+    Utils::MemoryPool::Config config(128 * 1024 * 1024);
+    config.small_pool_ratio = 0;
+    config.auto_defragmentation = false;
+    root = std::make_shared<Utils::MemoryPool>(config);
+    ASSERT_TRUE(initialize_system_pool(root));
+  }
+  void TearDown() override { shutdown_system_pool(); }
+};
+TEST_F(RapidSystemPoolTest, QueryBuffersAllocateFromPoolAndReturnCapacity) {
+  const auto root_used = root->stats().used_bytes;
+  EXPECT_EQ(system_memory_limits().pool, root_used);
+  {
+    BoundedMemoryResource resource(4096);
+    std::pmr::vector<uint64_t> values(&resource);
+    values.resize(128, 47);
+    EXPECT_EQ(1024u, system_pool_stats().used);
+    EXPECT_EQ(root_used, root->stats().used_bytes);
+    void *aligned = resource.allocate(256, 256);
+    EXPECT_EQ(0u, reinterpret_cast<uintptr_t>(aligned) % 256);
+    resource.deallocate(aligned, 256, 256);
+    EXPECT_EQ(47u, values.back());
+  }
+  EXPECT_EQ(0u, system_pool_stats().used);
+  EXPECT_GE(system_pool_stats().peak, 1024u);
+}
+TEST_F(RapidSystemPoolTest, ExhaustionHasNoHeapFallbackAndFreeAllowsReuse) {
+  const size_t capacity = system_pool_stats().capacity;
+  auto buffer = allocate_system_buffer(capacity);
+  ASSERT_TRUE(buffer);
+  EXPECT_FALSE(allocate_system_buffer(1));
+  PoolMemoryResource resource;
+  EXPECT_THROW(resource.allocate(1), std::bad_alloc);
+  EXPECT_EQ(capacity, system_pool_stats().used);
+  buffer.reset();
+  EXPECT_EQ(0u, system_pool_stats().used);
+  EXPECT_TRUE(allocate_system_buffer(capacity));
+}
+TEST_F(RapidSystemPoolTest, LiveGrantPreventsResizeAndBufferRetainsParent) {
+  int query = 0;
+  auto grant = reserve_query_memory(&query, system_memory_limits().operation);
+  ASSERT_TRUE(grant);
+  EXPECT_FALSE(initialize_system_pool(root));
+  grant.reset();
+  auto buffer = allocate_system_buffer(1024);
+  ASSERT_TRUE(buffer);
+  EXPECT_FALSE(initialize_system_pool(root));
+  shutdown_system_pool();
+  root.reset();
+  buffer[0] = 73;
+  EXPECT_EQ(73, buffer[0]);
+  buffer.reset();
+}
+TEST_F(RapidSystemPoolTest, ColumnMoveAndGrowthReturnPooledStorage) {
+  Field_long field(11, true, "value", false);
+  {
+    BoundedMemoryResource resource(4096);
+    Executor::ColumnChunk column(&field, 4, sizeof(int32_t), &resource);
+    int32_t value = 73;
+    ASSERT_TRUE(column.add(reinterpret_cast<const uchar *>(&value), sizeof(value), false));
+    ASSERT_TRUE(column.add(nullptr, 0, true));
+    ASSERT_TRUE(column.grow(32));
+    Executor::ColumnChunk moved(std::move(column));
+    EXPECT_TRUE(moved.nullable_fast(1));
+    EXPECT_EQ(73, *reinterpret_cast<const int32_t *>(moved.data_fast(0)));
+    EXPECT_EQ(resource.used(), system_pool_stats().used);
+  }
+  EXPECT_EQ(0u, system_pool_stats().used);
+}
+
 TEST(RapidResourcesTest, SpillDevicesHaveIndependentDepthAndMoveOnlyOwnership) {
   IoDepthGovernor governor;
   auto first = governor.acquire(1, 1, std::chrono::milliseconds(0), [] { return false; });
@@ -235,7 +319,7 @@ TEST(RapidResourcesTest, ConcurrentOperatorsCannotDuplicateHeadroom) {
 }
 
 TEST(RapidResourcesTest, ReallocationChargesBothBuffersAndPreservesOldValue) {
-  BoundedMemoryResource resource(40);
+  BoundedMemoryResource resource(40, std::pmr::new_delete_resource());
   {
     std::pmr::vector<unsigned char> bytes(&resource);
     bytes.resize(16, 7);
@@ -249,7 +333,7 @@ TEST(RapidResourcesTest, ReallocationChargesBothBuffersAndPreservesOldValue) {
 }
 
 TEST(RapidResourcesTest, AuxiliaryContainersShareCapacityAndGrowthPeak) {
-  BoundedMemoryResource resource(160);
+  BoundedMemoryResource resource(160, std::pmr::new_delete_resource());
   {
     std::pmr::vector<uint64_t> ordinals(&resource);
     std::pmr::vector<uint8_t> flags(&resource);
@@ -280,7 +364,7 @@ TEST(RapidResourcesTest, ConcurrentAuxiliaryRefusalReleasesOperatorGrants) {
       for (int iteration = 0; iteration < 100; ++iteration) {
         auto grant = budget.reserve(key, 1024, 1024);
         if (!grant) continue;
-        BoundedMemoryResource auxiliary(grant.bytes() / 16);
+        BoundedMemoryResource auxiliary(grant.bytes() / 16, std::pmr::new_delete_resource());
         {
           std::pmr::vector<uint64_t> ordinals(&auxiliary);
           ordinals.resize(4, 23);
@@ -302,7 +386,7 @@ TEST(RapidResourcesTest, ConcurrentAuxiliaryRefusalReleasesOperatorGrants) {
 }
 
 TEST(RapidResourcesTest, ExternalChargesCompeteWithAllocatorBuffers) {
-  BoundedMemoryResource resource(96);
+  BoundedMemoryResource resource(96, std::pmr::new_delete_resource());
   {
     BoundedMemoryResource::Reservation external(&resource, 64);
     std::pmr::vector<unsigned char> bytes(&resource);
@@ -322,7 +406,7 @@ TEST(RapidResourcesTest, ColumnGrowthRefusalPreservesRowsAndMovesCharge) {
   Field_long field(11, true, "value", false);
   const size_t old_bytes = 16 + 1 + sizeof(bit_array_t);
   const size_t replacement = 32 + 1 + sizeof(bit_array_t);
-  BoundedMemoryResource resource(old_bytes + replacement - 1);
+  BoundedMemoryResource resource(old_bytes + replacement - 1, std::pmr::new_delete_resource());
   {
     Executor::ColumnChunk column(&field, 4, sizeof(int32_t), &resource);
     int32_t value = 73;
@@ -350,7 +434,7 @@ TEST(RapidResourcesTest, ColumnGrowthRefusalPreservesRowsAndMovesCharge) {
 }
 
 TEST(RapidResourcesTest, PackedRowGrowthRefusalKeepsChargedBuffer) {
-  BoundedMemoryResource resource(96);
+  BoundedMemoryResource resource(96, std::pmr::new_delete_resource());
   {
     std::pmr::vector<char> storage(&resource);
     String row;
@@ -401,7 +485,7 @@ TEST(RapidResourcesTest, FailedAllocationUnwindsReservation) {
   int query = 0;
   EXPECT_THROW({
     auto lease = budget.reserve(&query, 64);
-    BoundedMemoryResource resource(lease.bytes());
+    BoundedMemoryResource resource(lease.bytes(), std::pmr::new_delete_resource());
     std::pmr::vector<unsigned char> bytes(&resource);
     bytes.resize(65);
   }, std::bad_alloc);

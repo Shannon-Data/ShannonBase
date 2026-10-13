@@ -1,0 +1,34 @@
+# Partitioned tables use primary reload, sharing the recovery publication path.
+--source include/have_debug.inc
+--source include/no_ps_protocol.inc
+CREATE DATABASE sh_partition_recovery;
+USE sh_partition_recovery;
+CREATE TABLE t (id INT PRIMARY KEY, v INT) SECONDARY_ENGINE=rapid
+PARTITION BY HASH(id) PARTITIONS 2;
+INSERT INTO t VALUES (1,10),(2,20),(3,30);
+ALTER TABLE t SECONDARY_LOAD;
+BEGIN;
+INSERT INTO t VALUES (4,40);
+COMMIT;
+BEGIN;
+INSERT INTO t VALUES (5,50);
+--let $restart_parameters = restart: --rapid_reload_on_restart=ON --debug=d,rapid_recovery_repeat_job
+--source include/kill_and_restart_mysqld.inc
+USE sh_partition_recovery;
+--let $grep_file = $MYSQLTEST_VARDIR/log/mysqld.1.err
+--let $grep_pattern = RecoveryFramework: repeated recovery returned the same result
+--let $wait_timeout = 60
+--source include/wait_for_pattern_in_file.inc
+--let $reloads = `SELECT VARIABLE_VALUE FROM performance_schema.global_status WHERE VARIABLE_NAME='rapid_recovery_primary_reloads'`
+if ($reloads != 1) {
+ --die Repeated partition recovery must perform exactly one primary reload
+}
+SET use_secondary_engine=FORCED;
+SELECT id,v FROM t ORDER BY id;
+--let $actual = `SELECT GROUP_CONCAT(CONCAT(id,':',v) ORDER BY id) FROM t`
+if ($actual != 1:10,2:20,3:30,4:40) {
+ --die Partition recovery must not duplicate rows or retain uncommitted inserts
+}
+--let $assert_digest = SELECT GROUP_CONCAT(CONCAT(id,':',v) ORDER BY id) FROM t
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+DROP DATABASE sh_partition_recovery;

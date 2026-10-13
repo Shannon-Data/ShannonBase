@@ -10,7 +10,7 @@ SET use_secondary_engine=FORCED;
 SET DEBUG_SYNC='rapid_resource_ap_admitted SIGNAL ri_cpu_ready WAIT_FOR ri_cpu_continue';
 SELECT SUM(v) FROM ri_cpu;
 SET DEBUG_SYNC='now WAIT_FOR ri_cpu_ready';
-SELECT RESOURCE_GROUP FROM performance_schema.threads WHERE PROCESSLIST_ID=11;
+SELECT RESOURCE_GROUP FROM performance_schema.threads WHERE PROCESSLIST_ID=HOLDER_ID;
 RESOURCE_GROUP
 ri_ap
 SET lock_wait_timeout=1;

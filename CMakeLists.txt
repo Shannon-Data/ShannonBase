@@ -1049,15 +1049,8 @@ else()
   message(STATUS
     "Shannon vector support level: ${SHANNON_VECT_LEVEL} (0=scalar 1=SSE4.2 2=AVX/AVX2 3=AVX-512)")
 
-  if(SHANNON_VECT_LEVEL EQUAL 3)
-      set(SHANNON_VECT_COMPILE_FLAG "-mavx512f;-mavx512bw" CACHE INTERNAL "")
-  elseif(SHANNON_VECT_LEVEL EQUAL 2)
-      set(SHANNON_VECT_COMPILE_FLAG "-mavx2" CACHE INTERNAL "")
-  elseif(SHANNON_VECT_LEVEL EQUAL 1)
-      set(SHANNON_VECT_COMPILE_FLAG "-msse4.2" CACHE INTERNAL "")
-  else()
-      set(SHANNON_VECT_COMPILE_FLAG "" CACHE INTERNAL "")
-  endif()
+  # Host detection is diagnostic only; never raise the distribution ISA.
+  set(SHANNON_VECT_COMPILE_FLAG "" CACHE INTERNAL "" FORCE)
 endif()
 
 CONFIGURE_FILE(

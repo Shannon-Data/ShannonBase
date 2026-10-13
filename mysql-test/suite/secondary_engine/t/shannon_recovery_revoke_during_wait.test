@@ -1,0 +1,32 @@
+--source include/have_debug_sync.inc
+--source suite/secondary_engine/include/storage_layer_baseline.inc
+CALL mtr.add_suppression("RecoveryManager: a source change reached sh_storage_recovery.t");
+CALL mtr.add_suppression("recovery eligibility is revoked or cannot be verified; automatic recovery stopped");
+--let $restart_parameters = restart: --rapid_reload_on_restart=ON --debug=d,rapid_pause_restart_recovery
+--source include/kill_and_restart_mysqld.inc
+USE sh_storage_recovery;
+SET DEBUG_SYNC='now WAIT_FOR rapid_restart_recovery_paused';
+SET use_secondary_engine=OFF;
+SET sql_log_bin=OFF;
+UPDATE t SET v=11 WHERE id=1;
+SET sql_log_bin=ON;
+SET DEBUG_SYNC='now SIGNAL rapid_restart_recovery_continue';
+--let $grep_file = $MYSQLTEST_VARDIR/log/mysqld.1.err
+--let $grep_pattern = sh_storage_recovery.t recovery eligibility is revoked or cannot be verified; automatic recovery stopped
+--let $wait_timeout = 60
+--source include/wait_for_pattern_in_file.inc
+--let $reloads = `SELECT VARIABLE_VALUE FROM performance_schema.global_status WHERE VARIABLE_NAME='rapid_recovery_primary_reloads'`
+if ($reloads != 0) {
+ --die Revocation while recovery waits must not trigger an automatic primary scan
+}
+SET use_secondary_engine=FORCED;
+--error ER_SECONDARY_ENGINE_PLUGIN
+SELECT id,v FROM t ORDER BY id;
+SET use_secondary_engine=OFF;
+ALTER TABLE t SECONDARY_LOAD;
+--let $assert_digest = SELECT GROUP_CONCAT(CONCAT(id,':',v) ORDER BY id) FROM t
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+SET use_secondary_engine=FORCED;
+SELECT id,v FROM t ORDER BY id;
+SET DEBUG_SYNC='RESET';
+DROP DATABASE sh_storage_recovery;

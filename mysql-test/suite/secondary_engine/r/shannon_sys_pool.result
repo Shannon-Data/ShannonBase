@@ -1,0 +1,35 @@
+SELECT COUNT(*) AS removed_memory_knobs
+FROM performance_schema.global_variables
+WHERE VARIABLE_NAME IN ('rapid_query_memory_size_total','rapid_query_memory_size_max',
+'rapid_operator_memory_size_max','rapid_checkpoint_memory_size_max',
+'rapid_pop_buffer_size_max');
+removed_memory_knobs
+0
+SET GLOBAL rapid_memory_size_max=536870912;
+SELECT REGEXP_SUBSTR(VARIABLE_VALUE,'capacity=[0-9]+') AS sys_pool_capacity
+FROM performance_schema.global_status WHERE VARIABLE_NAME='rapid_sys_pool_status';
+sys_pool_capacity
+capacity=67108864
+SET GLOBAL rapid_memory_size_max=2000;
+ERROR HY000: Rapid sys_pool is busy or the new memory pool is too small
+SELECT @@GLOBAL.rapid_memory_size_max AS retained_total;
+retained_total
+536870912
+SELECT REGEXP_SUBSTR(VARIABLE_VALUE,'capacity=[0-9]+') AS retained_sys_pool
+FROM performance_schema.global_status WHERE VARIABLE_NAME='rapid_sys_pool_status';
+retained_sys_pool
+capacity=67108864
+SELECT id FROM sys_pool_rows ORDER BY v DESC LIMIT 3;
+id
+128
+127
+126
+SELECT CAST(SUBSTRING_INDEX(SUBSTRING_INDEX(VARIABLE_VALUE,'peak=',-1),' ',1) AS UNSIGNED)>0 AS allocated_in_sys_pool
+FROM performance_schema.global_status WHERE VARIABLE_NAME='rapid_sys_pool_status';
+allocated_in_sys_pool
+1
+SELECT REGEXP_SUBSTR(VARIABLE_VALUE,'used=[0-9]+') AS released_buffers,
+REGEXP_SUBSTR(VARIABLE_VALUE,'reserved=[0-9]+') AS released_grants
+FROM performance_schema.global_status WHERE VARIABLE_NAME='rapid_sys_pool_status';
+released_buffers	released_grants
+used=0	reserved=0

@@ -67,6 +67,7 @@ SHOW VARIABLES LIKE "%rapid_gc_interval_scn%";
 SET GLOBAL rapid_max_purger_timeout=3000;
 SHOW VARIABLES LIKE "%rapid_max_purger_timeout%";
 
+--error ER_SECONDARY_ENGINE_PLUGIN
 SET GLOBAL rapid_memory_size_max=2000;
 SHOW VARIABLES LIKE "%rapid_memory_size_max%";
 
@@ -83,7 +84,7 @@ SHOW VARIABLES LIKE "%rapid_parallel_part_load_threshold%";
 SET GLOBAL rapid_parallel_part_load_threshold=8;
 SHOW VARIABLES LIKE "%rapid_parallel_part_load_threshold%";
 
---ERROR 1238
+--ERROR ER_UNKNOWN_SYSTEM_VARIABLE
 SET GLOBAL rapid_pop_buffer_size_max=100;
 SHOW VARIABLES LIKE "%rapid_pop_buffer_size_max%";
 

@@ -1,0 +1,25 @@
+# Copyright (c) 2026, Shannon Data AI and/or its affiliates.
+--source include/have_debug.inc
+--disable_query_log
+--disable_result_log
+SET use_secondary_engine=OFF;
+SET SESSION cte_max_recursion_depth=5000;
+CREATE TABLE review_window(id INT PRIMARY KEY,v INT,pad VARCHAR(1000)) SECONDARY_ENGINE=rapid;
+INSERT INTO review_window WITH RECURSIVE seq(i) AS
+ (SELECT 1 UNION ALL SELECT i+1 FROM seq WHERE i<4000)
+ SELECT i,i,REPEAT('x',1000) FROM seq;
+ALTER TABLE review_window SECONDARY_LOAD;
+SET use_secondary_engine=FORCED;
+SET debug='+d,rapid_operator_tiny_budget';
+--error ER_OUT_OF_RESOURCES
+SELECT pad,SUM(v) OVER() FROM review_window;
+# Resource failure must release the statement and leave the source intact.
+SET debug='-d,rapid_operator_tiny_budget';
+SET use_secondary_engine=OFF;
+--enable_query_log
+--enable_result_log
+SELECT COUNT(*) AS n,SUM(v) AS total FROM review_window;
+--disable_query_log
+ALTER TABLE review_window SECONDARY_UNLOAD;
+DROP TABLE review_window;
+--enable_query_log

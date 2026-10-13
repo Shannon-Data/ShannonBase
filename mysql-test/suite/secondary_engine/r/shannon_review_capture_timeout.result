@@ -1,0 +1,6 @@
+SELECT @scan_elapsed < 2000000 AS scan_bounded,@count_elapsed < 2000000 AS count_bounded;
+scan_bounded	count_bounded
+1	1
+SELECT v FROM review_timeout;
+v
+11

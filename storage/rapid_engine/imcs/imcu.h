@@ -731,6 +731,8 @@ class Imcu : public MemoryObject {
     return total_size;
   }
 
+  uint64_t mutation_version() const { return m_version.load(std::memory_order_acquire); }
+
   inline row_id_t get_start_row() const { return m_header.start_row; }
 
   inline void new_start_row(row_id_t rowid) { m_header.start_row = rowid; }

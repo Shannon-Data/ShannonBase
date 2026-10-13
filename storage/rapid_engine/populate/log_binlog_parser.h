@@ -64,6 +64,8 @@ struct BinlogTableBinding {
   TABLE *table;
   table_id_t id;
   Recovery::BinlogPosition floor;
+  const char *db{nullptr};
+  const char *name{nullptr};
 };
 struct BinlogTransaction {
   Recovery::BinlogPosition end;
@@ -75,14 +77,15 @@ class BinlogParser {
  public:
   static bool read_batch(THD *, const std::vector<BinlogTableBinding> &, const Recovery::BinlogPosition &start,
                          const Recovery::BinlogPosition &committed_end, std::vector<BinlogTransaction> &,
-                         Recovery::BinlogPosition &assembled_end, const char **failure_reason = nullptr);
+                         Recovery::BinlogPosition &assembled_end, const char **failure_reason = nullptr,
+                         std::vector<table_id_t> *required_tables = nullptr) noexcept;
   static bool supports(const TABLE *);
 };
 // Shared with the load/capture code: resolve partitions and own off-page bytes
 // while the decoded event and TABLE record buffers are still alive.
 bool FinalizeBinlogRow(TABLE *, change_record_buff_t &);
 // Binlog producer entry: ownership stays with the reader on BUFFER_FULL.
-int EnqueueRowChange(change_record_buff_t &);
+int EnqueueRowChange(change_record_buff_t &) noexcept;
 class CommittedBinlog {
  public:
   static const char *check_configuration(THD *);

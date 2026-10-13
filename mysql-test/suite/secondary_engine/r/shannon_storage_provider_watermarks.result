@@ -1,0 +1,29 @@
+CREATE DATABASE sh_storage_recovery;
+USE sh_storage_recovery;
+CREATE TABLE t (id INT PRIMARY KEY, v INT NOT NULL) SECONDARY_ENGINE=rapid;
+INSERT INTO t VALUES (1,10),(2,20),(3,30);
+ALTER TABLE t SECONDARY_LOAD;
+# restart: --rapid_reload_on_restart=ON
+USE sh_storage_recovery;
+SELECT SNAPSHOT_SCN>0 AS snapshot_certified,PERSISTED_SCN>=SNAPSHOT_SCN AS storage_confirmed FROM performance_schema.rpd_tables r JOIN performance_schema.rpd_table_id i ON r.ID=i.ID WHERE i.SCHEMA_NAME='sh_storage_recovery' AND i.TABLE_NAME='t';
+snapshot_certified	storage_confirmed
+1	1
+CALL mtr.add_suppression("CheckpointScheduler: on-demand checkpoint failed sh_storage_recovery.t");
+# Kill and restart: --rapid_reload_on_restart=ON --debug=d,rapid_checkpoint_store_publish_error
+USE sh_storage_recovery;
+SET use_secondary_engine=FORCED;
+UPDATE t SET v=11 WHERE id=1;
+SELECT id,v FROM t ORDER BY id;
+id	v
+1	11
+2	20
+3	30
+# restart: --rapid_reload_on_restart=ON --debug=d,rapid_checkpoint_store_publish_error
+USE sh_storage_recovery;
+SET use_secondary_engine=FORCED;
+SELECT id,v FROM t ORDER BY id;
+id	v
+1	11
+2	20
+3	30
+DROP DATABASE sh_storage_recovery;

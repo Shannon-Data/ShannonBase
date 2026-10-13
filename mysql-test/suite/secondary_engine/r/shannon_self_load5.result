@@ -83,6 +83,7 @@ rapid_recovery_storage_restores
 rapid_resource_io_status
 rapid_resource_plan
 rapid_resource_status
+rapid_sys_pool_status
 rapid_total_cus
 rapid_total_imcus
 rapid_total_physical_rows

@@ -1,0 +1,29 @@
+# Copyright (c) 2026, Shannon Data AI and/or its affiliates.
+--source include/have_debug.inc
+--source include/no_ps_protocol.inc
+SET @saved_debug=@@GLOBAL.debug;
+CALL mtr.add_suppression("Rapid COMMITTED_BINLOG: reader thread failed");
+SET use_secondary_engine=OFF;
+SET GLOBAL rapid_change_propagation_mode=COMMITTED_BINLOG;
+CREATE TABLE cb_thread (id INT PRIMARY KEY,v INT) SECONDARY_ENGINE=rapid;
+INSERT INTO cb_thread VALUES (1,10);
+ALTER TABLE cb_thread SECONDARY_LOAD;
+INSERT INTO cb_thread VALUES (2,20);
+SET use_secondary_engine=FORCED;
+--error ER_SECONDARY_ENGINE
+SELECT SUM(v) FROM cb_thread;
+# The failed reader must leave source commits intact and allow fallback.
+SET use_secondary_engine=ON;
+SELECT COUNT(*),SUM(v) FROM cb_thread;
+SET use_secondary_engine=OFF;
+ALTER TABLE cb_thread SECONDARY_UNLOAD;
+SET GLOBAL debug='-d,rapid_committed_catalog_bad_alloc';
+ALTER TABLE cb_thread SECONDARY_LOAD;
+INSERT INTO cb_thread VALUES (3,30);
+SET use_secondary_engine=FORCED;
+SELECT COUNT(*),SUM(v) FROM cb_thread;
+SET use_secondary_engine=OFF;
+ALTER TABLE cb_thread SECONDARY_UNLOAD;
+DROP TABLE cb_thread;
+SET GLOBAL rapid_change_propagation_mode=CAPTURE;
+SET GLOBAL debug=@saved_debug;

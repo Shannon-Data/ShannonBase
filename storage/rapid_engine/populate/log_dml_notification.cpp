@@ -39,6 +39,7 @@
 #include <thread>
 #include <unordered_map>
 #include <vector>
+#include "storage/rapid_engine/populate/log_commons.h"
 
 #include "template_utils.h"  // down_cast
 
@@ -502,7 +503,7 @@ int CopyInfoParser::parse_and_apply_delete(Rapid_load_context *context, table_id
 }
 
 bool CopyInfoParser::validate_record(const change_record_buff_t &record) {
-  return record.m_source_trx_id != 0 || record.m_source == Source::COMMITTED_BINLOG;
+  return record.m_source_trx_id != 0 || record.is_committed_binlog();
 }
 
 ChangeApplyResult CopyInfoParser::apply_change(Rapid_load_context &context, change_record_buff_t &record,
@@ -531,7 +532,7 @@ ChangeApplyResult CopyInfoParser::apply_change(Rapid_load_context &context, chan
   // Direct row-image propagation must preserve the real primary InnoDB writer
   // identity. commit_scn == 0 is valid: it represents an ACTIVE Rapid MVCC
   // version, not a missing transaction.
-  const bool replay = record.m_source == Source::COMMITTED_BINLOG;
+  const bool replay = record.is_committed_binlog();
   if (record.m_source_trx_id == 0 && !replay) {
     result.status = ChangeApplyResult::Status::PERMANENT;
     return result;
@@ -686,7 +687,7 @@ Trans_observer rapid_transaction_observer{sizeof(Trans_observer),
                                           nullptr};
 Binlog_transmit_observer rapid_binlog_observer{
     sizeof(Binlog_transmit_observer), nullptr, nullptr, nullptr, nullptr, nullptr, [](Binlog_transmit_param *) -> int {
-      if (configured_change_propagation_mode.load() == ChangePropagationMode::COMMITTED_BINLOG)
+      if (configured_change_propagation_mode.load() == CopyInfoMode::COMMITTED_BINLOG)
         CommittedBinlog::notify_source_reset();
       return 0;
     }};
@@ -1058,6 +1059,10 @@ void TransactionManager::erase_if_complete_locked(Transaction::ID txn_id) {
     (void)table_id;
     if (progress.applied < progress.registered || progress.finalizing || !progress.imcus.empty()) return;
   }
+  // Advance only after every registered change and physical finalizer settled.
+  // This runs in propagation, never in the source COMMIT callback.
+  if (it->second.outcome == Outcome::COMMITTED)
+    TransactionCoordinator::instance().observe_commit_scn(it->second.commit_scn);
   m_transactions.erase(it);
 }
 
@@ -1253,7 +1258,7 @@ void rapid_after_commit(void *arg) {
   // leaves the durable outcome unresolved, requiring primary reload.
   THD *thd = current_thd;
   if (!thd || thd->thread_id() != param->thread_id || thd->lex->sql_command == SQLCOM_XA_PREPARE) return;
-  if (configured_change_propagation_mode.load() == ChangePropagationMode::COMMITTED_BINLOG) {
+  if (configured_change_propagation_mode.load() == CopyInfoMode::COMMITTED_BINLOG) {
     CommittedBinlog::publish_commit(param->log_file, static_cast<uint64_t>(param->log_pos));
     return;
   }

@@ -1,0 +1,18 @@
+# Copyright (c) 2026, Shannon Data AI and/or its affiliates.
+--source suite/secondary_engine/include/storage_layer_baseline.inc
+CALL mtr.add_suppression("Rapid could not durably revoke fast recovery");
+CALL mtr.add_suppression("Rapid COPY_INFO could not enqueue row change");
+CALL mtr.add_suppression("Rapid row notification failed");
+SET @saved_debug=@@GLOBAL.debug;
+SET GLOBAL debug='+d,rapid_checkpoint_store_invalidate_error,rapid_taint_marker_primary_error';
+SET sql_log_bin=OFF;
+UPDATE t SET v=11 WHERE id=1;
+SET sql_log_bin=ON;
+# Even when provider invalidation and the primary marker fail, the alternate
+# marker must exist before restart and prohibit the old native image.
+--file_exists $datadir/rapid_taint/sh_storage_recovery/t/reload_required 60
+SET GLOBAL debug=@saved_debug;
+--let $storage_restart_debug = --loose-rapid_schema_embedding=OFF
+--let $storage_route = primary_reloads
+--let $storage_expected = 1:11,2:20,3:30
+--source suite/secondary_engine/include/storage_layer_manual_load.inc

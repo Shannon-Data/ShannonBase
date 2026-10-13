@@ -301,7 +301,7 @@ class TransactionCoordinator {
 
   inline uint64_t get_min_active_scn() const { return Transaction::VersionManager::instance().get_min_active_scn(); }
 
-  inline uint64_t get_gc_safe_scn() const { return get_min_active_scn(); }
+  uint64_t get_gc_safe_scn() const;
 
   inline size_t get_active_txn_count() const {
     std::shared_lock lock(m_txns_mutex);
@@ -495,7 +495,7 @@ class TransactionJournal {
   ShannonBase::OPER_TYPE get_row_state_at_scn(row_id_t row_id, uint64_t target_scn,
                                               std::bitset<SHANNON_MAX_COLUMNS> *modified_columns = nullptr) const;
 
-  size_t purge(uint64_t min_active_scn);
+  size_t purge(uint64_t min_active_scn, size_t limit = SIZE_MAX);
 
   size_t purge_aborted();
 

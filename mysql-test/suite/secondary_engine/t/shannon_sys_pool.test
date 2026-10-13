@@ -1,0 +1,46 @@
+--source include/have_debug.inc
+--disable_query_log
+CALL mtr.add_suppression("Rapid MemoryPool.*Failed to reserve");
+SET use_secondary_engine=OFF;
+SET @saved_pool_size=@@GLOBAL.rapid_memory_size_max;
+--enable_query_log
+# Only the engine total is configurable; the work-area limits are internal.
+SELECT COUNT(*) AS removed_memory_knobs
+ FROM performance_schema.global_variables
+ WHERE VARIABLE_NAME IN ('rapid_query_memory_size_total','rapid_query_memory_size_max',
+                         'rapid_operator_memory_size_max','rapid_checkpoint_memory_size_max',
+                         'rapid_pop_buffer_size_max');
+SET GLOBAL rapid_memory_size_max=536870912;
+SELECT REGEXP_SUBSTR(VARIABLE_VALUE,'capacity=[0-9]+') AS sys_pool_capacity
+ FROM performance_schema.global_status WHERE VARIABLE_NAME='rapid_sys_pool_status';
+# Rejected resizing must preserve both configuration and the existing pool.
+--error ER_SECONDARY_ENGINE_PLUGIN
+SET GLOBAL rapid_memory_size_max=2000;
+SELECT @@GLOBAL.rapid_memory_size_max AS retained_total;
+SELECT REGEXP_SUBSTR(VARIABLE_VALUE,'capacity=[0-9]+') AS retained_sys_pool
+ FROM performance_schema.global_status WHERE VARIABLE_NAME='rapid_sys_pool_status';
+--disable_query_log
+CREATE TABLE sys_pool_rows(id INT PRIMARY KEY,v INT) SECONDARY_ENGINE=rapid;
+INSERT INTO sys_pool_rows WITH RECURSIVE seq(i) AS
+ (SELECT 1 UNION ALL SELECT i+1 FROM seq WHERE i<128) SELECT i,i FROM seq;
+ALTER TABLE sys_pool_rows SECONDARY_LOAD;
+SET use_secondary_engine=FORCED;
+SET secondary_engine_cost_threshold=0;
+--enable_query_log
+SELECT id FROM sys_pool_rows ORDER BY v DESC LIMIT 3;
+--disable_query_log
+SET use_secondary_engine=OFF;
+--enable_query_log
+SELECT CAST(SUBSTRING_INDEX(SUBSTRING_INDEX(VARIABLE_VALUE,'peak=',-1),' ',1) AS UNSIGNED)>0 AS allocated_in_sys_pool
+ FROM performance_schema.global_status WHERE VARIABLE_NAME='rapid_sys_pool_status';
+--disable_query_log
+SET use_secondary_engine=OFF;
+ALTER TABLE sys_pool_rows SECONDARY_UNLOAD;
+DROP TABLE sys_pool_rows;
+--enable_query_log
+SELECT REGEXP_SUBSTR(VARIABLE_VALUE,'used=[0-9]+') AS released_buffers,
+       REGEXP_SUBSTR(VARIABLE_VALUE,'reserved=[0-9]+') AS released_grants
+ FROM performance_schema.global_status WHERE VARIABLE_NAME='rapid_sys_pool_status';
+--disable_query_log
+SET GLOBAL rapid_memory_size_max=@saved_pool_size;
+--enable_query_log

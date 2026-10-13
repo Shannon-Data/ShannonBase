@@ -1,0 +1,3 @@
+SELECT COUNT(*) AS n,SUM(v) AS total FROM review_window;
+n	total
+4000	8002000

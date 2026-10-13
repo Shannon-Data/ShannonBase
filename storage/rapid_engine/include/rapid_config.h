@@ -25,36 +25,12 @@
 */
 #ifndef __SHANNONBASE_RPD_CONFIG_H__
 #define __SHANNONBASE_RPD_CONFIG_H__
-#include <atomic>
 #include <cstring>
-#include <shared_mutex>
 #include "storage/rapid_engine/autopilot/loader.h"
 #include "storage/rapid_engine/compress/algorithms.h"
 #include "storage/rapid_engine/include/rapid_const.h"
 #include "storage/rapid_engine/include/rapid_table_info.h"
 #include "storage/rapid_engine/resource_management/res_mgmt.h"
-
-namespace ShannonBase::Populate {
-enum class ChangePropagationMode : unsigned long { CAPTURE = 0, COMMITTED_BINLOG = 1 };
-
-// Loads and unloads hold shared ownership through publication or worker shutdown.
-// A mode change takes exclusive ownership and requires no loaded tables or active
-// propagation. try_lock in the sysvar callbacks avoids waiting while holding
-// MySQL global system-variable locks.
-inline std::shared_mutex propagation_mode_mutex;
-
-// The configured backend is sampled at load admission and stays fixed until
-// all tables have been unloaded and propagation has stopped.
-inline std::atomic<ChangePropagationMode> configured_change_propagation_mode{ChangePropagationMode::CAPTURE};
-
-constexpr bool propagation_query_supported(ChangePropagationMode mode, bool autocommit, bool explicit_transaction) {
-  return mode == ChangePropagationMode::CAPTURE || (autocommit && !explicit_transaction);
-}
-constexpr bool propagation_backend_available(ChangePropagationMode mode) {
-  return mode == ChangePropagationMode::CAPTURE || mode == ChangePropagationMode::COMMITTED_BINLOG;
-}
-
-}  // namespace ShannonBase::Populate
 
 namespace ShannonBase {
 struct SHANNON_ALIGNAS RpdEngineConfig {
@@ -89,11 +65,9 @@ struct SHANNON_ALIGNAS RpdEngineConfig {
   // fields used to be called *_mb while holding bytes; the name was the bug,
   // not the unit, so they are simply named for what they hold.
   uint64 memory_pool_size_bytes{SHANNON_DEFAULT_MEMORY_SIZE};
-  uint64 max_memory_usage_bytes{SHANNON_DEFAULT_MEMORY_SIZE};
-  ulonglong query_memory_size_total{256ULL * 1024 * 1024};
-  ulonglong query_memory_size_max{64ULL * 1024 * 1024};
-  ulonglong operator_memory_size_max{16ULL * 1024 * 1024};
-  // Includes temporary merge outputs while their input runs still exist.
+  // Query/operator/checkpoint work memory is automatically managed in sys_pool.
+  ulonglong window_spill_size_total{16ULL * 1024 * 1024 * 1024};
+  ulonglong window_spill_size_max{8ULL * 1024 * 1024 * 1024};
   ulonglong sort_spill_size_max{8ULL * 1024 * 1024 * 1024};
 
   // Active execution limits; source commit callbacks never reserve these.
@@ -103,6 +77,7 @@ struct SHANNON_ALIGNAS RpdEngineConfig {
   ulong resource_maint_limit{ResMgmt::DEFAULT_MAINT_LIMIT};
 
   // Propagation Configuration
+  // Internal CAPTURE lag threshold; not a user memory-size setting.
   ulonglong pop_buff_sz_max{ShannonBase::SHANNON_MAX_POPULATION_BUFFER_SIZE};
 
   // Legacy sync selector: 0=DIRECT_NOTIFICATION, 1=REDO_LOG_PARSE, 2=HYBRID.
@@ -142,6 +117,8 @@ struct SHANNON_ALIGNAS RpdEngineConfig {
   double compact_delete_ratio_threshold{0.3};  // Trigger compaction when delete ratio > 30%
   size_t compact_min_delete_count{10000};      // Minimum delete count to trigger compaction
   size_t compact_interval_seconds{300};        // Compaction interval (seconds)
+
+  ulonglong query_sync_timeout_ms{30000};
 
   // Query Configuration
   size_t scan_batch_size{SHANNON_BATCH_NUM};  // Scan batch size

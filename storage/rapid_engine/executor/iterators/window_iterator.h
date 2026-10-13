@@ -29,6 +29,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <vector>
+#include "storage/rapid_engine/resource_management/res_mgmt.h"
 
 #include "sql-common/my_decimal.h"
 #include "sql/iterators/row_iterator.h"
@@ -81,21 +82,7 @@ class VectorizedWindowIterator final : public RowIterator {
  public:
   /// Rows ingested per vectorized pass.
   static constexpr size_t kBatchRows = 1024;
-  /**
-   * Default budget for buffered output record images before spilling.
-   *
-   * It bounds the record images and nothing else. The argument columns are
-   * folded into the accumulators and dropped after every pass, and a computed
-   * result is dropped with the rows that consumed it, so both stay bounded.
-   * m_new_peer does not: it is only released when the buffer drains, which a
-   * whole-partition frame does not do until the partition closes, so it grows
-   * with the partition however small this budget is. It is one *bit* per
-   * buffered row, so a partition just large enough to spill at 64MB with
-   * 100-byte records holds ~84KB there; still linear, but a factor of eight
-   * off what a byte per row would cost, and small enough beside the record
-   * images that a separate budget would not buy anything. Bounding it properly
-   * would mean spilling it alongside the record image.
-   */
+  // Requested lease; the resource manager applies operator/query/global caps.
   static constexpr size_t kDefaultBufferMemoryLimit = 64ULL * 1024ULL * 1024ULL;
 
   /**
@@ -155,6 +142,8 @@ class VectorizedWindowIterator final : public RowIterator {
    * is bounded by kBatchRows regardless of partition size.
    */
   struct ArgColumn {
+    explicit ArgColumn(std::pmr::memory_resource *resource)
+        : ints(resource), reals(resource), decimals(resource), null_bits(resource) {}
     Item *item{nullptr};
     ValueKind kind{ValueKind::kNone};
     /// COUNT() only needs to know whether the argument was NULL.
@@ -162,11 +151,11 @@ class VectorizedWindowIterator final : public RowIterator {
     /// Values are at most 32 bits wide, so an int64 SIMD reduction is exact.
     bool narrow_int{false};
 
-    std::vector<int64_t> ints;
-    std::vector<double> reals;
-    std::vector<my_decimal> decimals;
+    std::pmr::vector<int64_t> ints;
+    std::pmr::vector<double> reals;
+    std::pmr::vector<my_decimal> decimals;
     /// Bit array, bit set == NULL, laid out as Utils::SIMD expects.
-    std::vector<uint8_t> null_bits;
+    std::pmr::vector<uint8_t> null_bits;
     size_t rows{0};
     size_t null_count{0};
 
@@ -199,6 +188,8 @@ class VectorizedWindowIterator final : public RowIterator {
 
   /// One window function of this step plus its partition-scoped state.
   struct WindowFn {
+    explicit WindowFn(std::pmr::memory_resource *resource)
+        : res_null(resource), res_int(resource), res_real(resource), res_dec(resource) {}
     Item_sum *item{nullptr};
     Field *result_field{nullptr};
     WfKind kind{WfKind::kRowNumber};
@@ -219,15 +210,18 @@ class VectorizedWindowIterator final : public RowIterator {
     my_decimal ext_dec;
 
     // Computed values, indexed per Granularity.
-    std::vector<uint8_t> res_null;
-    std::vector<int64_t> res_int;
-    std::vector<double> res_real;
-    std::vector<my_decimal> res_dec;
+    std::pmr::vector<uint8_t> res_null;
+    std::pmr::vector<int64_t> res_int;
+    std::pmr::vector<double> res_real;
+    std::pmr::vector<my_decimal> res_dec;
 
     void ResetPartition();
     void ClearResults();
     void EraseResultPrefix(size_t count);
   };
+
+  bool InitImpl();
+  int ReadImpl();
 
   // setup
   bool SetupPlan();
@@ -256,6 +250,9 @@ class VectorizedWindowIterator final : public RowIterator {
   bool SpillRecord(const uchar *record);
   void ResetRecordBuffer();
 
+  // Declare before every allocated buffer; destroy the buffers before the lease.
+  ResMgmt::MemoryBudget::Reservation m_memory_reservation;
+  ResMgmt::BoundedMemoryResource m_memory;
   unique_ptr_destroy_only<RowIterator> m_source;
   Temp_table_param *m_temp_table_param;
   Window *m_window;
@@ -267,16 +264,16 @@ class VectorizedWindowIterator final : public RowIterator {
   TABLE *m_out_table{nullptr};
   size_t m_record_length{0};
 
-  std::vector<WindowFn> m_functions;
-  std::vector<ArgColumn> m_arg_columns;
+  std::pmr::vector<WindowFn> m_functions;
+  std::pmr::vector<ArgColumn> m_arg_columns;
 
   Granularity m_granularity{Granularity::kPerRow};
 
   // Buffered rows of the current block.
-  std::vector<uchar> m_records;
+  std::pmr::vector<uchar> m_records;
   /// One bit per buffered row: set when the row opens a new ORDER BY peer
   /// group (or a new partition). Same layout as ArgColumn::null_bits.
-  std::vector<uint8_t> m_new_peer;
+  std::pmr::vector<uint8_t> m_new_peer;
   size_t m_rows{0};
   /// Rows of the current partition ingested so far. Unlike m_rows this is not
   /// reset by a drain, so it is what tells a partition change apart from the
@@ -299,7 +296,7 @@ class VectorizedWindowIterator final : public RowIterator {
   /// The row that ended the previous partition, held back until that partition
   /// has been fully emitted. Its arguments already sit at the head of the
   /// argument columns.
-  std::vector<uchar> m_carry_record;
+  std::pmr::vector<uchar> m_carry_record;
   bool m_carry_valid{false};
 
   // Record images past the memory budget live here, written and read strictly
@@ -309,6 +306,7 @@ class VectorizedWindowIterator final : public RowIterator {
   size_t m_mem_rows{0};
   std::FILE *m_spill_file{nullptr};
   size_t m_spill_rows{0};
+  uint64_t m_spill_reserved{0};
   size_t m_spill_read{0};
   bool m_spill_reading{false};
 

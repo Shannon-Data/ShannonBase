@@ -1,0 +1,74 @@
+# Cross-schema candidate discovery and dispatch beyond the eight-job limit.
+--source include/have_debug.inc
+--source include/no_ps_protocol.inc
+--disable_query_log
+CREATE DATABASE sh_recovery_many_a;
+CREATE DATABASE sh_recovery_many_b;
+--let $i = 10
+while ($i) {
+ eval CREATE TABLE sh_recovery_many_a.t$i (id INT PRIMARY KEY, v INT) SECONDARY_ENGINE=rapid;
+ eval INSERT INTO sh_recovery_many_a.t$i VALUES (1,$i);
+ eval ALTER TABLE sh_recovery_many_a.t$i SECONDARY_LOAD;
+ --dec $i
+}
+CREATE TABLE sh_recovery_many_b.t1 (id INT PRIMARY KEY, v INT) SECONDARY_ENGINE=rapid;
+CREATE TABLE sh_recovery_many_b.t2 (id INT PRIMARY KEY, v INT) SECONDARY_ENGINE=rapid;
+INSERT INTO sh_recovery_many_b.t1 VALUES (1,11);
+INSERT INTO sh_recovery_many_b.t2 VALUES (1,12);
+ALTER TABLE sh_recovery_many_b.t1 SECONDARY_LOAD;
+ALTER TABLE sh_recovery_many_b.t2 SECONDARY_LOAD;
+--enable_query_log
+--let $restart_parameters = restart: --rapid_reload_on_restart=ON
+--source include/restart_mysqld.inc
+--let $wait_condition = SELECT COUNT(*)=12 FROM performance_schema.rpd_table_id WHERE SCHEMA_NAME IN ('sh_recovery_many_a','sh_recovery_many_b')
+--source include/wait_condition.inc
+--let $loaded = `SELECT COUNT(*) FROM performance_schema.rpd_table_id WHERE SCHEMA_NAME IN ('sh_recovery_many_a','sh_recovery_many_b')`
+if ($loaded != 12) {
+ --die Recovery omitted a loaded table across schema/job boundaries
+}
+SELECT SCHEMA_NAME,COUNT(*) AS loaded_tables FROM performance_schema.rpd_table_id WHERE SCHEMA_NAME IN ('sh_recovery_many_a','sh_recovery_many_b') GROUP BY SCHEMA_NAME ORDER BY SCHEMA_NAME;
+--let $datadir = `SELECT @@datadir`
+--disable_query_log
+--let $i = 10
+while ($i) {
+ --file_exists $datadir/rapid_snapshots/sh_recovery_many_a/t$i/checkpoints/checkpoint-1.manifest 60
+ --dec $i
+}
+--file_exists $datadir/rapid_snapshots/sh_recovery_many_b/t1/checkpoints/checkpoint-1.manifest 60
+--file_exists $datadir/rapid_snapshots/sh_recovery_many_b/t2/checkpoints/checkpoint-1.manifest 60
+--enable_query_log
+--source include/kill_and_restart_mysqld.inc
+--let $wait_condition = SELECT COUNT(*)=12 FROM performance_schema.rpd_table_id WHERE SCHEMA_NAME IN ('sh_recovery_many_a','sh_recovery_many_b')
+--source include/wait_condition.inc
+--let $loaded = `SELECT COUNT(*) FROM performance_schema.rpd_table_id WHERE SCHEMA_NAME IN ('sh_recovery_many_a','sh_recovery_many_b')`
+if ($loaded != 12) {
+ --die Crash recovery omitted a loaded table
+}
+SELECT SCHEMA_NAME,COUNT(*) AS loaded_tables FROM performance_schema.rpd_table_id WHERE SCHEMA_NAME IN ('sh_recovery_many_a','sh_recovery_many_b') GROUP BY SCHEMA_NAME ORDER BY SCHEMA_NAME;
+--let $wait_condition = SELECT VARIABLE_VALUE=12 FROM performance_schema.global_status WHERE VARIABLE_NAME='rapid_recovery_storage_restores'
+--source include/wait_condition.inc
+--let $restores = `SELECT VARIABLE_VALUE FROM performance_schema.global_status WHERE VARIABLE_NAME='rapid_recovery_storage_restores'`
+if ($restores != 12) {
+ --die Every table must recover from its native checkpoint after the crash
+}
+SET use_secondary_engine=FORCED;
+--disable_query_log
+--let $i = 10
+while ($i) {
+ --let $actual = `SELECT v FROM sh_recovery_many_a.t$i WHERE id=1`
+ if ($actual != $i) {
+  --die A recovered table lost its source data
+ }
+ --dec $i
+}
+--let $actual = `SELECT v FROM sh_recovery_many_b.t1 WHERE id=1`
+if ($actual != 11) {
+ --die Second-schema t1 lost its source data
+}
+--let $actual = `SELECT v FROM sh_recovery_many_b.t2 WHERE id=1`
+if ($actual != 12) {
+ --die Second-schema t2 lost its source data
+}
+--enable_query_log
+DROP DATABASE sh_recovery_many_a;
+DROP DATABASE sh_recovery_many_b;

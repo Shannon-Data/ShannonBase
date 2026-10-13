@@ -1,0 +1,66 @@
+# One revoked table must require manual load without blocking a healthy table's
+# native recovery and committed GTID/binlog replay.
+--source suite/secondary_engine/include/storage_layer_baseline.inc
+CALL mtr.add_suppression("recovery eligibility is revoked or cannot be verified; automatic recovery stopped");
+CALL mtr.add_suppression("RecoveryManager: a source change reached sh_storage_recovery.t");
+CREATE TABLE healthy (id INT PRIMARY KEY, v INT) SECONDARY_ENGINE=rapid;
+INSERT INTO healthy VALUES (1,100);
+ALTER TABLE healthy SECONDARY_LOAD;
+--file_exists $datadir/rapid_snapshots/sh_storage_recovery/healthy/checkpoints/checkpoint-1.manifest 60
+# Establish both source-log anchors after the load DDL has committed. The first
+# image may precede SECONDARY_LOAD's binlog event, which replay rejects as DDL.
+--let $restart_parameters = restart: --rapid_reload_on_restart=ON
+--source include/restart_mysqld.inc
+USE sh_storage_recovery;
+--let $wait_condition = SELECT COUNT(*)=2 FROM performance_schema.rpd_table_id WHERE SCHEMA_NAME='sh_storage_recovery'
+--source include/wait_condition.inc
+--file_exists $datadir/rapid_snapshots/sh_storage_recovery/t/checkpoints/checkpoint-1.manifest 60
+--file_exists $datadir/rapid_snapshots/sh_storage_recovery/healthy/checkpoints/checkpoint-1.manifest 60
+SET sql_log_bin=OFF;
+UPDATE t SET v=11 WHERE id=1;
+SET sql_log_bin=ON;
+UPDATE healthy SET v=101 WHERE id=1;
+--let $restart_parameters = restart: --rapid_reload_on_restart=ON
+--source include/kill_and_restart_mysqld.inc
+USE sh_storage_recovery;
+--let $grep_file = $MYSQLTEST_VARDIR/log/mysqld.1.err
+--let $grep_pattern = sh_storage_recovery.t recovery eligibility is revoked or cannot be verified; automatic recovery stopped
+--let $wait_timeout = 60
+--source include/wait_for_pattern_in_file.inc
+--let $wait_condition = SELECT CAST(VARIABLE_VALUE AS UNSIGNED)=1 FROM performance_schema.global_status WHERE VARIABLE_NAME='rapid_recovery_storage_restores'
+--source include/wait_condition.inc
+--let $restores = `SELECT VARIABLE_VALUE FROM performance_schema.global_status WHERE VARIABLE_NAME='rapid_recovery_storage_restores'`
+--let $reloads = `SELECT VARIABLE_VALUE FROM performance_schema.global_status WHERE VARIABLE_NAME='rapid_recovery_primary_reloads'`
+if ($restores != 1) {
+ --die Healthy table must actually use native recovery, not primary reload
+}
+if ($reloads != 0) {
+ --die A revoked table must not trigger automatic primary reload
+}
+SELECT TABLE_NAME FROM performance_schema.rpd_table_id WHERE SCHEMA_NAME='sh_storage_recovery' ORDER BY TABLE_NAME;
+SELECT VARIABLE_NAME,VARIABLE_VALUE FROM performance_schema.global_status WHERE VARIABLE_NAME IN ('rapid_recovery_storage_restores','rapid_recovery_primary_reloads') ORDER BY VARIABLE_NAME;
+SET use_secondary_engine=FORCED;
+SELECT id,v FROM healthy ORDER BY id;
+--let $healthy_actual = `SELECT GROUP_CONCAT(CONCAT(id,':',v) ORDER BY id) FROM healthy`
+if ($healthy_actual != 1:101) {
+ --die Healthy native recovery must include the committed source update
+}
+--error ER_SECONDARY_ENGINE_PLUGIN
+SELECT id,v FROM t ORDER BY id;
+SET use_secondary_engine=ON;
+SELECT id,v FROM t ORDER BY id;
+--let $source_actual = `SELECT GROUP_CONCAT(CONCAT(id,':',v) ORDER BY id) FROM t`
+if ($source_actual != 1:11,2:20,3:30) {
+ --die Unlogged source commit must survive AP recovery refusal
+}
+SET use_secondary_engine=OFF;
+UPDATE t SET v=12 WHERE id=1;
+ALTER TABLE t SECONDARY_LOAD;
+--let $assert_digest = SELECT GROUP_CONCAT(CONCAT(id,':',v) ORDER BY id) FROM t
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_digest = SELECT GROUP_CONCAT(CONCAT(id,':',v) ORDER BY id) FROM healthy
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+SET use_secondary_engine=FORCED;
+SELECT id,v FROM t ORDER BY id;
+SELECT id,v FROM healthy ORDER BY id;
+DROP DATABASE sh_storage_recovery;

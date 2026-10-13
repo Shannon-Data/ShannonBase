@@ -43,7 +43,7 @@ class Imcu;
 static constexpr uint32_t SNAP_MAGIC = 0x50414E53u;
 static constexpr uint16_t SNAP_FORMAT_VER = 2u;
 static constexpr uint32_t MANIFEST_MAGIC = 0x4E414D52u;
-static constexpr uint16_t MANIFEST_FORMAT_VER = 2u;
+static constexpr uint16_t MANIFEST_FORMAT_VER = 3u;
 static constexpr uint64_t MAX_CU_SNAPSHOT_SIZE = (1ull << 40);
 static constexpr size_t kMaxRetainedGenerations = 2;
 static constexpr size_t SNAP_FILE_HEADER_SIZE = 36;
@@ -70,12 +70,22 @@ struct RecoveryManifest {
   uint64_t table_id{0};
   uint64_t generation{0};
   uint64_t schema_fingerprint{0};
+  uint64_t snapshot_scn{0};
+  uint64_t persisted_scn{0};
   Recovery::BinlogPosition binlog;
   std::vector<ManifestImcuEntry> imcus;
 };
 
+enum class PersistedLoadState : uint8_t { AVAILABLE = 0, STALE = 1 };
+// Periodic runtime metadata, not a source-transaction eligibility certificate.
+struct RecoveryTableState {
+  uint64_t table_id{0}, generation{0}, snapshot_scn{0}, persisted_scn{0};
+  PersistedLoadState state{PersistedLoadState::AVAILABLE};
+  uint8_t stale_reason{0};
+};
+
 // Owns immutable committed checkpoints. MySQL binlog is the only replay log.
-// Legacy manifests are rejected and rebuilt from InnoDB; there is no WAL I/O.
+// Manifest v2/v3 are readable; unsupported formats require source reload.
 class TablePersistenceManager {
  public:
   TablePersistenceManager(const std::string &data_dir, const std::string &db, const std::string &table);
@@ -83,9 +93,15 @@ class TablePersistenceManager {
   bool open();
   void close() {}
   bool reset_epoch();
+  bool checkpoint_table_state(uint64_t table_id);
+  bool persist_table_state(const RecoveryTableState &state);
+  Result<RecoveryTableState> load_table_state() const;
+  std::filesystem::path table_state_path() const { return m_partition_dir / "table_state.checkpoint"; }
   bool erase_store() { return m_store->erase(m_db_name, m_tbl_name); }
   bool enable_notifications() { return reset_epoch(); }
   Recovery::NotificationTracker *notifications() { return &m_notifications; }
+  // Serialize recovery jobs for this table; source callbacks do not take it.
+  std::mutex &recovery_mutex() { return m_recovery_mutex; }
   bool checkpoint(Imcu *trigger, uint64_t sequence = 0);
   Result<uint64_t> load_snapshot(Imcu *imcu, uint64_t generation);
   Result<size_t> recover(const std::vector<Imcu *> &imcus, uint64_t *restored_generation = nullptr);
@@ -97,8 +113,9 @@ class TablePersistenceManager {
   bool remove_generation(uint64_t generation);
   bool recovery_required() const { return m_recovery_required.load(); }
   void require_recovery() { m_recovery_required.store(true); }
-  bool revoke_fast_recovery();
-  bool mark_recovery_taint();
+  // Fence live recovery first; provider/path allocation failures return false.
+  bool revoke_fast_recovery() noexcept;
+  bool mark_recovery_taint() noexcept;
   bool recovery_tainted() const;
   void clear_recovery_taint();
   std::filesystem::path recovery_taint_path() const { return m_partition_dir / "reload_required"; }
@@ -107,12 +124,15 @@ class TablePersistenceManager {
   }
 
  private:
+  std::mutex m_recovery_mutex;
+  bool persist_table_state_locked(RecoveryTableState state);
+  Result<uint64_t> load_snapshot_impl(Imcu *imcu, uint64_t generation);
   bool persist_manifest(const RecoveryManifest &manifest);
   bool write_snap_header(std::ostream &out, uint32_t imcu_id, uint32_t cols, uint64_t sequence) const;
   bool read_snap_header(std::istream &in, uint32_t &imcu_id, uint32_t &cols, uint64_t &sequence) const;
   bool write_imcu_metadata(std::ostream &out, const Imcu *imcu) const;
   bool read_imcu_metadata(std::istream &in, Imcu *imcu) const;
-  bool serialize_imcu(Imcu *imcu, uint64_t sequence, std::string &out) const;
+  bool serialize_imcu(Imcu *imcu, uint64_t sequence, std::ostream &out) const;
   void gc_old_generations();
   std::string m_db_name, m_tbl_name;
   std::filesystem::path m_partition_dir, m_recovery_taint_root;

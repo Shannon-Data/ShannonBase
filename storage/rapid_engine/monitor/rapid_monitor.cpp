@@ -95,8 +95,8 @@ void collect_rapid_monitor_metrics(Metrics &metrics) {
         metrics.total_cus += imcu->get_column_count();
         auto sz = imcu->estimate_size();
         metrics.estimated_data_size_bytes += sz;
-        // compressed_size not directly exposed; approximate via estimate_size.
-        metrics.estimated_compressed_size_bytes += sz;
+        // Unknown until a physical compressed-byte measurement is available.
+        // Do not report the uncompressed estimate as compressed storage.
       }
     });
   }

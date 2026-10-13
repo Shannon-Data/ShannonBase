@@ -39,6 +39,7 @@
 #include "sql/resourcegroups/resource_group.h"
 #include "sql/resourcegroups/resource_group_mgr.h"
 #include "sql/sql_class.h"
+#include "storage/rapid_engine/utils/memory_pool.h"
 #ifdef SHANNON_LINUX_PLATFORM
 #include <dirent.h>
 #include <sched.h>
@@ -47,6 +48,119 @@
 #endif
 
 namespace ShannonBase::ResMgmt {
+
+class SystemPoolState {
+ public:
+  SystemPoolState(std::shared_ptr<Utils::MemoryPool> parent, std::shared_ptr<Utils::MemoryPool> child,
+                  SystemMemoryLimits policy)
+      : root(std::move(parent)), pool(std::move(child)), limits(policy), budget(policy.query_total, policy.query) {}
+  std::shared_ptr<Utils::MemoryPool> root;  // Destroy after the child.
+  std::shared_ptr<Utils::MemoryPool> pool;
+  SystemMemoryLimits limits;
+  MemoryBudget budget;
+};
+namespace {
+std::mutex system_pool_mutex;
+std::shared_ptr<SystemPoolState> system_pool;
+std::shared_ptr<SystemPoolState> system_pool_state() {
+  std::lock_guard lock(system_pool_mutex);
+  return system_pool;
+}
+}  // namespace
+
+SystemMemoryLimits system_memory_limits(size_t root_capacity) {
+  constexpr size_t granule = 64 * 1024;
+  const size_t capacity = (root_capacity / 8 / granule) * granule;
+  if (capacity < 16 * granule) return {};
+  return {capacity, capacity - capacity / 4, capacity / 4, capacity / 16};
+}
+
+bool initialize_system_pool(const std::shared_ptr<Utils::MemoryPool> &root) {
+  if (!root) return false;
+  std::lock_guard lock(system_pool_mutex);
+  if (system_pool && (system_pool->budget.reserved() || system_pool->pool->stats().used_bytes)) return false;
+  auto limits = system_memory_limits(root->stats().total_capacity);
+  if (!limits.pool) return false;
+  auto child = root->create_sub_pool(limits.pool, "sys_pool");
+  if (!child) return false;
+  DBUG_EXECUTE_IF("rapid_query_memory_small", {
+    limits.query_total = 16 * 1024 * 1024;
+    limits.query = 8 * 1024 * 1024;
+    limits.operation = 4 * 1024 * 1024;
+  });
+  system_pool = std::make_shared<SystemPoolState>(root, std::move(child), limits);
+  return true;
+}
+
+void shutdown_system_pool() {
+  std::lock_guard lock(system_pool_mutex);
+  system_pool.reset();
+}
+SystemMemoryLimits system_memory_limits() {
+  auto state = system_pool_state();
+  return state ? state->limits : SystemMemoryLimits{};
+}
+SystemPoolStats system_pool_stats() {
+  auto state = system_pool_state();
+  if (!state) return {};
+  auto stats = state->pool->stats();
+  return {stats.total_capacity, stats.used_bytes, stats.peak_usage, state->budget.reserved(), stats.failed_allocations};
+}
+
+MemoryBudget::Reservation reserve_query_memory(const void *query, size_t requested) {
+  // Serialize admission with replacement; a live grant prohibits a resize.
+  std::lock_guard lock(system_pool_mutex);
+  if (!system_pool) return {};
+  requested = PlanningMemoryScope::limit_request(query, requested);
+  requested = std::min(requested, system_pool->limits.operation);
+  DBUG_EXECUTE_IF("rapid_operator_tiny_budget", { requested = std::min<size_t>(requested, 64 * 1024); });
+  auto grant = system_pool->budget.reserve(query, requested, std::min<size_t>(requested, 64 * 1024));
+  grant.retain(system_pool);
+  return grant;
+}
+
+void SystemPoolDeleter::operator()(uint8_t *pointer) const noexcept {
+  if (pointer) state->pool->deallocate(pointer, bytes);
+}
+SystemPoolBuffer allocate_system_buffer(size_t bytes) {
+  auto state = system_pool_state();
+  auto *pointer = state && bytes && bytes <= SIZE_MAX - CACHE_LINE_SIZE
+                      ? static_cast<uint8_t *>(state->pool->allocate_auto(bytes))
+                      : nullptr;
+  return SystemPoolBuffer(pointer, SystemPoolDeleter{std::move(state), bytes});
+}
+
+PoolMemoryResource::PoolMemoryResource() : m_state(system_pool_state()) {}
+void *PoolMemoryResource::try_allocate(size_t bytes, size_t alignment) {
+  if (!m_state || !alignment || (alignment & (alignment - 1))) return nullptr;
+  bytes = std::max<size_t>(bytes, 1);
+  if (alignment <= CACHE_LINE_SIZE) {
+    if (bytes > SIZE_MAX - CACHE_LINE_SIZE) return nullptr;
+    return m_state->pool->allocate_auto(bytes);
+  }
+  if (alignment > SIZE_MAX - sizeof(void *) - CACHE_LINE_SIZE ||
+      bytes > SIZE_MAX - alignment - sizeof(void *) - CACHE_LINE_SIZE)
+    return nullptr;
+  void *base = m_state->pool->allocate_auto(bytes + alignment + sizeof(void *));
+  if (!base) return nullptr;
+  auto address = (reinterpret_cast<uintptr_t>(base) + sizeof(void *) + alignment - 1) & ~(alignment - 1);
+  auto pointer = reinterpret_cast<void *>(address);
+  reinterpret_cast<void **>(pointer)[-1] = base;
+  return pointer;
+}
+void *PoolMemoryResource::do_allocate(size_t bytes, size_t alignment) {
+  void *pointer = try_allocate(bytes, alignment);
+  if (!pointer) throw std::bad_alloc();  // Required by the existing foreground PMR contract.
+  return pointer;
+}
+void PoolMemoryResource::do_deallocate(void *pointer, size_t bytes, size_t alignment) {
+  if (!pointer) return;
+  if (alignment > CACHE_LINE_SIZE) {
+    pointer = reinterpret_cast<void **>(pointer)[-1];
+    bytes = std::max<size_t>(bytes, 1) + alignment + sizeof(void *);
+  }
+  m_state->pool->deallocate(pointer, std::max<size_t>(bytes, 1));
+}
 std::atomic<uint64_t> cpu_restore_failures{0};
 char *tp_resource_group = nullptr;
 char *ap_resource_group = nullptr;

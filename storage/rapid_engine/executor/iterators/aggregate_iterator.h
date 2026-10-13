@@ -352,8 +352,7 @@ class VectorizedAggregateIterator final : public RowIterator {
    */
   class HashMemoryResource final : public std::pmr::memory_resource {
    public:
-    explicit HashMemoryResource(size_t limit_bytes)
-        : m_limit_bytes(limit_bytes), m_upstream(std::pmr::new_delete_resource()) {}
+    explicit HashMemoryResource(size_t limit_bytes) : m_limit_bytes(limit_bytes), m_upstream(&m_pool_memory) {}
 
     size_t limit_bytes() const { return m_limit_bytes; }
     size_t used_bytes() const { return m_used_bytes; }
@@ -397,6 +396,7 @@ class VectorizedAggregateIterator final : public RowIterator {
     size_t m_used_bytes{0};
     size_t m_peak_bytes{0};
     size_t m_failed_allocation_bytes{0};
+    ResMgmt::PoolMemoryResource m_pool_memory;
     std::pmr::memory_resource *m_upstream{nullptr};
   };
 

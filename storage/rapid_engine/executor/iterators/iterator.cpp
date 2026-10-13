@@ -94,7 +94,6 @@ ColumnChunk &ColumnChunk::operator=(const ColumnChunk &other) {
 
 ColumnChunk::ColumnChunk(ColumnChunk &&other) noexcept
     : m_memory(other.m_memory),
-      m_buffer_charge(std::move(other.m_buffer_charge)),
       m_source_fld(other.m_source_fld),
       m_field_index(other.m_field_index),
       m_table(other.m_table),
@@ -128,7 +127,6 @@ ColumnChunk &ColumnChunk::operator=(ColumnChunk &&other) noexcept {
 
 void ColumnChunk::swap(ColumnChunk &other) {
   std::swap(m_memory, other.m_memory);
-  std::swap(m_buffer_charge, other.m_buffer_charge);
   std::swap(m_source_fld, other.m_source_fld);
   std::swap(m_type, other.m_type);
   std::swap(m_field_width, other.m_field_width);
@@ -142,28 +140,37 @@ void ColumnChunk::swap(ColumnChunk &other) {
   std::swap(m_null_mask_data, other.m_null_mask_data);
 }
 
+ColumnChunk::Buffer ColumnChunk::allocate_buffer(size_t capacity) {
+  const size_t bytes = sizeof(bit_array_t) + capacity * m_field_width + (capacity + 7) / 8;
+  BufferDeleter deleter;
+  deleter.memory = m_memory;
+  deleter.bytes = bytes;
+  auto *base = static_cast<uchar *>(m_memory ? m_memory->allocate(bytes, alignof(bit_array_t))
+                                             : deleter.pool.allocate(bytes, alignof(bit_array_t)));
+  auto *data = base + sizeof(bit_array_t);
+  new (base) bit_array_t(capacity, data + capacity * m_field_width);
+  return Buffer(data, std::move(deleter));
+}
+
 void ColumnChunk::initialize_buffers() {
   if (m_chunk_size == 0 || m_field_width == 0) {
+    m_null_mask.reset();
     m_cols_buffer.reset();
     m_cols_buffer_data = nullptr;
-    m_null_mask.reset();
     m_null_mask_data = nullptr;
-    m_buffer_charge.reset();
     return;
   }
 
   if (m_chunk_size > SIZE_MAX / m_field_width || m_chunk_size > SIZE_MAX - 7) throw std::bad_alloc();
   const size_t buffer_size = m_chunk_size * m_field_width;
   if (buffer_size > SIZE_MAX - (m_chunk_size + 7) / 8 - sizeof(bit_array_t)) throw std::bad_alloc();
-  ResMgmt::BoundedMemoryResource::Reservation replacement(m_memory,
-                                                          buffer_size + (m_chunk_size + 7) / 8 + sizeof(bit_array_t));
-  auto data = std::make_unique<uchar[]>(buffer_size);
-  auto null_mask = std::make_unique<ShannonBase::bit_array_t>(m_chunk_size);
+  auto data = allocate_buffer(m_chunk_size);
+  auto *descriptor = reinterpret_cast<bit_array_t *>(data.get() - sizeof(bit_array_t));
+  m_null_mask.reset();  // Destroy the old descriptor before returning its buffer.
   m_cols_buffer = std::move(data);
-  m_null_mask = std::move(null_mask);
+  m_null_mask.reset(descriptor);
   m_cols_buffer_data = m_cols_buffer.get();
   m_null_mask_data = m_null_mask->data;
-  m_buffer_charge = std::move(replacement);
 }
 
 void ColumnChunk::copy_from(const ColumnChunk &other) {
@@ -222,22 +229,20 @@ bool ColumnChunk::grow(size_t new_capacity) {
   if (new_capacity > SIZE_MAX - 7 ||
       new_capacity * m_field_width > SIZE_MAX - (new_capacity + 7) / 8 - sizeof(bit_array_t))
     return false;
-  ResMgmt::BoundedMemoryResource::Reservation replacement(
-      m_memory, new_capacity * m_field_width + (new_capacity + 7) / 8 + sizeof(bit_array_t));
   const size_t current = m_current_size;
-  auto new_buffer = std::make_unique<uchar[]>(new_capacity * m_field_width);
-  auto new_null_mask = std::make_unique<ShannonBase::bit_array_t>(new_capacity);
+  auto new_buffer = allocate_buffer(new_capacity);
+  auto *new_null_mask = reinterpret_cast<bit_array_t *>(new_buffer.get() - sizeof(bit_array_t));
   if (current > 0) {
     std::memcpy(new_buffer.get(), m_cols_buffer.get(), current * m_field_width);
     std::memcpy(new_null_mask->data, m_null_mask->data, (current + 7) / 8);
   }
 
+  m_null_mask.reset();
   m_cols_buffer = std::move(new_buffer);
-  m_null_mask = std::move(new_null_mask);
+  m_null_mask.reset(new_null_mask);
   m_cols_buffer_data = m_cols_buffer.get();
   m_null_mask_data = m_null_mask->data;
   m_chunk_size = new_capacity;
-  m_buffer_charge = std::move(replacement);
   return true;
 }
 
