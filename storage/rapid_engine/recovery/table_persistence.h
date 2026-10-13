@@ -88,6 +88,8 @@ class TablePersistenceManager {
   bool erase_store() { return m_store->erase(m_db_name, m_tbl_name); }
   bool enable_notifications() { return reset_epoch(); }
   Recovery::NotificationTracker *notifications() { return &m_notifications; }
+  // Serialize recovery jobs for this table; source callbacks do not take it.
+  std::mutex &recovery_mutex() { return m_recovery_mutex; }
   bool checkpoint(Imcu *trigger, uint64_t sequence = 0);
   Result<uint64_t> load_snapshot(Imcu *imcu, uint64_t generation);
   Result<size_t> recover(const std::vector<Imcu *> &imcus, uint64_t *restored_generation = nullptr);
@@ -110,6 +112,7 @@ class TablePersistenceManager {
   }
 
  private:
+  std::mutex m_recovery_mutex;
   Result<uint64_t> load_snapshot_impl(Imcu *imcu, uint64_t generation);
   bool persist_manifest(const RecoveryManifest &manifest);
   bool write_snap_header(std::ostream &out, uint32_t imcu_id, uint32_t cols, uint64_t sequence) const;

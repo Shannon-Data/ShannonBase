@@ -143,3 +143,45 @@
 官方恢复页面的原生存储优先、日志缺失等情况下源端 fallback 是本轮对照边界；未实现 OCI/S3 provider 或分布式 HA，也未公开推断 HeatWave 私有原子协议。AP 持久化水位不是未日志化源提交的 durable witness；所有撤销证据无法落盘的不可识别窗口仍未闭环。完整回归、长期压力和 SLA 资格未由这些定向测试替代。
 
 构建日志：`/tmp/shannon-heatwave-boundary-verified-build.log`；gunit：`/tmp/shannon-heatwave-boundary-gunit.log`；MTR 日志目录：`/tmp/shannon-heatwave-boundary-final/log`。
+
+## 按表恢复正确性、发布清理与幂等性续审
+
+分支 `fix/rapid-recovery-lost-revocation`，基线 `185dd3644`。保留现有原生
+checkpoint 校验、绑定 binlog 边界验证、完整 committed transaction replay 和
+发布前 FULL 扩展接口；不实现 TP 全表比对、不用 GTID 与 Rapid SCN 做数值差减。
+
+本轮修正：同表 recovery job 使用独立 mutex 串行化，并在加锁后复查加载状态；
+源 MDL 获取后再次检查撤销，避免等待期间的源变更被误转为自动 primary reload。
+原生恢复、普通表 reload 和分区表 reload 共用注册路径：先 attach 传播，再发布
+share；失败撤销 consumer 登记、share 和部分 IMCS 对象，并要求显式加载。
+重复成功任务跳过实际 restore/replay，不重复计数；重复失败任务保持未发布。
+
+已加载表的 SECONDARY_LOAD 原本就由 check_loadable 拒绝。本轮保留该行为，
+新增回归断言；仍加载的失败表必须先 SECONDARY_UNLOAD 再 SECONDARY_LOAD。
+没有把最初遗漏该检查所产生的“重复手工 load 会追加数据”推测当作既有缺陷。
+
+最终 Debug mysqld 构建通过；恢复协议单测 33/33 通过；最终代码的独立非 record
+MTR 验证共 **17 个业务用例通过**：16 个恢复/加载用例的完整目标运行，加上
+随后独立运行的 1 个分区恢复用例。shutdown_report 不计入业务数量。新增的
+8 个用例覆盖混合表 GTID 恢复、发布失败清理、成功/失败任务重复执行、等待期间
+撤销、重复加载报错、SIGABRT、断电文件模拟与分区重复恢复；既有用例覆盖
+SIGKILL、未提交事务、日志回放、文件损坏、未日志化提交和手工加载一致性。
+
+SIGABRT 用例向独立 MTR mysqld 发信号并关闭 core dump；验证 TP 已提交变更
+保留、未提交变更排除，AP 与 TP 一致。断电模拟是在停止服务器后留下较新的
+破损 manifest 和孤立临时文件，验证完整旧 generation 加 replay。它不等于
+宿主机/虚拟机断电，未验证 OS/设备控制器缓存丢失或真实存储掉电行为。
+
+测试开发中曾发现注入请求在 session 销毁后不生效、checkpoint-1 已被正常 GC
+淘汰、模拟候选编号与已发布 generation 冲突，以及预期 SIGABRT 回溯日志未
+豁免；修正后由最终二进制独立比对，不将这些失败运行或 record 运行计为放行结果。
+
+日志：`/tmp/shannon-recovery-idempotence-debug-build.log`（最终 mysqld），
+`/tmp/shannon-recovery-idempotence-gunit.log`，
+`/tmp/shannon-recovery-idempotence-final-mtr.log`（16 个业务用例），
+`/tmp/shannon-partition-recovery-final.log`（1 个分区业务用例）。
+`git diff --check` 通过。
+
+边界仍然存在：未日志化 TP 提交成功且全部撤销证据丢失，当前 FAST 无法自动
+识别；TP 比对只有接口。本轮不宣称该窗口、真实断电资格、完整 suite、长时间
+并发压力或通用生产 GA 已闭环。

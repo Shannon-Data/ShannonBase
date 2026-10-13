@@ -527,15 +527,25 @@ bool RecoveryJob::execute() {
   auto *scheduler = CheckpointScheduler::global();
   auto *recovery = scheduler ? scheduler->recovery_manager() : nullptr;
   auto manager = recovery ? recovery->table_manager(info.schema_name, info.table_name) : nullptr;
-  if (manager && (manager->recovery_required() || manager->recovery_tainted())) {
+  std::unique_lock<std::mutex> recovery_lock;
+  if (manager) recovery_lock = std::unique_lock<std::mutex>(manager->recovery_mutex());
+  // MDL_SHARED_NO_WRITE is compatible with another recovery job. Recheck after
+  // serializing the table so a second job cannot replay into the first image.
+  if (shannon_loaded_tables->get(info.schema_name, info.table_name)) {
+    settle_pending();
+    return true;
+  }
+  auto reject_revoked_image = [&]() {
+    if (!manager || (!manager->recovery_required() && !manager->recovery_tainted())) return false;
     const std::string message = "RecoveryJob: " + info.schema_name + "." + info.table_name +
                                 " recovery eligibility is revoked or cannot be verified; automatic recovery stopped; "
                                 "run ALTER TABLE SECONDARY_LOAD to reload from the primary";
     LogErr(WARNING_LEVEL, ER_LOG_PRINTF_MSG, message.c_str());
     // Retain pending ownership and the old image's fence until SECONDARY_LOAD
     // resets the epoch. Returning failure does not change the primary commit.
-    return false;
-  }
+    return true;
+  };
+  if (reject_revoked_image()) return false;
 
   DBUG_SIGNAL_WAIT_FOR(thd, "rapid_pause_restart_recovery", "rapid_restart_recovery_paused",
                        "rapid_restart_recovery_continue");
@@ -561,6 +571,11 @@ bool RecoveryJob::execute() {
     return true;
   }
 
+  // A source writer can revoke the image while we wait for MDL. Recheck at
+  // the stable source cut instead of falling through to an automatic reload.
+  if (reject_revoked_image()) return false;
+  m_source_validation_failed = false;
+
   if (try_snapshot_recovery(thd)) {
     settle_pending();
     RapidMonitor::rapid_counters.recovery_storage_restores.fetch_add(1, std::memory_order_relaxed);
@@ -571,6 +586,8 @@ bool RecoveryJob::execute() {
     LogErr(INFORMATION_LEVEL, ER_LOG_PRINTF_MSG, log_msg.c_str());
     return true;
   }
+
+  if (reject_revoked_image()) return false;
 
   // A requested FULL check cannot silently fall back to FAST or trigger an
   // automatic source reload. Keep the failed table unpublished for user load.
@@ -828,12 +845,25 @@ bool RecoveryJob::register_in_loaded_tables(THD *thd, TABLE *source, Imcs::RpdTa
   m_share->is_partitioned = info.is_partitioned;
   m_share->m_tableid = source->file->get_table_id();
 
-  shannon_loaded_tables->add(source->s->db.str, source->s->table_name.str, m_share);
+  bool registered = false;
+  auto rollback_registration = create_scope_guard([&] {
+    if (registered) return;
+    auto *scheduler = CheckpointScheduler::global();
+    auto *recovery = scheduler ? scheduler->recovery_manager() : nullptr;
+    if (recovery) recovery->table_manager(info.schema_name, info.table_name)->require_recovery();
+    Populate::CommittedBinlog::detach(m_share->m_tableid);
+    shannon_loaded_tables->erase(info.schema_name.c_str(), info.table_name.c_str());
+    Imcs::Imcs::instance()->cleanup(m_share->m_tableid);
+  });
+  // Source MDL excludes writes until propagation is attached and publication
+  // completes. Readers must never see a share whose attach can still fail.
   if (Populate::configured_change_propagation_mode.load() == Populate::CopyInfoMode::COMMITTED_BINLOG &&
       !Populate::CommittedBinlog::attach(thd, source, BinlogRecovery::current_position())) {
     Populate::QuarantinePropagationTable(m_share->m_tableid);
     return false;
   }
+  DBUG_EXECUTE_IF("rapid_recovery_publish_failure", { return false; });
+  shannon_loaded_tables->add(source->s->db.str, source->s->table_name.str, m_share);
   if (!shannon_loaded_tables->get(source->s->db.str, source->s->table_name.str)) {
     // Runs on the recovery admin session: there is no client to raise this to.
     std::string log_msg = "RecoveryJob(snapshot): " + info.schema_name + "." + info.table_name +
@@ -841,6 +871,7 @@ bool RecoveryJob::register_in_loaded_tables(THD *thd, TABLE *source, Imcs::RpdTa
     LogErr(ERROR_LEVEL, ER_LOG_PRINTF_MSG, log_msg.c_str());
     return false;
   }
+  registered = true;
   return true;
 }
 
@@ -895,29 +926,12 @@ bool RecoveryJob::reload_normal_table(THD *thd) {
   Utils::Util::update_rpd_meta_info(&context, source, Utils::Util::STAGE::END);
   if (result == SHANNON_SUCCESS) {
     TransactionCoordinator::instance().observe_commit_scn(context.m_extra_info.m_scn);
-    const std::string db_name(source->s->db.str, source->s->db.length);
-    const std::string tbl_name(source->s->table_name.str, source->s->table_name.length);
-    auto m_share = std::make_shared<RapidShare>(*source);
-    m_share->is_partitioned = false;
-    m_share->m_tableid = context.m_table_id;
-
-    shannon_loaded_tables->add(db_name.c_str(), tbl_name.c_str(), m_share);
-    if (Populate::configured_change_propagation_mode.load() == Populate::CopyInfoMode::COMMITTED_BINLOG &&
-        !Populate::CommittedBinlog::attach(thd, source, BinlogRecovery::current_position())) {
-      Populate::QuarantinePropagationTable(m_share->m_tableid);
-      Utils::Util::close_table(thd, source);
-      return false;
+    auto table = Imcs::Imcs::instance()->get_rpd_table_shared(context.m_table_id);
+    if (!table || !register_in_loaded_tables(thd, source, table.get())) {
+      result = HA_ERR_GENERIC;
     }
-    ShannonBase::Utils::Util::close_table(thd, source);
+    Utils::Util::close_table(thd, source);
     source = nullptr;
-    if (!shannon_loaded_tables->get(db_name.c_str(), tbl_name.c_str())) {
-      // A non-zero error code here used to be returned from this bool function,
-      // which made the failure read as success. There is no client to report it
-      // to either -- this runs on the recovery admin session -- so log it.
-      std::string log_msg = "RecoveryJob: " + db_name + "." + tbl_name + " did not register in IMCS after reload";
-      LogErr(ERROR_LEVEL, ER_LOG_PRINTF_MSG, log_msg.c_str());
-      return false;
-    }
   } else {
     ShannonBase::Utils::Util::close_table(thd, source);
     source = nullptr;
@@ -987,29 +1001,10 @@ bool RecoveryJob::reload_partitioned_table(THD *thd) {
                           success ? "" : (std::string(" (err=") + std::to_string(result) + ")").c_str()));
 
   if (success) {
-    const std::string db_name(source->s->db.str, source->s->db.length);
-    const std::string tbl_name(source->s->table_name.str, source->s->table_name.length);
-    auto m_share = std::make_shared<RapidShare>(*source);
-    m_share->is_partitioned = true;
-    m_share->m_tableid = context.m_table_id;
-
-    shannon_loaded_tables->add(db_name.c_str(), tbl_name.c_str(), m_share);
-    if (Populate::configured_change_propagation_mode.load() == Populate::CopyInfoMode::COMMITTED_BINLOG &&
-        !Populate::CommittedBinlog::attach(thd, source, BinlogRecovery::current_position())) {
-      Populate::QuarantinePropagationTable(m_share->m_tableid);
-      Utils::Util::close_table(thd, source);
-      return false;
-    }
-    ShannonBase::Utils::Util::close_table(thd, source);
+    auto table = Imcs::Imcs::instance()->get_rpd_table_shared(context.m_table_id);
+    success = table && register_in_loaded_tables(thd, source, table.get());
+    Utils::Util::close_table(thd, source);
     source = nullptr;
-    if (!shannon_loaded_tables->get(db_name.c_str(), tbl_name.c_str())) {
-      // A non-zero error code here used to be returned from this bool function,
-      // which made the failure read as success. There is no client to report it
-      // to either -- this runs on the recovery admin session -- so log it.
-      std::string log_msg = "RecoveryJob: " + db_name + "." + tbl_name + " did not register in IMCS after reload";
-      LogErr(ERROR_LEVEL, ER_LOG_PRINTF_MSG, log_msg.c_str());
-      return false;
-    }
   } else {
     ShannonBase::Utils::Util::close_table(thd, source);
     source = nullptr;
@@ -1178,8 +1173,25 @@ void RecoveryFramework::dispatch_jobs(const std::vector<SecondaryLoadedTable> &t
     }
 
     std::thread job_thread([this, tbl]() mutable {
+#ifndef NDEBUG
+      bool repeat_job = false;
+      {
+        // execute() destroys its session and thread-local DBUG state on return.
+        // Capture the test request while a valid admin THD owns that state.
+        RecoveryAdminSession debug_session;
+        if (debug_session.is_valid()) DBUG_EXECUTE_IF("rapid_recovery_repeat_job", { repeat_job = true; });
+      }
+#endif
       RecoveryJob job(tbl);
       bool ok = job.execute();
+#ifndef NDEBUG
+      if (repeat_job) {
+        const bool repeated = job.execute();
+        LogErr(INFORMATION_LEVEL, ER_LOG_PRINTF_MSG,
+               repeated == ok ? "RecoveryFramework: repeated recovery returned the same result"
+                              : "RecoveryFramework: repeated recovery changed its result");
+      }
+#endif
       if (ok) m_reloaded_count.fetch_add(1, std::memory_order_relaxed);
 
       {

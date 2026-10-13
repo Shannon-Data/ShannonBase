@@ -1,0 +1,22 @@
+CREATE DATABASE sh_partition_recovery;
+USE sh_partition_recovery;
+CREATE TABLE t (id INT PRIMARY KEY, v INT) SECONDARY_ENGINE=rapid
+PARTITION BY HASH(id) PARTITIONS 2;
+INSERT INTO t VALUES (1,10),(2,20),(3,30);
+ALTER TABLE t SECONDARY_LOAD;
+BEGIN;
+INSERT INTO t VALUES (4,40);
+COMMIT;
+BEGIN;
+INSERT INTO t VALUES (5,50);
+# Kill and restart: --rapid_reload_on_restart=ON --debug=d,rapid_recovery_repeat_job
+USE sh_partition_recovery;
+include/wait_for_pattern_in_file.inc [RecoveryFramework: repeated recovery returned the same result]
+SET use_secondary_engine=FORCED;
+SELECT id,v FROM t ORDER BY id;
+id	v
+1	10
+2	20
+3	30
+4	40
+DROP DATABASE sh_partition_recovery;

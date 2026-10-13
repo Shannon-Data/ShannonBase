@@ -24,6 +24,50 @@ Copyright (c) 2026, Shannon Data AI and/or its affiliates.
 
 # Rapid recovery: native checkpoints and committed MySQL binlog
 
+The current release uses per-table recovery: validate the checkpoint and its
+bound source-log identity, restore native data, replay complete committed
+transactions, and publish only after all required steps succeed. Known revoked
+eligibility or an inspection error leaves that table unloaded for explicit
+`ALTER TABLE db.table SECONDARY_LOAD`; other eligible tables recover independently.
+TP source-state comparison remains an extension interface for a future release.
+
+`PERSISTED_SCN` is a Rapid frontier, not a MySQL GTID. Replay starts from the
+manifest's bound binlog file/offset and prefix digest, which also protects the
+GTID events in that prefix; there is no standalone persisted GTID-set field or
+GTID-minus-SCN calculation. Disabling binlog does not disable InnoDB redo.
+If an unlogged TP commit survives source crash recovery but every AP revocation
+write was lost, a valid old checkpoint and replayable logs cannot detect the
+missing change. That window remains outside the current safety guarantee.
+Only changes actually lost by TP crash recovery may also be omitted by AP
+without creating a TP/AP discrepancy.
+
+Recovery jobs serialize through a per-table mutex and recheck loaded state
+after acquiring it. They also recheck revocation after source MDL acquisition,
+because a source write can invalidate an image while recovery waits for MDL.
+Native replay always starts from a private restored image; failed attempts
+discard it rather than append another replay to partially recovered rows.
+
+Native and primary-reload recovery share one registration path: attach committed
+binlog propagation first, then publish the loaded-table share. Registration
+failure removes the consumer entry, share and partial IMCS image and fences the
+table for explicit SECONDARY_LOAD. A completed job can be repeated without
+reloading or replaying the already published table. Recovery counters count
+successful actual restore/reload operations, not idempotent skips.
+An explicit SECONDARY_LOAD on an already loaded table reports an error before
+scanning. To rebuild a still-loaded failed image, explicitly SECONDARY_UNLOAD
+before SECONDARY_LOAD; restart failures that remain unloaded need only load.
+
+The directed validation includes repeated native recovery across two SIGKILL
+restarts, repeated execution of one successful/failed recovery job, registration
+failure after propagation attach, revocation while waiting for source MDL,
+repeated SECONDARY_LOAD rejection, and independent recovery of healthy/revoked
+tables with GTID enabled. SIGABRT tests verify that committed changes survive
+and uncommitted changes are excluded. A file-level power-loss simulation leaves
+a torn newer manifest and orphan temporary files with the server stopped, then
+requires recovery from the last complete generation plus committed replay.
+It does not cut host/device power or simulate OS/controller cache loss, and
+must not be reported as a physical power-loss qualification.
+
 Rapid's `CAPTURE` online path receives precommit row notifications and maintains
 transaction MVCC; `COMMITTED_BINLOG` decodes committed source transactions in a
 background reader. Both produce `Source::COPY_INFO` row images, distinguished by
