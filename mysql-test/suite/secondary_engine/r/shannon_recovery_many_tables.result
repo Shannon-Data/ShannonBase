@@ -1,0 +1,13 @@
+# restart: --rapid_reload_on_restart=ON
+SELECT SCHEMA_NAME,COUNT(*) AS loaded_tables FROM performance_schema.rpd_table_id WHERE SCHEMA_NAME IN ('sh_recovery_many_a','sh_recovery_many_b') GROUP BY SCHEMA_NAME ORDER BY SCHEMA_NAME;
+SCHEMA_NAME	loaded_tables
+sh_recovery_many_a	10
+sh_recovery_many_b	2
+# Kill and restart: --rapid_reload_on_restart=ON
+SELECT SCHEMA_NAME,COUNT(*) AS loaded_tables FROM performance_schema.rpd_table_id WHERE SCHEMA_NAME IN ('sh_recovery_many_a','sh_recovery_many_b') GROUP BY SCHEMA_NAME ORDER BY SCHEMA_NAME;
+SCHEMA_NAME	loaded_tables
+sh_recovery_many_a	10
+sh_recovery_many_b	2
+SET use_secondary_engine=FORCED;
+DROP DATABASE sh_recovery_many_a;
+DROP DATABASE sh_recovery_many_b;

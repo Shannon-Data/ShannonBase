@@ -427,6 +427,15 @@ void CheckpointScheduler::do_periodic_checkpoint() {
 
   imcs->for_each_table([this](Imcs::RpdTable *rpd_table) {
     if (!rpd_table) return;
+    const auto &metadata = rpd_table->meta();
+    if (!Utils::try_bool_operation([&] {
+          auto state_manager = m_mgr->table_manager(metadata.db_name, metadata.table_name);
+          return state_manager->checkpoint_table_state(metadata.table_id);
+        })) {
+      const std::string message =
+          "CheckpointScheduler: table metadata checkpoint failed " + metadata.db_name + "." + metadata.table_name;
+      LogErr(WARNING_LEVEL, ER_LOG_PRINTF_MSG, message.c_str());
+    }
     // Partitioned tables do not participate: see RpdTable::recovery_supported().
     if (!rpd_table->recovery_supported()) return;
     const auto db = rpd_table->meta().db_name;
@@ -1118,9 +1127,10 @@ void RecoveryFramework::process_external_global_state() {
     LogErr(WARNING_LEVEL, ER_LOG_PRINTF_MSG, warning_str.c_str());
   }
 
-  const uint32_t interval_secs = (ShannonBase::shannon_rpd_engine_cfg.snapshot_interval_secs > 0)
-                                     ? ShannonBase::shannon_rpd_engine_cfg.snapshot_interval_secs
-                                     : 300u;
+  uint32_t interval_secs = (ShannonBase::shannon_rpd_engine_cfg.snapshot_interval_secs > 0)
+                               ? ShannonBase::shannon_rpd_engine_cfg.snapshot_interval_secs
+                               : 300u;
+  DBUG_EXECUTE_IF("rapid_table_state_test_tick", { interval_secs = 1; });
 
   CheckpointScheduler::Config chk_cfg;
   chk_cfg.snapshot_base_dir = snap_dir;

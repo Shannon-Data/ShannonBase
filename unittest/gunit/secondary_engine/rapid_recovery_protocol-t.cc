@@ -346,6 +346,79 @@ TEST(RapidRecoveryProtocol, LegacyManifestDoesNotInventScnProgress) {
   EXPECT_EQ(0u, manifest.value.snapshot_scn);
   EXPECT_EQ(0u, manifest.value.persisted_scn);
 }
+TEST(RapidRecoveryProtocol, TableMetadataPreservesIdentityAndWatermarks) {
+  RevocationDirectory directory;
+  ShannonBase::Imcs::TablePersistenceManager manager(directory.snapshots(), "db", "table");
+  ShannonBase::Imcs::RecoveryTableState state{17, 3, 100, 150};
+  ASSERT_TRUE(manager.persist_table_state(state));
+  const auto loaded = manager.load_table_state();
+  ASSERT_TRUE(loaded.ok());
+  EXPECT_EQ(17u, loaded.value.table_id);
+  EXPECT_EQ(3u, loaded.value.generation);
+  EXPECT_EQ(100u, loaded.value.snapshot_scn);
+  EXPECT_EQ(150u, loaded.value.persisted_scn);
+  EXPECT_FALSE(manager.recovery_tainted());
+}
+TEST(RapidRecoveryProtocol, StaleMetadataSurvivesWithoutRevocationMarkers) {
+  RevocationDirectory directory;
+  ShannonBase::Imcs::TablePersistenceManager manager(directory.snapshots(), "db", "table");
+  ShannonBase::Imcs::RecoveryTableState state{17, 3, 100, 150, ShannonBase::Imcs::PersistedLoadState::STALE, 15};
+  ASSERT_TRUE(manager.persist_table_state(state));
+  EXPECT_FALSE(std::filesystem::exists(manager.recovery_taint_path()));
+  EXPECT_FALSE(std::filesystem::exists(manager.recovery_taint_alt_path()));
+  ShannonBase::Imcs::TablePersistenceManager reopened(directory.snapshots(), "db", "table");
+  ASSERT_TRUE(reopened.open());
+  EXPECT_TRUE(reopened.recovery_required());
+  EXPECT_EQ(state.stale_reason, reopened.load_table_state().value.stale_reason);
+}
+TEST(RapidRecoveryProtocol, AvailableMetadataCannotClearLiveRevocation) {
+  RevocationDirectory directory;
+  ShannonBase::Imcs::TablePersistenceManager manager(directory.snapshots(), "db", "table");
+  manager.require_recovery();
+  ASSERT_TRUE(manager.persist_table_state({17, 3, 100, 150}));
+  ASSERT_TRUE(manager.load_table_state().ok());
+  EXPECT_EQ(ShannonBase::Imcs::PersistedLoadState::STALE, manager.load_table_state().value.state);
+}
+TEST(RapidRecoveryProtocol, ExplicitEpochResetRemovesStaleMetadata) {
+  RevocationDirectory directory;
+  ShannonBase::Imcs::TablePersistenceManager manager(directory.snapshots(), "db", "table");
+  ASSERT_TRUE(manager.persist_table_state({17, 3, 100, 150, ShannonBase::Imcs::PersistedLoadState::STALE, 15}));
+  ASSERT_TRUE(manager.reset_epoch());
+  EXPECT_FALSE(manager.recovery_required());
+  EXPECT_FALSE(std::filesystem::exists(manager.table_state_path()));
+  EXPECT_FALSE(manager.recovery_tainted());
+  ASSERT_TRUE(manager.persist_table_state({17, 1, 200, 250}));
+  EXPECT_EQ(ShannonBase::Imcs::PersistedLoadState::AVAILABLE, manager.load_table_state().value.state);
+}
+TEST(RapidRecoveryProtocol, CorruptMetadataFailsClosed) {
+  RevocationDirectory directory;
+  ShannonBase::Imcs::TablePersistenceManager manager(directory.snapshots(), "db", "table");
+  ASSERT_TRUE(manager.persist_table_state({17, 3, 100, 150}));
+  std::fstream file(manager.table_state_path(), std::ios::in | std::ios::out | std::ios::binary);
+  file.seekp(6);
+  file.put('x');
+  file.close();
+  EXPECT_FALSE(manager.load_table_state().ok());
+  EXPECT_TRUE(manager.recovery_tainted());
+}
+TEST(RapidRecoveryProtocol, TruncatedMetadataFailsClosed) {
+  RevocationDirectory directory;
+  ShannonBase::Imcs::TablePersistenceManager manager(directory.snapshots(), "db", "table");
+  ASSERT_TRUE(manager.persist_table_state({17, 3, 100, 150}));
+  std::filesystem::resize_file(manager.table_state_path(), 12);
+  EXPECT_FALSE(manager.load_table_state().ok());
+  EXPECT_TRUE(manager.recovery_tainted());
+}
+TEST(RapidRecoveryProtocol, MetadataRejectsInvalidStateAndWatermarks) {
+  RevocationDirectory directory;
+  ShannonBase::Imcs::TablePersistenceManager manager(directory.snapshots(), "db", "table");
+  EXPECT_FALSE(manager.persist_table_state({17, 3, 150, 100}));
+  EXPECT_FALSE(
+      manager.persist_table_state({17, 3, 100, 150, static_cast<ShannonBase::Imcs::PersistedLoadState>(9), 15}));
+  EXPECT_FALSE(manager.persist_table_state({17, 3, 100, 150, ShannonBase::Imcs::PersistedLoadState::STALE, 0}));
+  EXPECT_FALSE(manager.persist_table_state({17, 3, 100, 150, ShannonBase::Imcs::PersistedLoadState::STALE, 255}));
+  EXPECT_FALSE(manager.recovery_tainted());
+}
 TEST(RapidRecoveryProtocol, ManifestRejectsPersistenceBeforeSnapshot) {
   RevocationDirectory directory;
   ShannonBase::Imcs::TablePersistenceManager manager(directory.snapshots(), "db", "table");

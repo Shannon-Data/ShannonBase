@@ -1,0 +1,33 @@
+# Periodic STALE is independent of provider invalidation and both markers.
+# It protects only after the metadata checkpoint is durable.
+--source suite/secondary_engine/include/storage_layer_baseline.inc
+--let $state_file = $datadir/rapid_snapshots/sh_storage_recovery/t/table_state.checkpoint
+--let $wait_condition = SELECT LENGTH(LOAD_FILE('$state_file'))=44 AND ORD(SUBSTRING(LOAD_FILE('$state_file'),39,1))=0
+--source include/wait_condition.inc
+--let $state_available = `SELECT LENGTH(LOAD_FILE('$state_file'))=44 AND ORD(SUBSTRING(LOAD_FILE('$state_file'),39,1))=0`
+if ($state_available != 1) {
+ --die Periodic metadata must persist AVAILABLE
+}
+--disable_query_log
+CALL mtr.add_suppression("Rapid could not durably revoke fast recovery");
+CALL mtr.add_suppression("Rapid COPY_INFO could not enqueue row change");
+CALL mtr.add_suppression("Rapid row notification failed");
+--enable_query_log
+SET @saved_debug=@@GLOBAL.debug;
+SET GLOBAL debug='+d,rapid_checkpoint_store_invalidate_error,rapid_taint_marker_primary_error,rapid_taint_marker_alternate_error';
+SET sql_log_bin=OFF;
+UPDATE t SET v=11 WHERE id=1;
+SET sql_log_bin=ON;
+--let $wait_condition = SELECT LENGTH(LOAD_FILE('$state_file'))=44 AND ORD(SUBSTRING(LOAD_FILE('$state_file'),39,1))=1
+--source include/wait_condition.inc
+--let $state_stale = `SELECT LENGTH(LOAD_FILE('$state_file'))=44 AND ORD(SUBSTRING(LOAD_FILE('$state_file'),39,1))=1`
+if ($state_stale != 1) {
+ --die Periodic metadata must persist STALE despite failed revocation writes
+}
+--let $markers_absent = `SELECT LOAD_FILE('$datadir/rapid_snapshots/sh_storage_recovery/t/reload_required') IS NULL AND LOAD_FILE('$datadir/rapid_taint/sh_storage_recovery/t/reload_required') IS NULL`
+if ($markers_absent != 1) {
+ --die This case requires both revocation markers to be absent
+}
+SET GLOBAL debug=@saved_debug;
+--let $storage_expected = 1:11,2:20,3:30
+--source suite/secondary_engine/include/storage_layer_manual_load.inc

@@ -76,6 +76,14 @@ struct RecoveryManifest {
   std::vector<ManifestImcuEntry> imcus;
 };
 
+enum class PersistedLoadState : uint8_t { AVAILABLE = 0, STALE = 1 };
+// Periodic runtime metadata, not a source-transaction eligibility certificate.
+struct RecoveryTableState {
+  uint64_t table_id{0}, generation{0}, snapshot_scn{0}, persisted_scn{0};
+  PersistedLoadState state{PersistedLoadState::AVAILABLE};
+  uint8_t stale_reason{0};
+};
+
 // Owns immutable committed checkpoints. MySQL binlog is the only replay log.
 // Manifest v2/v3 are readable; unsupported formats require source reload.
 class TablePersistenceManager {
@@ -85,6 +93,10 @@ class TablePersistenceManager {
   bool open();
   void close() {}
   bool reset_epoch();
+  bool checkpoint_table_state(uint64_t table_id);
+  bool persist_table_state(const RecoveryTableState &state);
+  Result<RecoveryTableState> load_table_state() const;
+  std::filesystem::path table_state_path() const { return m_partition_dir / "table_state.checkpoint"; }
   bool erase_store() { return m_store->erase(m_db_name, m_tbl_name); }
   bool enable_notifications() { return reset_epoch(); }
   Recovery::NotificationTracker *notifications() { return &m_notifications; }
@@ -113,6 +125,7 @@ class TablePersistenceManager {
 
  private:
   std::mutex m_recovery_mutex;
+  bool persist_table_state_locked(RecoveryTableState state);
   Result<uint64_t> load_snapshot_impl(Imcu *imcu, uint64_t generation);
   bool persist_manifest(const RecoveryManifest &manifest);
   bool write_snap_header(std::ostream &out, uint32_t imcu_id, uint32_t cols, uint64_t sequence) const;

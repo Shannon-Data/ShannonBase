@@ -185,3 +185,39 @@ SIGABRT 用例向独立 MTR mysqld 发信号并关闭 core dump；验证 TP 已�
 边界仍然存在：未日志化 TP 提交成功且全部撤销证据丢失，当前 FAST 无法自动
 识别；TP 比对只有接口。本轮不宣称该窗口、真实断电资格、完整 suite、长时间
 并发压力或通用生产 GA 已闭环。
+
+
+## 当前版本的恢复约定与周期性表级 meta
+
+本版本明确以 TP/AP 一致作为产品前提，完整 TP/AP 比对仅保留扩展接口，
+后续版本实现。在此前提内，以原生 checkpoint 验证、绑定日志边界、增量
+回放及已知资格失败拒绝发布作为恢复闭环条件。这是当前版本的约定，
+不代表已自动检测未日志化提交与全部持久化证据丢失的组合故障。
+
+周期性调度额外写入本地表级 table_state.checkpoint，包含版本、CRC、
+表身份、generation、SCN、AVAILABLE/STALE 和失效原因。读取到 STALE
+或损坏/不可读记录时，在 provider restore 前拒绝 FAST，提示用户显式
+SECONDARY_LOAD；显式加载通过 reset_epoch 清理旧 meta。缺少该文件时
+保持旧 checkpoint 兼容性。既有 provider invalidate 与两处 marker 保留。
+
+此方案不频繁修改 mysql.tables，不实现新的 TP 提交持久化资格协议，
+也不实现 TP/AP 全量比对。meta 中的 generation/SCN 是观察到的进度，
+数据恢复仍以原生 manifest 和绑定日志边界为准。状态写入沿用默认 300 秒
+checkpoint 周期，未实现云端 meta 上传。若崩溃发生于 STALE 写入之前且
+其他证据全部丢失，本轮不将其列为自动识别的测试结果。
+
+HeatWave 公开资料及其证据边界已整理到 recovery/README.md；此处状态
+文件格式和写入协议均为 ShannonBase 自身设计。
+
+
+本轮验证：Debug mysqld 与 rapid_recovery_protocol-t 构建通过，40 个单测
+通过；独立非 record MTR 通过 13 个业务用例（不含 shutdown_report）：
+原有恢复/幂等/分区/异常退出/残缺文件场景、两个 meta 场景、跨库 12 张表
+恢复场景，以及 shannon_recovery。后者以等待异步 checkpoint 并验证
+PERSISTED_SCN >= SNAPSHOT_SCN 取代固定 PERSISTED_SCN=0 的旧预期，
+具体 SCN 受并发分配影响，不固定为某个数字。跨库测试在正常重启与
+SIGKILL 后均恢复全部 12 张表，逐表验证数据，并断言 12 次原生恢复。
+
+验证日志：/tmp/shannon-table-state-build.log、
+/tmp/shannon-table-state-gunit.log、/tmp/shannon-table-state-final-mtr.log、
+/tmp/shannon-many-table-final.log。git diff --check 通过。

@@ -78,12 +78,20 @@ select * from performance_schema.rpd_preload_stats order by TABLE_SCHEMA,TABLE_N
 --echo "restart mysqld"
 --source include/restart_mysqld.inc
 
---sleep 5
+# Recovery publishes tables before its asynchronous checkpoint finishes.
+--let $wait_condition = SELECT COUNT(*)=2 FROM performance_schema.rpd_tables WHERE PERSISTED_SCN>0
+--source include/wait_condition.inc
+--let $valid_watermarks = `SELECT COUNT(*) FROM performance_schema.rpd_tables WHERE PERSISTED_SCN>0 AND PERSISTED_SCN>=SNAPSHOT_SCN`
+if ($valid_watermarks != 2) {
+ --die Both recovered tables must have valid durable SCN watermarks
+}
+SELECT COUNT(*) AS valid_recovery_watermarks FROM performance_schema.rpd_tables WHERE PERSISTED_SCN>0 AND PERSISTED_SCN>=SNAPSHOT_SCN;
 SELECT TABLE_NAME, ENGINE, AUTO_INCREMENT, TABLE_COLLATION, CREATE_OPTIONS FROM INFORMATION_SCHEMA.TABLES WHERE  TABLE_SCHEMA = 'sh_test_recovery';
 
 show variables like "rapid_reload_on_restart";
 
---replace_column 1 IGNORE 2 IGNORE 12 IGNORE 13 IGNORE 14 IGNORE 16 IGNORE 17 IGNORE 19 IGNORE
+# Exact SCNs depend on allocation/checkpoint timing; validate their ordering above.
+--replace_column 1 IGNORE 2 IGNORE 3 IGNORE 12 IGNORE 13 IGNORE 14 IGNORE 16 IGNORE 17 IGNORE 19 IGNORE
 select * from performance_schema.rpd_tables order by ID;
 
 --replace_column 1 IGNORE

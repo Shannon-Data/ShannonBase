@@ -274,9 +274,77 @@ and [rpd_tables](https://dev.mysql.com/doc/heatwave/en/mys-hw-rpd-tables-table.h
 The explicit manual policy for known eligibility failures follows the user's TP
 priority constraint; it is not a claim that every HeatWave fallback is manual.
 
+## HeatWave references and ShannonBase table metadata checkpoints
+
+The public HeatWave architecture is a reference for behavior, not a specification
+of ShannonBase's persistence protocol:
+
+- The official [Scale Out Data Management video](https://www.youtube.com/watch?v=_gjBiCqdTjo)
+  describes copying the in-memory representation to Object Storage. Native-format
+  recovery avoids rebuilding columnar data from InnoDB rows; it still requires
+  reads and reconstruction of runtime structures. ShannonBase similarly restores
+  IMCU/CU snapshots, dictionaries and variable-length values, reconnects Field
+  pointers, rebuilds ART indexes, and replays committed changes.
+- [HeatWave Cluster Data Recovery](https://docs.oracle.com/en-us/iaas/mysql-database/doc/heatwave-cluster-failure-recovery.html)
+  documents persistence of loaded/propagated data and periodic metadata
+  checkpoints. After a DB System restart, stale tables and tables absent from
+  these checkpoints require source reload; missing required binlogs also prevent
+  storage-layer recovery. This restriction does not establish whether individual
+  state transitions are synchronously or asynchronously persisted.
+- [rpd_tables](https://dev.mysql.com/doc/heatwave/en/mys-hw-rpd-tables-table.html)
+  exposes LOAD_STATUS and, from 9.7.0, STALE_REASON. RECOVERY_SOURCE reports the
+  source of the last successful recovery; it is not a recovery eligibility proof.
+  SNAPSHOT_SCN and PERSISTED_SCN describe the snapshot and persisted progress.
+- [Change Propagation](https://dev.mysql.com/doc/heatwave/en/mys-hw-change-propagation.html)
+  documents STALE after propagation failures. Idle checks arrange automatic
+  reload for out-of-code failures; other causes require manual unload/load.
+- The official [9.4.2 reload article](https://blogs.oracle.com/mysql/mysql-heatwave-942-improvements-in-reloading-data-into-the-heatwave-cluster-after-rebooting)
+  describes additional persisted metadata and storage-layer recovery after
+  restart. The reviewed public sources do not specify persistence of each
+  LOAD_STATUS transition, its atomicity with TP commits, or a state file format.
+  Names such as metadata.json and manifest.bin must not be attributed to
+  HeatWave. ShannonBase RFCs are not evidence of HeatWave internals.
+
+ShannonBase's own implementation writes a per-table `table_state.checkpoint`
+under the local snapshot directory on the existing periodic checkpoint interval
+(default 300 seconds). The versioned, CRC-protected record contains table
+identity, generation, snapshot/persisted SCNs, AVAILABLE/STALE and stale reason.
+It records stable terminal states, not LOADING/recovery progress. The record is
+written through the local durable-file helper (temporary file, data sync,
+rename, parent-directory sync), not through frequent mysql.tables updates or
+an Object Storage metadata API. These names and semantics are ShannonBase's
+own design. Generation/SCNs describe observed progress; native manifests and
+bound binlog/GTID boundaries remain authoritative for restoring data.
+
+Before provider restore, persisted STALE or unreadable/corrupt metadata rejects
+FAST and leaves AP unpublished with a manual SECONDARY_LOAD warning. AVAILABLE
+cannot clear a live revocation. Explicit load starts a new recovery epoch and
+removes the old metadata; periodic checkpoints can then record the new state.
+Missing metadata remains compatible with checkpoints created before this format.
+Existing provider invalidation and revocation markers remain in use.
+
+`shannon_recovery_table_state` verifies that periodic STALE alone rejects crash
+recovery after provider invalidation and both marker writes fail.
+`shannon_recovery_table_state_corrupt` verifies fail-closed metadata parsing and
+successful explicit reload. `shannon_recovery_many_tables` checks discovery and
+recovery of twelve tables across two schemas, exceeding the eight-worker limit,
+and validates every table's data after native crash recovery. Protocol unit tests
+cover metadata watermarks, corruption/truncation, live revocation and epoch reset.
+
+For this release, **TP/AP consistency is an explicit product precondition**.
+Together with checkpoint validation, committed-log replay and refusal of known
+eligibility failures, this is the agreed closure condition for the release's
+recovery contract. The full TP/AP comparison remains an extension interface for
+a later release. It is not executed, and assuming consistency is not evidence
+that an unlogged surviving TP commit was automatically detected. Periodic
+metadata adds protection once STALE is durable; if all revocation writes fail
+and a crash precedes the next metadata write, no new durable evidence exists.
+Tests of persisted STALE must not be described as closing that combined window.
+
 ## Optional full source validation interface
 
-This version defaults to FAST. It validates native storage generations and
+This version defaults to FAST under the TP/AP consistency precondition above.
+It validates native storage generations and
 replays available committed binlog history, without scanning all TP rows to
 compare them with AP. FAST skips the source validator even if one is registered;
 it does not prove coverage of an unlogged source commit when every revocation

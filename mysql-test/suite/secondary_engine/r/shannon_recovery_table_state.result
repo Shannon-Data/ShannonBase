@@ -1,0 +1,36 @@
+CREATE DATABASE sh_storage_recovery;
+USE sh_storage_recovery;
+CREATE TABLE t (id INT PRIMARY KEY, v INT NOT NULL) SECONDARY_ENGINE=rapid;
+INSERT INTO t VALUES (1,10),(2,20),(3,30);
+ALTER TABLE t SECONDARY_LOAD;
+# restart: --rapid_reload_on_restart=ON
+USE sh_storage_recovery;
+SET @saved_debug=@@GLOBAL.debug;
+SET GLOBAL debug='+d,rapid_checkpoint_store_invalidate_error,rapid_taint_marker_primary_error,rapid_taint_marker_alternate_error';
+SET sql_log_bin=OFF;
+UPDATE t SET v=11 WHERE id=1;
+SET sql_log_bin=ON;
+SET GLOBAL debug=@saved_debug;
+# Kill and restart: --rapid_reload_on_restart=ON 
+USE sh_storage_recovery;
+include/wait_for_pattern_in_file.inc [sh_storage_recovery.t recovery eligibility is revoked or cannot be verified; automatic recovery stopped]
+SELECT COUNT(*) AS automatically_loaded FROM performance_schema.rpd_table_id WHERE SCHEMA_NAME='sh_storage_recovery' AND TABLE_NAME='t';
+automatically_loaded
+0
+SELECT VARIABLE_VALUE FROM performance_schema.global_status WHERE VARIABLE_NAME='rapid_recovery_primary_reloads';
+VARIABLE_VALUE
+0
+SET use_secondary_engine=OFF;
+SET use_secondary_engine=ON;
+SELECT id,v FROM t ORDER BY id;
+id	v
+1	11
+2	20
+3	30
+SET use_secondary_engine=FORCED;
+SELECT id,v FROM t ORDER BY id;
+ERROR HY000: Table has not been loaded
+SET use_secondary_engine=OFF;
+UPDATE t SET v=v+1 WHERE id=1;
+ALTER TABLE t SECONDARY_LOAD;
+DROP DATABASE sh_storage_recovery;

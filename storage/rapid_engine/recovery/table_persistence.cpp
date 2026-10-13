@@ -186,13 +186,105 @@ bool TablePersistenceManager::open() {
 bool TablePersistenceManager::reset_epoch() {
   std::lock_guard checkpoint(m_checkpoint_mutex);
   std::lock_guard gate(m_notifications.mutex());
+  require_recovery();
   if (!m_store->erase(m_db_name, m_tbl_name)) return false;
   for (auto generation : list_manifest_generations())
     if (!remove_generation(generation)) return false;
+  std::error_code state_error;
+  const bool removed = fs::remove(table_state_path(), state_error);
+  if (state_error || (removed && !Recovery::DurableFileSystem::sync_directory(table_state_path()))) return false;
   m_notifications.reset();
   m_recovery_required.store(false);
   clear_recovery_taint();
   return true;
+}
+
+namespace {
+constexpr uint32_t TABLE_STATE_MAGIC = 0x53545052u;
+constexpr uint16_t TABLE_STATE_VERSION = 1u;
+constexpr size_t TABLE_STATE_BYTES = 44;
+bool valid_table_state(const RecoveryTableState &state) {
+  if (state.persisted_scn < state.snapshot_scn ||
+      state.stale_reason > static_cast<uint8_t>(stale_reason_t::UNIDENTIFIED_ERROR))
+    return false;
+  return (state.state == PersistedLoadState::AVAILABLE && state.stale_reason == 0) ||
+         (state.state == PersistedLoadState::STALE && state.stale_reason != 0);
+}
+}  // namespace
+
+bool TablePersistenceManager::persist_table_state(const RecoveryTableState &state) {
+  std::lock_guard checkpoint(m_checkpoint_mutex);
+  return persist_table_state_locked(state);
+}
+
+bool TablePersistenceManager::persist_table_state_locked(RecoveryTableState state) {
+  if (!valid_table_state(state)) return false;
+  if (state.state == PersistedLoadState::STALE) require_recovery();
+  if (recovery_required() && state.state == PersistedLoadState::AVAILABLE) {
+    state.state = PersistedLoadState::STALE;
+    state.stale_reason = static_cast<uint8_t>(stale_reason_t::RELOAD_REQUIRED);
+  }
+  DBUG_EXECUTE_IF("rapid_table_state_write_error", { return false; });
+  std::string bytes;
+  append_pod(bytes, TABLE_STATE_MAGIC);
+  append_pod(bytes, TABLE_STATE_VERSION);
+  append_pod(bytes, state.table_id);
+  append_pod(bytes, state.generation);
+  append_pod(bytes, state.snapshot_scn);
+  append_pod(bytes, state.persisted_scn);
+  append_pod(bytes, static_cast<uint8_t>(state.state));
+  append_pod(bytes, state.stale_reason);
+  append_pod(bytes, Utils::crc32c_compute(bytes.data(), bytes.size(), 0));
+  if (!Recovery::DurableFileSystem::create_directories(m_partition_dir)) return false;
+  return Recovery::DurableFileSystem::persist_file(table_state_path(), bytes);
+}
+
+bool TablePersistenceManager::checkpoint_table_state(uint64_t table_id) {
+  std::lock_guard checkpoint(m_checkpoint_mutex);
+  auto info = RpdMirror::Registry::find(m_db_name + "." + m_tbl_name);
+  if (!info) return true;
+  const auto meta = info->meta_copy();
+  const bool stale = recovery_required() || meta.load_status == load_status_t::STALE_RPDGSTABSTATE;
+  // Loading/recovery progress is volatile; only stable terminal states are
+  // checkpointed. reset_epoch() removes old state before an explicit load.
+  if (!stale && meta.load_status != load_status_t::AVAIL_RPDGSTABSTATE) return true;
+  RecoveryTableState state;
+  state.table_id = table_id;
+  state.generation = latest_generation();
+  state.snapshot_scn = meta.snapshot_scn;
+  state.persisted_scn = meta.persisted_scn;
+  // An initial load has no persisted frontier until its first data checkpoint.
+  if (state.persisted_scn == 0) state.snapshot_scn = 0;
+  if (stale) {
+    state.state = PersistedLoadState::STALE;
+    state.stale_reason = static_cast<uint8_t>(meta.stale_reason == stale_reason_t::OK ? stale_reason_t::RELOAD_REQUIRED
+                                                                                      : meta.stale_reason);
+  }
+  return persist_table_state_locked(state);
+}
+
+Result<RecoveryTableState> TablePersistenceManager::load_table_state() const {
+  RecoveryTableState state;
+  std::error_code ec;
+  if (!fs::exists(table_state_path(), ec)) return {ec ? ErrorCode::IO_ERROR : ErrorCode::NOT_FOUND, state};
+  std::ifstream input(table_state_path(), std::ios::binary);
+  if (!input.is_open()) return {ErrorCode::IO_ERROR, state};
+  char bytes[TABLE_STATE_BYTES];
+  if (!input.read(bytes, sizeof(bytes)) || input.peek() != std::char_traits<char>::eof() || input.bad())
+    return {ErrorCode::CORRUPTION, state};
+  ByteReader reader{bytes, sizeof(bytes)};
+  uint32_t magic = 0, crc = 0;
+  uint16_t version = 0;
+  uint8_t status = 0;
+  if (!reader.read_pod(magic) || !reader.read_pod(version) || magic != TABLE_STATE_MAGIC ||
+      version != TABLE_STATE_VERSION || !reader.read_pod(state.table_id) || !reader.read_pod(state.generation) ||
+      !reader.read_pod(state.snapshot_scn) || !reader.read_pod(state.persisted_scn) || !reader.read_pod(status) ||
+      !reader.read_pod(state.stale_reason) || !reader.read_pod(crc) ||
+      crc != Utils::crc32c_compute(bytes, sizeof(bytes) - sizeof(crc), 0))
+    return {ErrorCode::CORRUPTION, state};
+  state.state = static_cast<PersistedLoadState>(status);
+  if (!valid_table_state(state)) return {ErrorCode::CORRUPTION, state};
+  return {ErrorCode::OK, state};
 }
 bool TablePersistenceManager::revoke_fast_recovery() noexcept {
   // Keep live reads/checkpoints fenced even if invalidation or persistence fails.
@@ -247,6 +339,10 @@ bool TablePersistenceManager::recovery_tainted() const {
   if (!Utils::try_operation([&] {
         DBUG_EXECUTE_IF("rapid_taint_marker_inspect_error", { return; });
         tainted = taint_marker_present(recovery_taint_path()) || taint_marker_present(recovery_taint_alt_path());
+        if (!tainted) {
+          const auto state = load_table_state();
+          tainted = state.ok() ? state.value.state == PersistedLoadState::STALE : state.error != ErrorCode::NOT_FOUND;
+        }
       }))
     return true;
   return tainted;
