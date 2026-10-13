@@ -27,7 +27,8 @@
 #include <type_traits>
 #include <utility>
 
-namespace ShannonBase::Utils {
+namespace ShannonBase {
+namespace Utils {
 // Adapt throwing STL/provider APIs to a completion status. The operation must
 // return void; semantic failure belongs in its own output value. Failure does
 // not roll back side effects: callers must preserve ownership until completion
@@ -51,6 +52,7 @@ bool try_bool_operation(Operation &&operation) noexcept {
   bool succeeded = false;
   return try_operation([&] { succeeded = std::forward<Operation>(operation)(); }) && succeeded;
 }
-}  // namespace ShannonBase::Utils
+}  // namespace Utils
+}  // namespace ShannonBase
 
 #endif

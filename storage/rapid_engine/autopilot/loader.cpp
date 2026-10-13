@@ -104,7 +104,6 @@ extern std::atomic<uint64> shannon_pop_data_sz;
  * recovery), so the storage cannot belong to any one of them.  See loader.h.
  */
 namespace RpdMirror {
-
 std::shared_mutex Registry::m_mutex;
 std::unordered_map<std::string, std::shared_ptr<TableInfo>> Registry::m_tables;
 
@@ -296,7 +295,9 @@ void refresh_propagation_health(std::vector<std::pair<std::string, std::string>>
   }
 }
 }  // namespace RpdMirror
+}  // namespace ShannonBase
 
+namespace ShannonBase {
 namespace Autopilot {
 // static members initialization.
 std::once_flag SelfLoadManager::one;

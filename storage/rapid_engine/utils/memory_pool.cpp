@@ -43,7 +43,6 @@
 
 namespace ShannonBase {
 namespace Utils {
-
 namespace {
 std::atomic<int> g_monitor_thread_counter{0};
 

@@ -42,7 +42,6 @@
 
 namespace ShannonBase {
 namespace Executor {
-
 ColumnChunk::ColumnChunk(Field *mysql_fld, size_t chunk_size, ResMgmt::BoundedMemoryResource *memory)
     : m_memory(memory), m_source_fld(mysql_fld), m_current_size(0), m_chunk_size(chunk_size) {
   if (mysql_fld) {

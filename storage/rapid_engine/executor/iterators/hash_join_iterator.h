@@ -44,7 +44,6 @@
 class Item_eq_base;
 namespace ShannonBase {
 namespace Executor {
-
 // this vectorized version of HashJoinIterator. The More Hash Iterator, refere to HashJoinIterator.
 class VectorizedHashJoinIterator final : public RowIterator, public BatchReadable {
   // Declared first so the reservation outlives all retained buffers.

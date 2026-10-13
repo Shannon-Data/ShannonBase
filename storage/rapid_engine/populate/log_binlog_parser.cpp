@@ -71,7 +71,8 @@
 #include "storage/rapid_engine/utils/try_operation.h"
 #include "storage/rapid_engine/utils/utils.h"
 
-namespace ShannonBase::Populate {
+namespace ShannonBase {
+namespace Populate {
 namespace {
 using namespace mysql::binlog::event;
 using Position = Recovery::BinlogPosition;
@@ -369,9 +370,11 @@ int EnqueueRowChange(change_record_buff_t &record) noexcept {
     QuarantinePropagationTable(record.m_table_id);
   return result;
 }
-}  // namespace ShannonBase::Populate
+}  // namespace Populate
+}  // namespace ShannonBase
 
-namespace ShannonBase::Populate {
+namespace ShannonBase {
+namespace Populate {
 namespace {
 using Position = Recovery::BinlogPosition;
 using Clock = std::chrono::steady_clock;
@@ -991,4 +994,5 @@ const char *CommittedBinlog::table_failure_reason(table_id_t id) {
   auto it = consumer.loaded.find(id);
   return it == consumer.loaded.end() ? nullptr : it->second.failure_reason;
 }
-}  // namespace ShannonBase::Populate
+}  // namespace Populate
+}  // namespace ShannonBase

@@ -117,9 +117,10 @@ void BkgWorkerPool::auto_maintenance_thread() {
       if (!m_auto_thread_running.load(std::memory_order_acquire)) break;
 
       // 3. stats update
+      constexpr auto kStatsRefreshInterval = std::chrono::minutes(10);
       static auto last_stats_time = std::chrono::steady_clock::now();
       auto now = std::chrono::steady_clock::now();
-      if (std::chrono::duration_cast<std::chrono::minutes>(now - last_stats_time).count() >= 10) {
+      if (now - last_stats_time >= kStatsRefreshInterval) {
         imcs->for_each_table([&](RpdTable *table) {
           if (m_auto_thread_running.load(std::memory_order_acquire)) {
             pool->schedule_stats_update(table);

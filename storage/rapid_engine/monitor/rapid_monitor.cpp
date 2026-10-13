@@ -40,7 +40,6 @@ namespace ShannonBase {
 extern std::shared_ptr<Utils::MemoryPool> shannon_rpd_memory_pool;
 
 namespace RapidMonitor {
-
 RapidCounters rapid_counters;
 
 namespace {

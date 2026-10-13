@@ -59,6 +59,7 @@ class IB_thread;
 class dict_index_t;
 namespace ShannonBase {
 namespace LogSerivce {
+
 class buf_block_t;
 
 // used for aurora-style compuate-storage disaggregated architecture.
@@ -71,7 +72,9 @@ class RedoLogService {
   buf_block_t *fetch_page_from_storage(space_id_t space, page_no_t page_no);
 };
 }  // namespace LogSerivce
+}  // namespace ShannonBase
 
+namespace ShannonBase {
 namespace Populate {
 
 #define log_rapid_pop_mutex_enter(log) mutex_enter(&((log).rapid_populator_mutex))

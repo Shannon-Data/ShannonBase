@@ -57,7 +57,6 @@ namespace Compress {
 class Dictionary;
 }
 namespace Executor {
-
 /*
  * Batch transport and the tiny execution kernels below are implementation
  * vocabulary of Rapid iterators. Keep them with the iterator abstraction

@@ -37,7 +37,6 @@
 namespace ShannonBase {
 namespace Imcs {
 namespace Index {
-
 /**
  * Bidirectional ART cursor.
  *

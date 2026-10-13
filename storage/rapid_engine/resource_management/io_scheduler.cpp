@@ -31,7 +31,8 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #endif
-namespace ShannonBase::ResMgmt {
+namespace ShannonBase {
+namespace ResMgmt {
 namespace {
 IoDepthGovernor spill_governor;
 }
@@ -57,4 +58,5 @@ SpillIoScope::SpillIoScope(THD *thd, FILE *file) {
   }
 }
 IoDepthGovernor::Snapshot spill_io_snapshot() { return spill_governor.snapshot(); }
-}  // namespace ShannonBase::ResMgmt
+}  // namespace ResMgmt
+}  // namespace ShannonBase

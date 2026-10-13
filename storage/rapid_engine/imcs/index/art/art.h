@@ -48,7 +48,6 @@
 namespace ShannonBase {
 namespace Imcs {
 namespace Index {
-
 // Forward declare
 class ART;
 

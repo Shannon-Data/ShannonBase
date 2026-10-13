@@ -71,6 +71,7 @@ mysql_pfs_key_t rapid_populate_thread_key;
 
 namespace ShannonBase {
 namespace Populate {
+
 constexpr uint32_t MAX_RETRY_COUNT = 3;
 
 PopBufferShard shannon_pop_shards[POP_SHARD_COUNT];

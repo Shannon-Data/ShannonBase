@@ -59,7 +59,9 @@
 class THD;
 class TABLE;
 class LEX;
-namespace ShannonBase::Populate {
+namespace ShannonBase {
+namespace Populate {
+
 struct BinlogTableBinding {
   TABLE *table;
   table_id_t id;
@@ -101,5 +103,6 @@ class CommittedBinlog {
   static uint64_t query_scn(THD *);
   static const char *table_failure_reason(table_id_t);
 };
-}  // namespace ShannonBase::Populate
+}  // namespace Populate
+}  // namespace ShannonBase
 #endif

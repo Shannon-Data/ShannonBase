@@ -58,7 +58,6 @@
 
 namespace ShannonBase {
 namespace Executor {
-
 namespace {
 inline bool IsHashGroupSortKeyType(enum_field_types type) {
   switch (type) {

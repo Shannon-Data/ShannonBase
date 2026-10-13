@@ -33,7 +33,8 @@
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
-namespace ShannonBase::Recovery {
+namespace ShannonBase {
+namespace Recovery {
 struct BinlogPosition {
   std::string file;
   uint64_t offset{0};
@@ -114,5 +115,6 @@ class NotificationTracker {
   uint64_t m_last{0}, m_checkpointed{~uint64_t{0}};
   bool m_disabled{false};
 };
-}  // namespace ShannonBase::Recovery
+}  // namespace Recovery
+}  // namespace ShannonBase
 #endif

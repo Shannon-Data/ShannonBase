@@ -50,12 +50,10 @@ namespace ShannonBase {
 class Rapid_load_context;
 
 namespace Imcs {
-
 struct ArtKeyPartDescriptor;
 struct ArtIndexDescriptor;
 
 namespace Index {
-
 /** Capability of the complete compiled ART key. */
 enum class ArtKeyMode : uint8_t {
   EXACT = 0,

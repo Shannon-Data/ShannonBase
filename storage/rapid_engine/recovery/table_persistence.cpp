@@ -61,7 +61,6 @@
 
 namespace ShannonBase {
 namespace Imcs {
-
 namespace fs = std::filesystem;
 
 namespace {

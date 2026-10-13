@@ -39,7 +39,6 @@
 #include "storage/rapid_engine/include/rapid_const.h"
 
 namespace ShannonBase {
-
 // used for SHANNON_DB_TRX_ID FIELD.
 class Mock_field_trxid : public Field_longlong {
  public:

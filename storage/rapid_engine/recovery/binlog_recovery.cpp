@@ -43,7 +43,8 @@
 #include "storage/rapid_engine/include/rapid_config.h"
 #include "storage/rapid_engine/trx/transaction.h"
 
-namespace ShannonBase::Recovery {
+namespace ShannonBase {
+namespace Recovery {
 namespace {
 using namespace mysql::binlog::event;
 using Record = Populate::change_record_buff_t;
@@ -307,4 +308,5 @@ bool BinlogRecovery::replay(THD *thd, TABLE *table, const BinlogPosition &start,
   // Relevant rows without a complete transaction outcome never publish.
   return transaction.empty();
 }
-}  // namespace ShannonBase::Recovery
+}  // namespace Recovery
+}  // namespace ShannonBase
