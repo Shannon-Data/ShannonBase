@@ -266,6 +266,7 @@ bool Util::update_rpd_meta_info(const ShannonBase::Rapid_load_context *context, 
     const uint64 nrows = table->file->stats.records;
     table_info->with_meta([&](rpd_table_meta_info_t &meta) {
       meta.snapshot_scn = context->m_extra_info.m_scn;
+      meta.persisted_scn = 0;
       meta.nrows = nrows;
       meta.size_bytes = nrows * table->s->rec_buff_length;
       meta.load_start_stamp = std::chrono::system_clock::now();

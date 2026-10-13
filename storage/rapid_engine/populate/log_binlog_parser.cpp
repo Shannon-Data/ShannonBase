@@ -30,6 +30,7 @@
 #include <cstring>
 #include <filesystem>
 #include <memory>
+#include <optional>
 #include <unordered_map>
 #include "include/scope_guard.h"
 #include "sql/binlog.h"
@@ -67,6 +68,7 @@
 #include "storage/rapid_engine/populate/log_dml_notification.h"
 #include "storage/rapid_engine/recovery/recovery.h"
 #include "storage/rapid_engine/recovery/table_persistence.h"
+#include "storage/rapid_engine/utils/try_operation.h"
 #include "storage/rapid_engine/utils/utils.h"
 
 namespace ShannonBase::Populate {
@@ -118,9 +120,12 @@ bool unpack(TABLE *table, table_def &definition, const MY_BITMAP *columns, const
         field->real_type() == MYSQL_TYPE_GEOMETRY || field->real_type() == MYSQL_TYPE_VECTOR) {
       auto *blob = static_cast<Field_blob *>(field);
       const size_t bytes = blob->get_length();
-      auto data = std::shared_ptr<uchar[]>(new uchar[bytes ? bytes : 1]);
-      if (bytes) std::memcpy(data.get(), blob->get_blob_data(), bytes);
-      offpage.emplace(i, std::make_pair(bytes, std::move(data)));
+      if (!Utils::try_operation([&] {
+            auto data = std::shared_ptr<uchar[]>(new uchar[bytes ? bytes : 1]);
+            if (bytes) std::memcpy(data.get(), blob->get_blob_data(), bytes);
+            offpage.emplace(i, std::make_pair(bytes, std::move(data)));
+          }))
+        return false;
     }
   }
   std::memcpy(destination, table->record[0], table->s->rec_buff_length);
@@ -141,225 +146,237 @@ bool BinlogParser::supports(const TABLE *table) {
 bool BinlogParser::read_batch(THD *thd, const std::vector<BinlogTableBinding> &bindings, const Position &start,
                               const Position &committed_end, std::vector<BinlogTransaction> &batch,
                               Position &assembled_end, const char **failure_reason,
-                              std::vector<table_id_t> *required_tables) {
-  if (failure_reason)
-    *failure_reason =
-        "Change propagation failed: missing, corrupt or unsupported committed binlog input; unload and reload the "
-        "table";
-  if (!thd || !start.valid() || !committed_end.valid() || !mysql_bin_log.is_open()) return false;
-  Position identity = start;
-  if (!start.prefix_digest.empty() &&
-      (!Recovery::BinlogRecovery::certify(identity) || identity.prefix_digest != start.prefix_digest))
-    return false;
-  mysql_mutex_lock(mysql_bin_log.get_index_lock());
-  auto unlock = create_scope_guard([&] { mysql_mutex_unlock(mysql_bin_log.get_index_lock()); });
-  LOG_INFO pin, scan;
-  if (mysql_bin_log.find_log_pos(&pin, nullptr, false)) return false;
-  mysql_bin_log.register_log_info(&pin);
-  auto unpin = create_scope_guard([&] { mysql_bin_log.unregister_log_info(&pin); });
-  scan = pin;
-  while (basename(scan.log_file_name) != start.file)
-    if (mysql_bin_log.find_next_log(&scan, false)) return false;
-  // Close the certify-to-pin RESET/purge race while the index is locked.
-  if (!start.prefix_digest.empty() && (!Recovery::BinlogRecovery::certify_file(scan.log_file_name, identity) ||
-                                       identity.prefix_digest != start.prefix_digest))
-    return false;
-
-  struct Map {
-    std::shared_ptr<Table_map_log_event> event;
-    const BinlogTableBinding *binding;
-  };
-  std::unordered_map<uint64_t, Map> maps;
-  BinlogTransaction transaction;
-  size_t transaction_bytes = 0, batch_bytes = 0;
-  size_t budget = std::min<size_t>(shannon_rpd_engine_cfg.pop_buff_sz_max, 64ULL * 1024 * 1024);
-  DBUG_EXECUTE_IF("rapid_committed_small_budget", { budget = 1024 * 1024; });
-  uint64_t offset = start.offset;
-  bool in_payload = false;
-  assembled_end = start;
-  for (;;) {
-#ifdef SHANNON_POSIX_PLATFORM
-    // The local binlog prefix is immutable during normal server operation.
-    // Anchor it once at LOAD, then check the file incarnation and every event's
-    // CRC. Rehashing all previous bytes per batch makes consumption quadratic.
-    struct FileIdentity {
-      std::string path;
-      uint64_t device{0}, inode{0};
-    };
-    static thread_local FileIdentity previous;
-    struct stat status;
-    if (::stat(scan.log_file_name, &status) || status.st_size < 0 || static_cast<uint64_t>(status.st_size) < offset)
+                              std::vector<table_id_t> *required_tables) noexcept {
+  return Utils::try_bool_operation([&]() -> bool {
+    if (failure_reason)
+      *failure_reason =
+          "Change propagation failed: missing, corrupt or unsupported committed binlog input; unload and reload the "
+          "table";
+    if (!thd || !start.valid() || !committed_end.valid() || !mysql_bin_log.is_open()) return false;
+    Position identity = start;
+    if (!start.prefix_digest.empty() &&
+        (!Recovery::BinlogRecovery::certify(identity) || identity.prefix_digest != start.prefix_digest))
       return false;
-    const uint64_t device = status.st_dev, inode = status.st_ino;
-    if (previous.path == scan.log_file_name && (previous.device != device || previous.inode != inode)) return false;
-    previous = {scan.log_file_name, device, inode};
+    mysql_mutex_lock(mysql_bin_log.get_index_lock());
+    auto unlock = create_scope_guard([&] { mysql_mutex_unlock(mysql_bin_log.get_index_lock()); });
+    LOG_INFO pin, scan;
+    if (mysql_bin_log.find_log_pos(&pin, nullptr, false)) return false;
+    mysql_bin_log.register_log_info(&pin);
+    auto unpin = create_scope_guard([&] { mysql_bin_log.unregister_log_info(&pin); });
+    scan = pin;
+    while (basename(scan.log_file_name) != start.file)
+      if (mysql_bin_log.find_next_log(&scan, false)) return false;
+    // Close the certify-to-pin RESET/purge race while the index is locked.
+    if (!start.prefix_digest.empty() && (!Recovery::BinlogRecovery::certify_file(scan.log_file_name, identity) ||
+                                         identity.prefix_digest != start.prefix_digest))
+      return false;
+
+    struct Map {
+      std::shared_ptr<Table_map_log_event> event;
+      const BinlogTableBinding *binding;
+    };
+    std::unordered_map<uint64_t, Map> maps;
+    BinlogTransaction transaction;
+    size_t transaction_bytes = 0, batch_bytes = 0;
+    const auto budget_exceeded = [&] {
+      if (failure_reason)
+        *failure_reason =
+            "Change propagation failed: committed transaction exceeds the reader memory budget; unload and reload the "
+            "table";
+      return false;
+    };
+    size_t budget = std::min<size_t>(shannon_rpd_engine_cfg.pop_buff_sz_max, 64ULL * 1024 * 1024);
+    DBUG_EXECUTE_IF("rapid_committed_small_budget", { budget = 1024 * 1024; });
+    uint64_t offset = start.offset;
+    bool in_payload = false;
+    assembled_end = start;
+    for (;;) {
+#ifdef SHANNON_POSIX_PLATFORM
+      // The local binlog prefix is immutable during normal server operation.
+      // Anchor it once at LOAD, then check the file incarnation and every event's
+      // CRC. Rehashing all previous bytes per batch makes consumption quadratic.
+      struct FileIdentity {
+        std::string path;
+        uint64_t device{0}, inode{0};
+      };
+      static thread_local FileIdentity previous;
+      struct stat status;
+      if (::stat(scan.log_file_name, &status) || status.st_size < 0 || static_cast<uint64_t>(status.st_size) < offset)
+        return false;
+      const uint64_t device = status.st_dev, inode = status.st_ino;
+      if (previous.path == scan.log_file_name && (previous.device != device || previous.inode != inode)) return false;
+      previous = {scan.log_file_name, device, inode};
 #endif
-    Binlog_file_reader reader(true, 64 * 1024 * 1024);
-    if (reader.open(scan.log_file_name, offset)) return false;
-    binlog::Decompressing_event_object_istream stream(reader);
-    stream.set_verify_checksum(true);
-    auto grow = stream.get_grow_calculator();
-    grow.set_max_size(budget);
-    stream.set_grow_calculator(grow);
-    auto check_stream = create_scope_guard([&] { (void)stream.has_error(); });
-    const std::string file = basename(scan.log_file_name);
-    const bool last = file == committed_end.file;
-    while (!last || static_cast<uint64_t>(reader.position()) < committed_end.offset || in_payload) {
-      if (thd->killed) return false;
-      std::shared_ptr<Log_event> event;
-      stream >> event;
-      if (!event) {
-        if (stream.has_error() || last) return false;
-        break;
-      }
-      const uint64_t end_offset = reader.position();
-      if (last && end_offset > committed_end.offset) return false;
-      bool terminal = false;
-      switch (event->get_type_code()) {
-        case TRANSACTION_PAYLOAD_EVENT:
-          in_payload = true;
-          break;
-        case TABLE_MAP_EVENT: {
-          auto map = std::static_pointer_cast<Table_map_log_event>(event);
-          const BinlogTableBinding *binding = nullptr;
-          for (const auto &candidate : bindings)
-            if (std::strcmp(map->get_db_name(), candidate.table ? candidate.table->s->db.str : candidate.db) == 0 &&
-                std::strcmp(map->get_table_name(),
-                            candidate.table ? candidate.table->s->table_name.str : candidate.name) == 0) {
-              binding = &candidate;
-              break;
-            }
-          if (binding) {
-            const uint64_t id = static_cast<uint64_t>(map->get_table_id());
-            maps[id] = {std::move(map), binding};
-          }
+      Binlog_file_reader reader(true, 64 * 1024 * 1024);
+      if (reader.open(scan.log_file_name, offset)) return false;
+      binlog::Decompressing_event_object_istream stream(reader);
+      stream.set_verify_checksum(true);
+      auto grow = stream.get_grow_calculator();
+      grow.set_max_size(budget);
+      stream.set_grow_calculator(grow);
+      auto check_stream = create_scope_guard([&] { (void)stream.has_error(); });
+      const std::string file = basename(scan.log_file_name);
+      const bool last = file == committed_end.file;
+      while (!last || static_cast<uint64_t>(reader.position()) < committed_end.offset || in_payload) {
+        if (thd->killed) return false;
+        std::shared_ptr<Log_event> event;
+        stream >> event;
+        if (!event) {
+          if (stream.has_error() || last) return false;
           break;
         }
-        case WRITE_ROWS_EVENT:
-        case UPDATE_ROWS_EVENT:
-        case DELETE_ROWS_EVENT: {
-          auto *rows = static_cast<Rows_log_event *>(event.get());
-          auto found = maps.find(static_cast<uint64_t>(rows->get_table_id()));
-          if (found == maps.end()) break;
-          const auto &binding = *found->second.binding;
-          if (covered(binding.floor, file, end_offset)) break;
-          if (required_tables) {
-            if (std::find(required_tables->begin(), required_tables->end(), binding.id) == required_tables->end())
-              required_tables->push_back(binding.id);
-            const size_t bytes = rows->get_rows_end() - rows->get_rows_begin();
-            if (bytes > budget || transaction_bytes > budget - bytes) return false;
-            transaction_bytes += bytes;
+        const uint64_t end_offset = reader.position();
+        if (last && end_offset > committed_end.offset) return false;
+        bool terminal = false;
+        switch (event->get_type_code()) {
+          case TRANSACTION_PAYLOAD_EVENT:
+            in_payload = true;
+            break;
+          case TABLE_MAP_EVENT: {
+            auto map = std::static_pointer_cast<Table_map_log_event>(event);
+            const BinlogTableBinding *binding = nullptr;
+            for (const auto &candidate : bindings)
+              if (std::strcmp(map->get_db_name(), candidate.table ? candidate.table->s->db.str : candidate.db) == 0 &&
+                  std::strcmp(map->get_table_name(),
+                              candidate.table ? candidate.table->s->table_name.str : candidate.name) == 0) {
+                binding = &candidate;
+                break;
+              }
+            if (binding) {
+              const uint64_t id = static_cast<uint64_t>(map->get_table_id());
+              maps[id] = {std::move(map), binding};
+            }
             break;
           }
-          auto *table = binding.table;
-          auto &map = *found->second.event;
-          Table_map_log_event::Optional_metadata_fields optional(map.m_optional_metadata, map.m_optional_metadata_len);
-          table_def definition(map.m_coltype, map.m_colcnt, map.m_field_metadata, map.m_field_metadata_size,
-                               map.m_null_bits, map.m_flags, optional.m_vector_dimensionality);
-          const uchar *cursor = rows->get_rows_begin(), *end = rows->get_rows_end();
-          while (cursor < end) {
-            change_record_buff_t record(Source::COPY_INFO, table->s->rec_buff_length);
-            record.m_copy_info_mode = CopyInfoMode::COMMITTED_BINLOG;
-            record.m_table_id = binding.id;
-            const auto type = event->get_type_code();
-            record.m_oper = type == WRITE_ROWS_EVENT    ? change_record_buff_t::OperType::INSERT
-                            : type == UPDATE_ROWS_EVENT ? change_record_buff_t::OperType::UPDATE
-                                                        : change_record_buff_t::OperType::DELETE;
-            if (!unpack(table, definition, rows->get_cols(), cursor, end, record.m_buff0.get(), record.m_offpage_data0))
-              return false;
-            if (type == UPDATE_ROWS_EVENT && !unpack(table, definition, rows->get_cols_ai(), cursor, end,
-                                                     record.m_buff1.get(), record.m_offpage_data1))
-              return false;
-            if (!FinalizeBinlogRow(table, record)) return false;
-            size_t bytes = 2 * record.m_size;
-            for (auto *image : {&record.m_offpage_data0, &record.m_offpage_data1})
-              for (const auto &entry : *image) bytes += entry.second.first;
-            if (bytes > budget || transaction_bytes > budget - bytes) {
-              if (failure_reason)
-                *failure_reason =
-                    "Change propagation failed: committed transaction exceeds the reader memory budget; unload and "
-                    "reload the table";
-              return false;
+          case WRITE_ROWS_EVENT:
+          case UPDATE_ROWS_EVENT:
+          case DELETE_ROWS_EVENT: {
+            auto *rows = static_cast<Rows_log_event *>(event.get());
+            auto found = maps.find(static_cast<uint64_t>(rows->get_table_id()));
+            if (found == maps.end()) break;
+            const auto &binding = *found->second.binding;
+            if (covered(binding.floor, file, end_offset)) break;
+            if (required_tables) {
+              if (std::find(required_tables->begin(), required_tables->end(), binding.id) == required_tables->end())
+                required_tables->push_back(binding.id);
+              const size_t bytes = rows->get_rows_end() - rows->get_rows_begin();
+              if (bytes > budget || transaction_bytes > budget - bytes) return budget_exceeded();
+              transaction_bytes += bytes;
+              break;
             }
-            transaction_bytes += bytes;
-            transaction.changes.push_back(std::move(record));
+            auto *table = binding.table;
+            auto &map = *found->second.event;
+            Table_map_log_event::Optional_metadata_fields optional(map.m_optional_metadata,
+                                                                   map.m_optional_metadata_len);
+            table_def definition(map.m_coltype, map.m_colcnt, map.m_field_metadata, map.m_field_metadata_size,
+                                 map.m_null_bits, map.m_flags, optional.m_vector_dimensionality);
+            const uchar *cursor = rows->get_rows_begin(), *end = rows->get_rows_end();
+            while (cursor < end) {
+              change_record_buff_t record(Source::COPY_INFO, table->s->rec_buff_length);
+              record.m_copy_info_mode = CopyInfoMode::COMMITTED_BINLOG;
+              record.m_table_id = binding.id;
+              const auto type = event->get_type_code();
+              record.m_oper = type == WRITE_ROWS_EVENT    ? change_record_buff_t::OperType::INSERT
+                              : type == UPDATE_ROWS_EVENT ? change_record_buff_t::OperType::UPDATE
+                                                          : change_record_buff_t::OperType::DELETE;
+              if (!unpack(table, definition, rows->get_cols(), cursor, end, record.m_buff0.get(),
+                          record.m_offpage_data0))
+                return false;
+              if (type == UPDATE_ROWS_EVENT && !unpack(table, definition, rows->get_cols_ai(), cursor, end,
+                                                       record.m_buff1.get(), record.m_offpage_data1))
+                return false;
+              if (!FinalizeBinlogRow(table, record)) return false;
+              size_t bytes = 2 * record.m_size;
+              for (auto *image : {&record.m_offpage_data0, &record.m_offpage_data1})
+                for (const auto &entry : *image) bytes += entry.second.first;
+              if (bytes > budget || transaction_bytes > budget - bytes) return budget_exceeded();
+              transaction_bytes += bytes;
+              transaction.changes.push_back(std::move(record));
+            }
+            break;
           }
-          break;
-        }
-        case XID_EVENT:
-          terminal = true;
-          break;
-        case QUERY_EVENT: {
-          auto *query = static_cast<Query_log_event *>(event.get());
-          const std::string text(query->query, query->q_len);
-          if (text == "BEGIN") {
+          case XID_EVENT:
+            terminal = true;
+            break;
+          case QUERY_EVENT: {
+            auto *query = static_cast<Query_log_event *>(event.get());
+            const std::string text(query->query, query->q_len);
+            if (text == "BEGIN") {
+              if (!transaction.changes.empty()) return false;
+              maps.clear();
+            } else if (text == "COMMIT")
+              terminal = true;
+            else if (text.starts_with("SAVEPOINT ") || text.starts_with("RELEASE SAVEPOINT ")) {
+              // InnoDB rollback-to-savepoint truncates the transaction cache;
+              // surviving savepoint markers do not end a committed transaction.
+            } else if (text == "ROLLBACK") {
+              transaction.changes.clear();
+              terminal = true;
+            } else {
+              // Source DDL is serialized by MDL and current schema/id validation
+              // on every batch. Statement-logged DML is caught by sentinels.
+              // XA and mixed-engine savepoint streams have no supported lifecycle.
+              if (!transaction.changes.empty() || text.starts_with("XA ") || text.starts_with("ROLLBACK TO "))
+                return false;
+              terminal = true;
+            }
+            break;
+          }
+          case GTID_LOG_EVENT:
+          case ANONYMOUS_GTID_LOG_EVENT:
             if (!transaction.changes.empty()) return false;
             maps.clear();
-          } else if (text == "COMMIT")
-            terminal = true;
-          else if (text.starts_with("SAVEPOINT ") || text.starts_with("RELEASE SAVEPOINT ")) {
-            // InnoDB rollback-to-savepoint truncates the transaction cache;
-            // surviving savepoint markers do not end a committed transaction.
-          } else if (text == "ROLLBACK") {
-            transaction.changes.clear();
-            terminal = true;
-          } else {
-            // Source DDL is serialized by MDL and current schema/id validation
-            // on every batch. Statement-logged DML is caught by sentinels.
-            // XA and mixed-engine savepoint streams have no supported lifecycle.
-            if (!transaction.changes.empty() || text.starts_with("XA ") || text.starts_with("ROLLBACK TO "))
-              return false;
-            terminal = true;
-          }
-          break;
+            break;
+          case FORMAT_DESCRIPTION_EVENT:
+          case ROTATE_EVENT:
+          case STOP_EVENT:
+          case PREVIOUS_GTIDS_LOG_EVENT:
+          case HEARTBEAT_LOG_EVENT:
+          case ROWS_QUERY_LOG_EVENT:
+          case INTVAR_EVENT:
+          case RAND_EVENT:
+          case USER_VAR_EVENT:
+            break;
+          default:
+            return false;
         }
-        case GTID_LOG_EVENT:
-        case ANONYMOUS_GTID_LOG_EVENT:
-          if (!transaction.changes.empty()) return false;
+        if (terminal) {
+          in_payload = false;
+          transaction.end = {file, end_offset, {}};
+          assembled_end = transaction.end;
+          batch_bytes += transaction_bytes;
+          batch.push_back(std::move(transaction));
+          transaction = {};
           maps.clear();
-          break;
-        case FORMAT_DESCRIPTION_EVENT:
-        case ROTATE_EVENT:
-        case STOP_EVENT:
-        case PREVIOUS_GTIDS_LOG_EVENT:
-        case HEARTBEAT_LOG_EVENT:
-        case ROWS_QUERY_LOG_EVENT:
-        case INTVAR_EVENT:
-        case RAND_EVENT:
-        case USER_VAR_EVENT:
-          break;
-        default:
-          return false;
+          transaction_bytes = 0;
+          if (batch.size() >= 256 || batch_bytes >= budget / 2) return true;
+        }
       }
-      if (terminal) {
-        in_payload = false;
-        transaction.end = {file, end_offset, {}};
-        assembled_end = transaction.end;
-        batch_bytes += transaction_bytes;
-        batch.push_back(std::move(transaction));
-        transaction = {};
-        maps.clear();
-        transaction_bytes = 0;
-        if (batch.size() >= 256 || batch_bytes >= budget / 2) return true;
+      if (last) {
+        if (in_payload || !transaction.changes.empty()) return false;
+        assembled_end = committed_end;
+        return true;
       }
+      if (mysql_bin_log.find_next_log(&scan, false)) return false;
+      offset = 4;
     }
-    if (last) {
-      if (in_payload || !transaction.changes.empty()) return false;
-      assembled_end = committed_end;
-      return true;
-    }
-    if (mysql_bin_log.find_next_log(&scan, false)) return false;
-    offset = 4;
-  }
+  });
 }
 
-int EnqueueRowChange(change_record_buff_t &record) { return Populator::write(nullptr, 0, &record); }
+int EnqueueRowChange(change_record_buff_t &record) noexcept {
+  int result = static_cast<int>(PROPAGATION_FAILED::WRITE_REJECTED);
+  if (!Utils::try_operation([&] { result = Populator::write(nullptr, 0, &record); }))
+    QuarantinePropagationTable(record.m_table_id);
+  return result;
+}
 }  // namespace ShannonBase::Populate
 
 namespace ShannonBase::Populate {
 namespace {
 using Position = Recovery::BinlogPosition;
 using Clock = std::chrono::steady_clock;
+constexpr const char *CONSUMER_STALLED =
+    "COMMITTED_BINLOG consumer synchronization timed out; unload and reload the table";
 // Supported local files are <=4GiB. Packing the numeric file suffix and byte
 // offset permits a nonallocating monotone commit tracker in the source hook.
 uint64_t packed(const char *file, uint64_t offset) noexcept {
@@ -417,17 +434,29 @@ bool still_loaded(const Loaded &entry) {
   auto it = consumer.loaded.find(entry.id);
   return it != consumer.loaded.end() && it->second.generation == entry.generation;
 }
-void quarantine(const std::vector<Loaded> &loaded, const char *reason) {
-  for (const auto &table : loaded) {
+void fail_consumer() noexcept {
+  consumer.fault.store(true);
+  consumer.cv.notify_all();
+  sql_print_warning("Rapid COMMITTED_BINLOG: reader thread failed; unload and reload all loaded tables");
+}
+bool quarantine(const Loaded &table, const char *reason) noexcept {
+  const bool completed = Utils::try_operation([&] {
     std::lock_guard lock(consumer.mutex);
     auto it = consumer.loaded.find(table.id);
     if (it != consumer.loaded.end() && it->second.generation == table.generation) {
       it->second.failure_reason = reason;
       QuarantinePropagationTable(table.id);
     }
-  }
+  });
+  if (!completed) fail_consumer();
+  return completed;
+}
+bool quarantine(const std::vector<Loaded> &loaded, const char *reason) noexcept {
+  for (const auto &table : loaded)
+    if (!quarantine(table, reason)) return false;
   sql_print_warning("Rapid COMMITTED_BINLOG: %s; affected tables require reload", reason);
   consumer.cv.notify_all();
+  return true;
 }
 const char *global_configuration() {
   if (!mysql_bin_log.is_open()) return "COMMITTED_BINLOG requires an open binary log";
@@ -436,130 +465,222 @@ const char *global_configuration() {
   if (!opt_binlog_order_commits) return "COMMITTED_BINLOG requires binlog_order_commits=ON";
   return nullptr;
 }
-void consume() try {
-  ResMgmt::WorkerRegistration resource_registration;
+bool decode_batch(const std::vector<Loaded> &catalog, const Position &start, const std::string &prefix, uint64_t target,
+                  std::vector<BinlogTransaction> &batch, Position &assembled, bool &ready, const char *&failure_reason,
+                  Clock::time_point deadline) noexcept {
+  ready = false;
+  failure_reason = "binlog reader allocation or decoding failed";
+  return Utils::try_bool_operation([&]() -> bool {
+    Recovery::RecoveryAdminSession session;
+    if (DBUG_EVALUATE_IF("rapid_committed_reader_stall", true, false)) return true;
+    THD *thd = session.thd();
+    if (!thd) {
+      failure_reason = "cannot create reader session";
+      return false;
+    }
+    ShannonBase::ResMgmt::WorkScope resource_scope;
+    if (const char *error = resource_scope.enter(thd, ShannonBase::ResMgmt::WorkClass::SYNC, true, [deadline] {
+          return consumer.stop.load() || Clock::now() >= deadline;
+        })) {
+      failure_reason = Clock::now() >= deadline ? CONSUMER_STALLED : error;
+      return false;
+    }
+    // open_table_by_name takes external handler locks outside the server's
+    // normal MYSQL_LOCK list. Release them before session table cleanup.
+    auto unlock_tables = create_scope_guard([&] {
+      for (TABLE *table = thd->open_tables; table; table = table->next)
+        if (table->file) table->file->ha_external_lock(thd, F_UNLCK);
+    });
+    thd->variables.lock_wait_timeout = 1;
+    thd->variables.use_secondary_engine = SECONDARY_ENGINE_OFF;
+    // Discover row-event participants without source MDL. The parser releases
+    // the binlog index lock before any source table is opened. A table with
+    // no unapplied event in this batch cannot block unrelated propagation.
+    std::vector<BinlogTableBinding> discovery;
+    discovery.reserve(catalog.size());
+    for (const auto &entry : catalog)
+      discovery.push_back({nullptr, entry.id, entry.floor, entry.db.c_str(), entry.table.c_str()});
+    std::vector<table_id_t> required_tables;
+    std::vector<BinlogTransaction> discovered_batch;
+    Position discovered_end;
+    const char *discovery_error = nullptr;
+    if (!BinlogParser::read_batch(thd, discovery, start, position(target, prefix), discovered_batch, discovered_end,
+                                  &discovery_error, &required_tables)) {
+      failure_reason = discovery_error;
+      return false;
+    }
+    std::vector<BinlogTableBinding> bindings;
+    bool retry = false;
+    for (const auto &entry : catalog) {
+      if (std::find(required_tables.begin(), required_tables.end(), entry.id) == required_tables.end()) continue;
+      TABLE *source = Utils::Util::open_table_by_name(thd, entry.db, entry.table, TL_READ_WITH_SHARED_LOCKS);
+      if (!source) {
+        retry = true;
+        break;
+      }
+      if (source->file->get_table_id() != entry.id || !BinlogParser::supports(source) ||
+          schema_signature(source) != entry.schema) {
+        if (!quarantine(entry, "source schema or table identity changed")) return false;
+        continue;
+      }
+      bitmap_set_all(source->read_set);
+      bitmap_set_all(source->write_set);
+      bindings.push_back({source, entry.id, entry.floor});
+    }
+    if (retry) return true;
+    if (!BinlogParser::read_batch(thd, bindings, start, discovered_end, batch, assembled, &failure_reason)) {
+      return false;
+    }
+    ready = true;
+    return true;
+  });
+}
+bool read_catalog(std::vector<Loaded> &catalog, Position &start, std::string &prefix, uint64_t &target) noexcept {
+  return Utils::try_bool_operation([&]() -> bool {
+    std::unique_lock lock(consumer.mutex);
+    consumer.cv.wait_for(lock, std::chrono::milliseconds(POP_MAX_WAIT_TIMEOUT),
+                         [] { return consumer.stop.load() || consumer.demand.load(); });
+    consumer.demand.store(false);
+    consumer.hint.exchange(false, std::memory_order_relaxed);
+    if (consumer.stop.load()) return true;
+    DBUG_EXECUTE_IF("rapid_committed_catalog_bad_alloc", { return false; });
+    for (const auto &[id, table] : consumer.loaded)
+      if (!IsPropagationBroken(id)) catalog.push_back(table);
+    start = consumer.cursor;
+    prefix = consumer.prefix;
+    target = consumer.committed.load(std::memory_order_acquire);
+    return true;
+  });
+}
+bool prepare_transaction(BinlogTransaction &transaction, uint64_t scn, const std::vector<Loaded> &catalog,
+                         std::vector<table_id_t> &touched,
+                         std::vector<std::shared_ptr<table_pop_buffer_t>> &fenced) noexcept {
+  const auto current_unlocked = [&](table_id_t id) {
+    const auto entry =
+        std::find_if(catalog.begin(), catalog.end(), [&](const Loaded &table) { return table.id == id; });
+    const auto current = consumer.loaded.find(id);
+    return entry != catalog.end() && current != consumer.loaded.end() &&
+           current->second.generation == entry->generation;
+  };
+  return Utils::try_bool_operation([&]() -> bool {
+    // Pair generation validation with enqueue/notification publication.
+    // Detach must not redirect an old batch into a newly loaded table.
+    std::lock_guard lock(consumer.mutex);
+    for (auto &record : transaction.changes) {
+      if (!current_unlocked(record.m_table_id) || IsPropagationBroken(record.m_table_id)) continue;
+      if (std::find(touched.begin(), touched.end(), record.m_table_id) == touched.end())
+        touched.push_back(record.m_table_id);
+      record.m_commit_scn = scn;
+      auto table = Imcs::Imcs::instance()->get_rpd_table_shared(record.m_table_id);
+      auto *mgr = table ? table->recovery_manager() : nullptr;
+      auto *tracker = mgr ? mgr->notifications() : nullptr;
+      if (tracker) record.m_notification_sequence = tracker->notify(scn);
+    }
+    DBUG_EXECUTE_IF("rapid_committed_prepare_failure", { return false; });
+    fenced.reserve(touched.size());
+    for (auto id : touched) {
+      auto &shard = get_pop_shard(id);
+      std::unique_lock shard_lock(shard.mutex);
+      auto &buffer = shard.buffers[id];
+      if (!buffer) buffer = std::make_shared<table_pop_buffer_t>();
+      fenced.push_back(buffer);
+    }
+    for (auto id : touched) {
+      auto table = Imcs::Imcs::instance()->get_rpd_table_shared(id);
+      auto *mgr = table ? table->recovery_manager() : nullptr;
+      if (mgr && mgr->notifications()) mgr->notifications()->committed(scn, transaction.end);
+    }
+    for (auto &buffer : fenced) buffer->publish_fence.fetch_add(1, std::memory_order_acq_rel);
+    return true;
+  });
+}
+void consume() {
+  std::optional<ResMgmt::WorkerRegistration> resource_registration;
+  if (!Utils::try_operation([&] { resource_registration.emplace(); })) {
+    fail_consumer();
+    return;
+  }
+  std::optional<Clock::time_point> progress_deadline;
   for (;;) {
     // RecoveryAdminSession releases the MySQL thread state at the end of
     // each batch. Reinitialize it before catalog work (and its DBUG hooks),
     // and release it on early exits that never create an admin session.
-    if (my_thread_init()) throw std::bad_alloc();
+    if (my_thread_init()) {
+      fail_consumer();
+      return;
+    }
     auto thread_cleanup = create_scope_guard([] { my_thread_end(); });
     std::vector<Loaded> catalog;
     Position start;
     std::string prefix;
     uint64_t target = 0;
-    {
-      std::unique_lock lock(consumer.mutex);
-      consumer.cv.wait_for(lock, std::chrono::milliseconds(POP_MAX_WAIT_TIMEOUT),
-                           [] { return consumer.stop.load() || consumer.demand.load(); });
-      consumer.demand.store(false);
-      consumer.hint.exchange(false, std::memory_order_relaxed);
-      if (consumer.stop.load()) return;
-      DBUG_EXECUTE_IF("rapid_committed_catalog_bad_alloc", { throw std::bad_alloc(); });
-      for (const auto &[id, table] : consumer.loaded)
-        if (!IsPropagationBroken(id)) catalog.push_back(table);
-      start = consumer.cursor;
-      prefix = consumer.prefix;
-      target = consumer.committed.load(std::memory_order_acquire);
+    const bool catalog_ready = read_catalog(catalog, start, prefix, target);
+    if (!catalog_ready) {
+      fail_consumer();
+      return;
     }
+    if (consumer.stop.load()) return;
     if (connection_events_loop_aborted()) return;
     if (catalog.empty()) continue;
     if (consumer.fault.load() || global_configuration()) {
-      quarantine(catalog, consumer.reset.load()
-                              ? "Source binlog was reset; unload and reload the table"
-                              : "Source configuration or commit position is unsupported; unload and reload the table");
+      if (!quarantine(catalog,
+                      consumer.reset.load()
+                          ? "Source binlog was reset; unload and reload the table"
+                          : "Source configuration or commit position is unsupported; unload and reload the table"))
+        return;
       continue;
     }
-    if (target <= packed(start)) continue;
-    try {
+    if (target <= packed(start)) {
+      progress_deadline.reset();
+      continue;
+    }
+    if (!progress_deadline)
+      progress_deadline = Clock::now() + std::chrono::milliseconds(shannon_rpd_engine_cfg.query_sync_timeout_ms);
+    const auto deadline = *progress_deadline;
+    if (Clock::now() >= deadline) {
+      if (!quarantine(catalog, CONSUMER_STALLED)) return;
+      progress_deadline.reset();
+      continue;
+    }
+    {
       // Source metadata is opened BEFORE any apply/queue lock. Never block DDL
       // or unload while holding those locks. Each batch closes its TABLEs.
       std::vector<BinlogTransaction> batch;
       Position assembled;
-      {
-        Recovery::RecoveryAdminSession session;
-        if (DBUG_EVALUATE_IF("rapid_committed_reader_stall", true, false)) continue;
-        THD *thd = session.thd();
-        if (!thd) {
-          quarantine(catalog, "cannot create reader session");
-          continue;
-        }
-        ShannonBase::ResMgmt::WorkScope resource_scope;
-        if (const char *error = resource_scope.enter(thd, ShannonBase::ResMgmt::WorkClass::SYNC, true,
-                                                     [] { return consumer.stop.load(); })) {
-          if (!consumer.stop.load() && !ResMgmt::work_governor().stopping()) quarantine(catalog, error);
-          continue;
-        }
-        // open_table_by_name takes external handler locks outside the server's
-        // normal MYSQL_LOCK list. Release them before session table cleanup.
-        auto unlock_tables = create_scope_guard([&] {
-          for (TABLE *table = thd->open_tables; table; table = table->next)
-            if (table->file) table->file->ha_external_lock(thd, F_UNLCK);
-        });
-        thd->variables.lock_wait_timeout = 1;
-        thd->variables.use_secondary_engine = SECONDARY_ENGINE_OFF;
-        // Discover row-event participants without source MDL. The parser releases
-        // the binlog index lock before any source table is opened. A table with
-        // no unapplied event in this batch cannot block unrelated propagation.
-        std::vector<BinlogTableBinding> discovery;
-        discovery.reserve(catalog.size());
-        for (const auto &entry : catalog)
-          discovery.push_back({nullptr, entry.id, entry.floor, entry.db.c_str(), entry.table.c_str()});
-        std::vector<table_id_t> required_tables;
-        std::vector<BinlogTransaction> discovered_batch;
-        Position discovered_end;
-        const char *discovery_error = nullptr;
-        if (!BinlogParser::read_batch(thd, discovery, start, position(target, prefix), discovered_batch, discovered_end,
-                                      &discovery_error, &required_tables)) {
-          quarantine(catalog, discovery_error);
-          continue;
-        }
-        std::vector<BinlogTableBinding> bindings;
-        bool retry = false;
-        for (const auto &entry : catalog) {
-          if (std::find(required_tables.begin(), required_tables.end(), entry.id) == required_tables.end()) continue;
-          TABLE *source = Utils::Util::open_table_by_name(thd, entry.db, entry.table, TL_READ_WITH_SHARED_LOCKS);
-          if (!source) {
-            retry = true;
-            break;
-          }
-          if (source->file->get_table_id() != entry.id || !BinlogParser::supports(source) ||
-              schema_signature(source) != entry.schema) {
-            quarantine({entry}, "source schema or table identity changed");
-            continue;
-          }
-          bitmap_set_all(source->read_set);
-          bitmap_set_all(source->write_set);
-          bindings.push_back({source, entry.id, entry.floor});
-        }
-        if (retry) continue;
-        const char *failure_reason = nullptr;
-        if (!BinlogParser::read_batch(thd, bindings, start, discovered_end, batch, assembled, &failure_reason)) {
-          quarantine(catalog, failure_reason);
-          continue;
-        }
-      }  // Release source TABLE/MDL and decode grant before queue/apply waits.
+      bool ready = false;
+      const char *decode_error = nullptr;
+      if (!decode_batch(catalog, start, prefix, target, batch, assembled, ready, decode_error, deadline)) {
+        if (!quarantine(catalog, decode_error)) return;
+        continue;
+      }
+      if (!ready) continue;
       // The parser has released the index lock. The bounded batch owns all
       // payloads; queue saturation now waits only in this background reader.
       // Enqueue the bounded decoded batch in transaction order, then wait for
       // each table's final barrier once. Keep all transaction SCNs hidden until
       // every table completes; publishing per row/transaction serializes apply
       // admission and CPU-group switching unnecessarily.
-      Recovery::RecoveryAdminSession enqueue_session;
-      if (!enqueue_session.thd()) {
-        quarantine(catalog, "cannot create enqueue session");
+      std::optional<Recovery::RecoveryAdminSession> enqueue_session;
+      if (!Utils::try_operation([&] { enqueue_session.emplace(); }) || !enqueue_session->thd()) {
+        if (!quarantine(catalog, "cannot create enqueue session")) return;
         continue;
       }
       ResMgmt::WorkScope enqueue_scope;
       auto admit_enqueue = [&]() {
-        return enqueue_scope.enter(enqueue_session.thd(), ResMgmt::WorkClass::SYNC, true,
-                                   [] { return consumer.stop.load(); });
+        const char *error = nullptr;
+        if (!Utils::try_operation([&] {
+              error = enqueue_scope.enter(enqueue_session->thd(), ResMgmt::WorkClass::SYNC, true,
+                                          [deadline] { return consumer.stop.load() || Clock::now() >= deadline; });
+            }))
+          return "cannot allocate enqueue resource scope";
+        return Clock::now() >= deadline ? CONSUMER_STALLED : error;
       };
       if (const char *error = admit_enqueue()) {
-        if (!consumer.stop.load() && !ResMgmt::work_governor().stopping()) quarantine(catalog, error);
+        if (!consumer.stop.load() && !ResMgmt::work_governor().stopping() && !quarantine(catalog, error)) return;
         continue;
       }
       bool success = true;
+      const char *batch_error = "committed batch propagation failed; reload required";
       uint64_t batch_scn = 0;
       std::vector<table_id_t> batch_touched;
       auto catalog_entry = [&](table_id_t id) {
@@ -577,34 +698,10 @@ void consume() try {
         batch_scn = scn;
         std::vector<table_id_t> touched;
         std::vector<std::shared_ptr<table_pop_buffer_t>> fenced;
-        {
-          // Pair generation validation with enqueue/notification publication.
-          // Detach must not redirect an old batch into a newly loaded table.
-          std::lock_guard lock(consumer.mutex);
-          for (auto &record : transaction.changes) {
-            if (!current_unlocked(record.m_table_id) || IsPropagationBroken(record.m_table_id)) continue;
-            if (std::find(touched.begin(), touched.end(), record.m_table_id) == touched.end())
-              touched.push_back(record.m_table_id);
-            record.m_commit_scn = scn;
-            auto table = Imcs::Imcs::instance()->get_rpd_table_shared(record.m_table_id);
-            auto *mgr = table ? table->recovery_manager() : nullptr;
-            auto *tracker = mgr ? mgr->notifications() : nullptr;
-            if (tracker) record.m_notification_sequence = tracker->notify(scn);
-          }
-          fenced.reserve(touched.size());
-          for (auto id : touched) {
-            auto &shard = get_pop_shard(id);
-            std::unique_lock shard_lock(shard.mutex);
-            auto &buffer = shard.buffers[id];
-            if (!buffer) buffer = std::make_shared<table_pop_buffer_t>();
-            fenced.push_back(buffer);
-          }
-          for (auto id : touched) {
-            auto table = Imcs::Imcs::instance()->get_rpd_table_shared(id);
-            auto *mgr = table ? table->recovery_manager() : nullptr;
-            if (mgr && mgr->notifications()) mgr->notifications()->committed(scn, transaction.end);
-          }
-          for (auto &buffer : fenced) buffer->publish_fence.fetch_add(1, std::memory_order_acq_rel);
+        const bool prepared = prepare_transaction(transaction, scn, catalog, touched, fenced);
+        if (!prepared) {
+          success = false;
+          break;
         }
         // Own the original buffer incarnation through exceptions and unload.
         // A table-id lookup at release could decrement a replacement buffer.
@@ -622,6 +719,11 @@ void consume() try {
             if (consumer.stop.load() || ResMgmt::work_governor().stopping() || connection_events_loop_aborted()) return;
             std::unique_lock lock(consumer.mutex);
             if (!current_unlocked(record.m_table_id)) break;
+            if (Clock::now() >= deadline) {
+              batch_error = CONSUMER_STALLED;
+              success = false;
+              break;
+            }
             const int result = EnqueueRowChange(record);
             if (result == static_cast<int>(PROPAGATION_FAILED::BUFFER_FULL)) {
               // With SYNC=1, apply must be able to drain this queue before the
@@ -634,7 +736,7 @@ void consume() try {
               lock.unlock();
               if (const char *error = admit_enqueue()) {
                 if (consumer.stop.load() || ResMgmt::work_governor().stopping()) return;
-                quarantine(catalog, error);
+                if (!quarantine(catalog, error)) return;
                 success = false;
                 break;
               }
@@ -646,9 +748,12 @@ void consume() try {
           if (!success) break;
         }
         release_fences.reset();
-        for (auto id : touched)
-          if (std::find(batch_touched.begin(), batch_touched.end(), id) == batch_touched.end())
-            batch_touched.push_back(id);
+        if (!Utils::try_operation([&] {
+              for (auto id : touched)
+                if (std::find(batch_touched.begin(), batch_touched.end(), id) == batch_touched.end())
+                  batch_touched.push_back(id);
+            }))
+          success = false;
         if (!success) break;
       }
       enqueue_scope.reset();  // Allow apply to run before waiting for its barriers.
@@ -664,6 +769,11 @@ void consume() try {
         while (success && barrier.needs_wait()) {
           if (consumer.stop.load() || ResMgmt::work_governor().stopping() || connection_events_loop_aborted()) return;
           if (!still_loaded(*entry)) break;
+          if (Clock::now() >= deadline) {
+            batch_error = CONSUMER_STALLED;
+            success = false;
+            break;
+          }
           const auto result = Populator::wait_table_applied_for(
               id, barrier.required_change_id, QUERY_PROPAGATION_WAIT_SLICE_MS, barrier.buffer_generation);
           if (result == TablePropagationWaitResult::APPLIED) break;
@@ -678,7 +788,7 @@ void consume() try {
       if (!success) {
         // The remainder of this decoded batch has not been enqueued. Do not
         // advance its cursor or expose partial changes in any loaded table.
-        quarantine(catalog, "committed batch propagation failed; reload required");
+        if (!quarantine(catalog, batch_error)) return;
         continue;
       }
       // Hidden system versions become query-visible only after every table's
@@ -693,30 +803,24 @@ void consume() try {
 #ifndef SHANNON_POSIX_PLATFORM
       // Platforms without a stable inode identifier retain full certification.
       if (!Recovery::BinlogRecovery::certify(assembled)) {
-        quarantine(catalog, "assembled source position was lost");
+        if (!quarantine(catalog, "assembled source position was lost")) return;
         continue;
       }
 #endif
       {
         std::lock_guard lock(consumer.mutex);
-        consumer.cursor = assembled;
+        if (!Utils::try_operation([&] { consumer.cursor = assembled; })) {
+          fail_consumer();
+          return;
+        }
         consumer.assembled.store(packed(assembled), std::memory_order_release);
+        if (packed(assembled) > packed(start)) progress_deadline.reset();
         consumer.visible = packed(assembled);
         if (consumer.committed.load() > consumer.visible) consumer.demand.store(true);
       }
       consumer.cv.notify_all();
-    } catch (...) {
-      quarantine(catalog, "binlog reader allocation or decoding failed");
     }
   }
-} catch (...) {
-  // Catalog copies and worker registration precede the per-batch catch.
-  // Quarantine itself may also fail under OOM. Publish an allocation-free
-  // global fault so prepare_query refuses every loaded table, even if no
-  // affected-table catalog could be constructed. Detach/reload is required.
-  consumer.fault.store(true);
-  consumer.cv.notify_all();
-  sql_print_warning("Rapid COMMITTED_BINLOG: reader thread failed; unload and reload all loaded tables");
 }
 }  // namespace
 
@@ -855,9 +959,11 @@ const char *CommittedBinlog::prepare_query(THD *thd, LEX *lex, uint64_t &view_sc
     for (auto *t = lex->query_tables; t; t = t->next_global) {
       if (t->is_placeholder()) continue;
       const auto share = shannon_loaded_tables->get(t->db, t->table_name);
-      if (!share || !consumer.loaded.contains(share->m_tableid)) return "table is not admitted to COMMITTED_BINLOG";
+      if (!share) return "table is not admitted to COMMITTED_BINLOG";
+      const auto loaded = consumer.loaded.find(share->m_tableid);
+      if (loaded == consumer.loaded.end()) return "table is not admitted to COMMITTED_BINLOG";
       if (IsPropagationBroken(share->m_tableid)) {
-        const auto &entry = consumer.loaded.at(share->m_tableid);
+        const auto &entry = loaded->second;
         return entry.failure_reason ? entry.failure_reason : "Change propagation failed; unload and reload the table";
       }
     }

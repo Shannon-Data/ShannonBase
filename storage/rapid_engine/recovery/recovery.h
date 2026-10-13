@@ -41,6 +41,7 @@
 
 #include "my_inttypes.h"
 #include "storage/rapid_engine/recovery/recovery_load.h"
+#include "storage/rapid_engine/recovery/source_validation.h"
 #include "storage/rapid_engine/recovery/table_persistence.h"  // per-table checkpoint storage
 
 class THD;
@@ -214,7 +215,9 @@ class RecoveryAdminSession {
 
 class RecoveryJob {
  public:
-  explicit RecoveryJob(const SecondaryLoadedTable &table_info) : m_table_info(table_info) {}
+  explicit RecoveryJob(const SecondaryLoadedTable &table_info,
+                       SourceValidationPolicy validation = SourceRecoveryValidation::current())
+      : m_table_info(table_info), m_source_validation(std::move(validation)) {}
   ~RecoveryJob() = default;
 
   /**
@@ -250,6 +253,8 @@ class RecoveryJob {
   bool reload_partitioned_table(THD *thd);
 
   SecondaryLoadedTable m_table_info;
+  SourceValidationPolicy m_source_validation;
+  bool m_source_validation_failed{false};
 };
 
 class DDWorker {

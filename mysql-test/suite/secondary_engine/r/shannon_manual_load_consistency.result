@@ -1,0 +1,22 @@
+CREATE DATABASE sh_manual_consistency;
+USE sh_manual_consistency;
+CREATE TABLE t(id INT PRIMARY KEY,v INT) SECONDARY_ENGINE=rapid;
+INSERT INTO t VALUES(1,10),(2,20);
+SET SESSION debug='+d,before_secondary_engine_load_start';
+ALTER TABLE t SECONDARY_LOAD;
+SET DEBUG_SYNC='now WAIT_FOR before_load_start';
+SET use_secondary_engine=OFF;
+UPDATE t SET v=11 WHERE id=1;
+SELECT COUNT(*) AS partially_published FROM performance_schema.rpd_table_id WHERE SCHEMA_NAME='sh_manual_consistency' AND TABLE_NAME='t';
+partially_published
+0
+SET DEBUG_SYNC='now SIGNAL metadata_check_done';
+SET SESSION debug='';
+SET use_secondary_engine=FORCED;
+SELECT id,v FROM t ORDER BY id;
+id	v
+1	11
+2	20
+SET use_secondary_engine=OFF;
+SET DEBUG_SYNC='RESET';
+DROP DATABASE sh_manual_consistency;

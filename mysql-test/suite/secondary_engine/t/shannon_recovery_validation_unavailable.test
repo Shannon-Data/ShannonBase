@@ -1,0 +1,6 @@
+# A requested FULL policy without a validator must not publish AP or silently
+# rebuild from TP. The default FAST policy is covered by storage_layer_binlog.
+--source suite/secondary_engine/include/storage_layer_baseline.inc
+--let $storage_restart_debug = --debug=d,rapid_recovery_full_validation_unavailable
+--let $storage_expected = 1:10,2:20,3:30
+--source suite/secondary_engine/include/storage_layer_manual_load.inc

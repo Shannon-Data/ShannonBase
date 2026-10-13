@@ -65,7 +65,7 @@ class Dictionary;
 class RpdTable;
 class Imcu;
 
-// Magic stored as little-endian uint32 == "SHCU" (0x55 48 43 53).
+// Magic 0x55484353; little-endian bytes are "SCHU".
 static constexpr uint32_t CU_SERIAL_MAGIC = 0x55484353u;
 // 2: LZ4 and zlib payloads carry a 4-byte little-endian original-length
 // prefix. Version 1 blobs have a different byte layout inside every
@@ -210,13 +210,13 @@ class CU : public MemoryObject {
   /**
    * Serialize the complete CU state to a binary output stream.
    *
-   * Binary layout (all multi-byte fields little-endian):
+   * Binary layout (host-endian; supported x86/ARM targets are little-endian):
    * ┌──────────────────────────────────────────────────────────────┐
    * │ Fixed header  (20 bytes)                                     │
-   * │   magic          4 B  CU_SERIAL_MAGIC = "SHCU"               │
+   * │   magic          4 B  CU_SERIAL_MAGIC = 0x55484353             │
    * │   version        2 B  CU_FORMAT_VERSION                      │
    * │   flags          1 B  CU_FLAG_COMPRESSED | HAS_DICT |        │
-   * │                       HAS_VERSIONS                           │
+   * │                       HAS_VERSIONS | HAS_VARLEN              │
    * │   column_id      4 B                                         │
    * │   field_type     1 B  enum_field_types                       │
    * │   encoding       1 B  Compress::ENCODING_TYPE                │
@@ -242,7 +242,7 @@ class CU : public MemoryObject {
    * │   entry_count  4 B                                           │
    * │   for each entry:                                            │
    * │     entry_size  8 B                                          │
-   * │     entry_data  N B  (flag byte + payload as stored)         │
+   * │     entry_data  N B  decoded string; reserved ID 0 omitted   │
    * ├──────────────────────────────────────────────────────────────┤
    * │ Version journal  (only when CU_FLAG_HAS_VERSIONS is set)     │
    * │   version_entry_count  8 B                                   │
@@ -252,6 +252,10 @@ class CU : public MemoryObject {
    * │     scn        8 B                                           │
    * │     val_len    8 B  (UNIV_SQL_NULL sentinel for NULL cells)  │
    * │     val_data   N B  (absent when val_len == UNIV_SQL_NULL)   │
+   * ├──────────────────────────────────────────────────────────────┤
+   * │ Varlen values  (only when CU_FLAG_HAS_VARLEN is set)          │
+   * │   value_count  8 B; per value: row_id 8 B, length 8 B, data   │
+   * │   Inline values stay in slots; pool references are rebuilt.  │
    * ├──────────────────────────────────────────────────────────────┤
    * │ Trailer                                                      │
    * │   checksum  4 B  CRC-32C           of all preceding bytes    │
@@ -271,9 +275,11 @@ class CU : public MemoryObject {
    * file leaves the CU unchanged.
    *
    * @param in  Binary input stream.
+   * @param expected_rows  Native checkpoint chunk row count; SIZE_MAX for a
+   *                       generic CU snapshot, which may contain MVCC versions.
    * @return SHANNON_SUCCESS (0) on success, otherwise an error code.
    */
-  int deserialize(std::istream &in);
+  int deserialize(std::istream &in, size_t expected_rows = SIZE_MAX);
 
   inline void reconstruct_field_metadata(Field *f, const CHARSET_INFO *cs) {
     m_header.field_desc.src_field = f;
@@ -384,6 +390,9 @@ class CU : public MemoryObject {
    * hold m_data_mutex exclusively (retire() takes the pool lock).
    */
   void retire_slot_varlen_ref_locked(const uchar *slot);
+
+  int serialize_payload(std::ostream &out, size_t snapshot_row_count, bool checkpoint) const;
+  int deserialize_payload(std::istream &in, size_t expected_rows);
 
   /** Decompress without locking.  Caller MUST hold m_data_mutex write-lock. */
   int decompress_locked();

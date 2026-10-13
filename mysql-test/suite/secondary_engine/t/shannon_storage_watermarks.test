@@ -1,0 +1,33 @@
+--source suite/secondary_engine/include/storage_layer_baseline.inc
+--let $wait_condition = SELECT COUNT(*)=1 FROM performance_schema.rpd_tables r JOIN performance_schema.rpd_table_id i ON r.ID=i.ID WHERE i.SCHEMA_NAME='sh_storage_recovery' AND i.TABLE_NAME='t' AND r.SNAPSHOT_SCN>0 AND r.PERSISTED_SCN>=r.SNAPSHOT_SCN
+--source include/wait_condition.inc
+SELECT SNAPSHOT_SCN>0 AS snapshot_certified,PERSISTED_SCN>=SNAPSHOT_SCN AS storage_confirmed FROM performance_schema.rpd_tables r JOIN performance_schema.rpd_table_id i ON r.ID=i.ID WHERE i.SCHEMA_NAME='sh_storage_recovery' AND i.TABLE_NAME='t';
+--let $saved_snapshot = `SELECT SNAPSHOT_SCN FROM performance_schema.rpd_tables r JOIN performance_schema.rpd_table_id i ON r.ID=i.ID WHERE i.SCHEMA_NAME='sh_storage_recovery' AND i.TABLE_NAME='t'`
+--let $saved_persisted = `SELECT PERSISTED_SCN FROM performance_schema.rpd_tables r JOIN performance_schema.rpd_table_id i ON r.ID=i.ID WHERE i.SCHEMA_NAME='sh_storage_recovery' AND i.TABLE_NAME='t'`
+CALL mtr.add_suppression("CheckpointScheduler: on-demand checkpoint failed sh_storage_recovery.t");
+--let $restart_parameters = restart: --rapid_reload_on_restart=ON --debug=d,rapid_checkpoint_publish_error
+--source include/kill_and_restart_mysqld.inc
+USE sh_storage_recovery;
+--let $wait_condition = SELECT CAST(VARIABLE_VALUE AS UNSIGNED)=1 FROM performance_schema.global_status WHERE VARIABLE_NAME='rapid_recovery_storage_restores'
+--source include/wait_condition.inc
+# Applying a newer source transaction must not count as durable AP progress.
+SET use_secondary_engine=FORCED;
+UPDATE t SET v=11 WHERE id=1;
+SELECT id,v FROM t ORDER BY id;
+# Shutdown and restart both attempt publication with the failure hook active.
+--let $restart_parameters = restart: --rapid_reload_on_restart=ON --debug=d,rapid_checkpoint_publish_error
+--source include/restart_mysqld.inc
+USE sh_storage_recovery;
+--let $wait_condition = SELECT CAST(VARIABLE_VALUE AS UNSIGNED)=1 FROM performance_schema.global_status WHERE VARIABLE_NAME='rapid_recovery_storage_restores'
+--source include/wait_condition.inc
+--let $actual_snapshot = `SELECT SNAPSHOT_SCN FROM performance_schema.rpd_tables r JOIN performance_schema.rpd_table_id i ON r.ID=i.ID WHERE i.SCHEMA_NAME='sh_storage_recovery' AND i.TABLE_NAME='t'`
+--let $actual_persisted = `SELECT PERSISTED_SCN FROM performance_schema.rpd_tables r JOIN performance_schema.rpd_table_id i ON r.ID=i.ID WHERE i.SCHEMA_NAME='sh_storage_recovery' AND i.TABLE_NAME='t'`
+if ($actual_snapshot != $saved_snapshot) {
+ --die Native recovery changed the certified snapshot SCN
+}
+if ($actual_persisted != $saved_persisted) {
+ --die Native recovery or failed publication invented persistence progress
+}
+SET use_secondary_engine=FORCED;
+SELECT id,v FROM t ORDER BY id;
+DROP DATABASE sh_storage_recovery;

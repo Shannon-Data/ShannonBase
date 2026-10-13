@@ -45,6 +45,7 @@
 #include "storage/rapid_engine/imcs/table.h"
 #include "storage/rapid_engine/trx/transaction.h"
 #include "storage/rapid_engine/utils/crc.h"
+#include "storage/rapid_engine/utils/try_operation.h"
 #include "storage/rapid_engine/utils/utils.h"
 /*
    1. Compression (compress / decompress)
@@ -66,12 +67,9 @@
    2. Serialization (serialize / deserialize)
       • Full binary snapshot with a CRC-32C trailer.
       • Endianness: host (little-endian on all supported x86/ARM targets).
-      • Dictionary entries are stored verbatim from m_header.field_desc.dictionary's
-        internal storage vector so that dict IDs embedded in m_data remain
-        valid after reload.
-      • Version chains are flattened to a list of VersionEntry records;
-        the chain ordering (newest-first) is not significant for recovery
-        because we only need old values, not time ordering.
+      • Decoded dictionary strings retain their IDs and are re-encoded on load.
+      • Generic version chains are flattened newest-first and restored in
+        reverse order. Native committed checkpoints omit those version chains.
       • CRC-32C covers every byte written before the checksum itself.
         deserialize() verifies this before modifying any in-memory state.
 */
@@ -1106,6 +1104,13 @@ void CU::update_statistics(const uchar *data, size_t len) {
 }
 
 int CU::serialize(std::ostream &out, size_t snapshot_row_count, bool checkpoint) const {
+  int result = HA_ERR_GENERIC;
+  if (!Utils::try_operation([&] { result = serialize_payload(out, snapshot_row_count, checkpoint); }))
+    return HA_ERR_GENERIC;
+  return result;
+}
+
+int CU::serialize_payload(std::ostream &out, size_t snapshot_row_count, bool checkpoint) const {
   // If the CU is currently compressed, we can serialize the compressed payload directly (saves I/O). If not, we
   // compress on-the-fly into a temp buffer so the snapshot is as compact as possible.
   std::lock_guard lock(m_data_mutex);
@@ -1295,7 +1300,13 @@ int CU::serialize(std::ostream &out, size_t snapshot_row_count, bool checkpoint)
   return out.good() ? ShannonBase::SHANNON_SUCCESS : HA_ERR_GENERIC;
 }
 
-int CU::deserialize(std::istream &in) {
+int CU::deserialize(std::istream &in, size_t expected_rows) {
+  int result = HA_ERR_GENERIC;
+  if (!Utils::try_operation([&] { result = deserialize_payload(in, expected_rows); })) return HA_ERR_GENERIC;
+  return result;
+}
+
+int CU::deserialize_payload(std::istream &in, size_t expected_rows) {
   // Step 1: Read entire record into a memory buffer so we can verify CRC
   // We read the stream progressively via CrcIStream, then verify at the end
   // before touching any live state.
@@ -1329,6 +1340,11 @@ int CU::deserialize(std::istream &in) {
   // Cross-check header identity before trusting any sizes that follow.
   if (col_id != m_header.column_id) return HA_ERR_GENERIC;
   if (ftype != static_cast<uint8_t>(m_header.field_desc.type)) return HA_ERR_GENERIC;
+  if (enc != static_cast<uint8_t>(m_header.field_desc.encoding)) return HA_ERR_GENERIC;
+  constexpr uint8_t known_flags = CU_FLAG_COMPRESSED | CU_FLAG_HAS_DICT | CU_FLAG_HAS_VERSIONS | CU_FLAG_HAS_VARLEN;
+  if (flags & ~known_flags) return HA_ERR_GENERIC;
+  if ((flags & CU_FLAG_HAS_DICT) && !m_header.field_desc.dictionary) return HA_ERR_GENERIC;
+  if (bool(flags & CU_FLAG_HAS_VARLEN) != bool(m_varlen_pool)) return HA_ERR_GENERIC;
 
   // Lengths
   uint64_t pack_len = 0, norm_len = 0, orig_sz = 0, row_cnt = 0;
@@ -1336,6 +1352,7 @@ int CU::deserialize(std::istream &in) {
   if (!cis.read_pod(norm_len)) return HA_ERR_GENERIC;
   if (!cis.read_pod(orig_sz)) return HA_ERR_GENERIC;
   if (!cis.read_pod(row_cnt)) return HA_ERR_GENERIC;
+  if (expected_rows != SIZE_MAX && (row_cnt != expected_rows || (flags & CU_FLAG_HAS_VERSIONS))) return HA_ERR_GENERIC;
 
   // Zone map
   double zm_min = 0, zm_max = 0, zm_sum = 0;
@@ -1351,6 +1368,10 @@ int CU::deserialize(std::istream &in) {
   const size_t data_capacity = m_data_capacity.load(std::memory_order_acquire);
   if (orig_sz > data_capacity) return HA_ERR_GENERIC;
   if (payload_sz > orig_sz) return HA_ERR_GENERIC;
+  if (!(flags & CU_FLAG_COMPRESSED) && (payload_sz != orig_sz || algo != static_cast<uint8_t>(CU_CompressAlgo::NONE)))
+    return HA_ERR_GENERIC;
+  if ((flags & CU_FLAG_COMPRESSED) && (algo == static_cast<uint8_t>(CU_CompressAlgo::NONE) || payload_sz == 0))
+    return HA_ERR_GENERIC;
   if (pack_len != m_header.field_desc.pack_length) return HA_ERR_GENERIC;
   if (norm_len != m_header.field_desc.normalized_length) return HA_ERR_GENERIC;
   if (norm_len == 0) {

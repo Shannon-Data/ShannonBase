@@ -286,8 +286,8 @@ void RecoveryManager::note_unregistered_change(const char *db, const char *tbl) 
   auto mgr = get_table_mgr(names.first, names.second);
   if (mgr->revoke_fast_recovery()) {
     std::string msg = "RecoveryManager: a source change reached " + names.first + "." + names.second +
-                      " before its restart recovery finished; its on-disk image is revoked and the table will be "
-                      "reloaded from the primary";
+                      " before its restart recovery finished; its on-disk image is revoked; "
+                      "run ALTER TABLE SECONDARY_LOAD to reload from the primary";
     LogErr(WARNING_LEVEL, ER_LOG_PRINTF_MSG, msg.c_str());
     return;
   }
@@ -521,6 +521,22 @@ bool RecoveryJob::execute() {
   }
   THD *thd = session.thd();
 
+  // A revoked or uninspectable recovery image requires an explicit user load.
+  // Decide before taking source MDL: AP failure must not trigger a primary scan
+  // or hold a source write lock merely to rediscover the known failure.
+  auto *scheduler = CheckpointScheduler::global();
+  auto *recovery = scheduler ? scheduler->recovery_manager() : nullptr;
+  auto manager = recovery ? recovery->table_manager(info.schema_name, info.table_name) : nullptr;
+  if (manager && (manager->recovery_required() || manager->recovery_tainted())) {
+    const std::string message = "RecoveryJob: " + info.schema_name + "." + info.table_name +
+                                " recovery eligibility is revoked or cannot be verified; automatic recovery stopped; "
+                                "run ALTER TABLE SECONDARY_LOAD to reload from the primary";
+    LogErr(WARNING_LEVEL, ER_LOG_PRINTF_MSG, message.c_str());
+    // Retain pending ownership and the old image's fence until SECONDARY_LOAD
+    // resets the epoch. Returning failure does not change the primary commit.
+    return false;
+  }
+
   DBUG_SIGNAL_WAIT_FOR(thd, "rapid_pause_restart_recovery", "rapid_restart_recovery_paused",
                        "rapid_restart_recovery_continue");
 
@@ -554,6 +570,18 @@ bool RecoveryJob::execute() {
                           " recovered from checkpoint and committed MySQL binlog";
     LogErr(INFORMATION_LEVEL, ER_LOG_PRINTF_MSG, log_msg.c_str());
     return true;
+  }
+
+  // A requested FULL check cannot silently fall back to FAST or trigger an
+  // automatic source reload. Keep the failed table unpublished for user load.
+  if (m_source_validation_failed) {
+    if (manager) manager->require_recovery();
+    const std::string message = "RecoveryJob: " + info.schema_name + "." + info.table_name +
+                                " recovery eligibility is revoked or cannot be verified; automatic recovery stopped; "
+                                "full source validation failed or is unavailable; "
+                                "run ALTER TABLE SECONDARY_LOAD to reload from the primary";
+    LogErr(WARNING_LEVEL, ER_LOG_PRINTF_MSG, message.c_str());
+    return false;
   }
 
   // A reload renumbers every row from InnoDB, so nothing on disk for this
@@ -688,6 +716,8 @@ bool RecoveryJob::try_snapshot_recovery(THD *thd) {
   auto manifest = table_manager->load_manifest(generation);
   if (!manifest.ok()) return false;
 
+  TransactionCoordinator::instance().observe_commit_scn(manifest.value.persisted_scn);
+
   // Reconnect Field* (cannot be serialised; patch from live TABLE).
   TABLE *patched_src = nullptr;
   if (!reconstruct_field_pointers(thd, rpd_table.get(), patched_src)) return false;
@@ -709,8 +739,8 @@ bool RecoveryJob::try_snapshot_recovery(THD *thd) {
   if (table_impl->rebuild_indexes(&ctx, patched_src) != SHANNON_SUCCESS) {
     // Fall back to the slow lane rather than publish a table whose indexes
     // disagree with its rows. drop_partial_table takes the IMCS entry back out.
-    sql_print_error("RecoveryJob(snapshot): %s could not rebuild its indexes; reloading from InnoDB instead",
-                    ctx.m_sch_tb_name.c_str());
+    sql_print_warning("RecoveryJob(snapshot): %s could not rebuild its indexes; recovery rejected",
+                      ctx.m_sch_tb_name.c_str());
     Utils::Util::close_table(thd, patched_src);
     return false;
   }
@@ -730,10 +760,34 @@ bool RecoveryJob::try_snapshot_recovery(THD *thd) {
     Utils::Util::close_table(thd, patched_src);
     return false;
   }
+  auto validation = m_source_validation;
+  DBUG_EXECUTE_IF("rapid_recovery_full_validation_unavailable", {
+    validation.mode = SourceValidationMode::FULL;
+    validation.validator.reset();
+  });
+  const SourceValidationContext validation_context{
+      thd, patched_src, rpd_table.get(), &manifest.value,
+      std::chrono::steady_clock::now() + std::chrono::milliseconds(shannon_rpd_engine_cfg.query_sync_timeout_ms)};
+  auto validation_result = validation.validate(validation_context);
+  if (validation.mode == SourceValidationMode::FULL && (thd->killed || thd->is_error()))
+    validation_result = SourceValidationResult::UNAVAILABLE;
+  if (validation_result != SourceValidationResult::SKIPPED && validation_result != SourceValidationResult::VERIFIED) {
+    m_source_validation_failed = true;
+    Utils::Util::close_table(thd, patched_src);
+    return false;
+  }
   capture->initialize(BinlogRecovery::current_position());
   rpd_table->update_statistics(true);
   published = register_in_loaded_tables(thd, patched_src, rpd_table.get());
-  if (published) Utils::Util::update_rpd_meta_info(&ctx, patched_src, Utils::Util::STAGE::END);
+  if (published) {
+    Utils::Util::update_rpd_meta_info(&ctx, patched_src, Utils::Util::STAGE::END);
+    auto mirror = RpdMirror::Registry::find(info.schema_name + "." + info.table_name);
+    if (mirror)
+      mirror->with_meta([&](rpd_table_meta_info_t &meta) {
+        meta.snapshot_scn = manifest.value.snapshot_scn;
+        meta.persisted_scn = manifest.value.persisted_scn;
+      });
+  }
   Utils::Util::close_table(thd, patched_src);
   return published;
 }
@@ -832,6 +886,7 @@ bool RecoveryJob::reload_normal_table(THD *thd) {
   context.m_sch_tb_name = info.schema_name + "." + info.table_name;
   context.m_table = source;
   context.m_table_id = source->file->get_table_id();
+  context.m_extra_info.m_scn = TransactionCoordinator::instance().allocate_scn();
   // Bulk source loads create committed baseline rows without DML journals.
   context.m_extra_info.m_oper = ShannonBase::Rapid_context::extra_info_t::OperType::LOAD;
 
@@ -839,6 +894,7 @@ bool RecoveryJob::reload_normal_table(THD *thd) {
   int result = ShannonBase::Imcs::Imcs::instance()->load_table(&context, source);
   Utils::Util::update_rpd_meta_info(&context, source, Utils::Util::STAGE::END);
   if (result == SHANNON_SUCCESS) {
+    TransactionCoordinator::instance().observe_commit_scn(context.m_extra_info.m_scn);
     const std::string db_name(source->s->db.str, source->s->db.length);
     const std::string tbl_name(source->s->table_name.str, source->s->table_name.length);
     auto m_share = std::make_shared<RapidShare>(*source);
@@ -888,6 +944,7 @@ bool RecoveryJob::reload_partitioned_table(THD *thd) {
   context.m_sch_tb_name = info.schema_name + "." + info.table_name;
   context.m_table = source;
   context.m_table_id = source->file->get_table_id();
+  context.m_extra_info.m_scn = TransactionCoordinator::instance().allocate_scn();
   // Bulk source loads create committed baseline rows without DML journals.
   context.m_extra_info.m_oper = ShannonBase::Rapid_context::extra_info_t::OperType::LOAD;
 

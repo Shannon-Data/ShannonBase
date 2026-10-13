@@ -1,0 +1,46 @@
+--source include/have_debug.inc
+--source include/no_ps_protocol.inc
+CREATE DATABASE sh_native_format;
+USE sh_native_format;
+CREATE TABLE t (
+ id INT PRIMARY KEY,
+ u BIGINT UNSIGNED,
+ code VARCHAR(32) COMMENT 'RAPID_COLUMN=ENCODING=SORTED',
+ note VARCHAR(128) COMMENT 'RAPID_COLUMN=ENCODING=VARLEN',
+ amount DECIMAL(12,2),
+ f DOUBLE,
+ dt DATETIME(6),
+ excluded INT NOT SECONDARY
+) CHARACTER SET utf8mb4 SECONDARY_ENGINE=rapid;
+INSERT INTO t VALUES
+ (1,18446744073709551615,'A','Alpha',12.34,1.25,'2026-01-02 03:04:05.123456',10),
+ (2,9223372036854775808,'A','',-45.67,-2.5,'2025-12-31 23:59:59.000001',20),
+ (3,0,NULL,NULL,NULL,NULL,NULL,30),
+ (4,42,'B',CONVERT(0xe4b8ade69687 USING utf8mb4),0.00,0,'2024-02-29 00:00:00',40);
+ALTER TABLE t SECONDARY_LOAD;
+--let $restart_parameters = restart: --rapid_reload_on_restart=ON
+--source include/restart_mysqld.inc
+USE sh_native_format;
+--let $wait_condition = SELECT COUNT(*)=1 FROM performance_schema.rpd_table_id WHERE SCHEMA_NAME='sh_native_format' AND TABLE_NAME='t'
+--source include/wait_condition.inc
+--let $datadir = `SELECT @@datadir`
+--file_exists $datadir/rapid_snapshots/sh_native_format/t/checkpoints/checkpoint-1.manifest 60
+# Leave the native base immutable. Logged transactions must be replayed over
+# restored dictionaries, NULL masks, fixed-width slots and missing CUs.
+SET use_secondary_engine=OFF;
+UPDATE t SET u=18446744073709551614,code='B',note='beta',amount=98.76,f=3.5 WHERE id=1;
+DELETE FROM t WHERE id=2;
+INSERT INTO t VALUES (5,9223372036854775809,'C','new',-0.01,0.5,'2026-10-13 10:00:00.000002',50);
+--let $restart_parameters = restart: --rapid_reload_on_restart=ON
+--source include/kill_and_restart_mysqld.inc
+USE sh_native_format;
+--let $wait_condition = SELECT CAST(VARIABLE_VALUE AS UNSIGNED)=1 FROM performance_schema.global_status WHERE VARIABLE_NAME='rapid_recovery_storage_restores'
+--source include/wait_condition.inc
+SELECT VARIABLE_NAME,VARIABLE_VALUE FROM performance_schema.global_status WHERE VARIABLE_NAME IN ('rapid_recovery_storage_restores','rapid_recovery_primary_reloads') ORDER BY VARIABLE_NAME;
+--let $assert_digest = SELECT GROUP_CONCAT(CONCAT_WS(':',id,IFNULL(CAST(u AS CHAR),'NULL'),IFNULL(HEX(code),'NULL'),IFNULL(HEX(note),'NULL'),IFNULL(CAST(amount AS CHAR),'NULL'),IFNULL(CAST(f AS CHAR),'NULL'),IFNULL(CAST(dt AS CHAR),'NULL')) ORDER BY id SEPARATOR '|') FROM t
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+SET use_secondary_engine=FORCED;
+SELECT id,u,code,HEX(note),amount,f,dt FROM t ORDER BY id;
+SELECT id,u FROM t WHERE id=1;
+SELECT id FROM t WHERE note IS NULL ORDER BY id;
+DROP DATABASE sh_native_format;

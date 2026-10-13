@@ -1,0 +1,44 @@
+CREATE DATABASE sh_native_format;
+USE sh_native_format;
+CREATE TABLE t (
+id INT PRIMARY KEY,
+u BIGINT UNSIGNED,
+code VARCHAR(32) COMMENT 'RAPID_COLUMN=ENCODING=SORTED',
+note VARCHAR(128) COMMENT 'RAPID_COLUMN=ENCODING=VARLEN',
+amount DECIMAL(12,2),
+f DOUBLE,
+dt DATETIME(6),
+excluded INT NOT SECONDARY
+) CHARACTER SET utf8mb4 SECONDARY_ENGINE=rapid;
+INSERT INTO t VALUES
+(1,18446744073709551615,'A','Alpha',12.34,1.25,'2026-01-02 03:04:05.123456',10),
+(2,9223372036854775808,'A','',-45.67,-2.5,'2025-12-31 23:59:59.000001',20),
+(3,0,NULL,NULL,NULL,NULL,NULL,30),
+(4,42,'B',CONVERT(0xe4b8ade69687 USING utf8mb4),0.00,0,'2024-02-29 00:00:00',40);
+ALTER TABLE t SECONDARY_LOAD;
+# restart: --rapid_reload_on_restart=ON
+USE sh_native_format;
+SET use_secondary_engine=OFF;
+UPDATE t SET u=18446744073709551614,code='B',note='beta',amount=98.76,f=3.5 WHERE id=1;
+DELETE FROM t WHERE id=2;
+INSERT INTO t VALUES (5,9223372036854775809,'C','new',-0.01,0.5,'2026-10-13 10:00:00.000002',50);
+# Kill and restart: --rapid_reload_on_restart=ON
+USE sh_native_format;
+SELECT VARIABLE_NAME,VARIABLE_VALUE FROM performance_schema.global_status WHERE VARIABLE_NAME IN ('rapid_recovery_storage_restores','rapid_recovery_primary_reloads') ORDER BY VARIABLE_NAME;
+VARIABLE_NAME	VARIABLE_VALUE
+rapid_recovery_primary_reloads	0
+rapid_recovery_storage_restores	1
+SET use_secondary_engine=FORCED;
+SELECT id,u,code,HEX(note),amount,f,dt FROM t ORDER BY id;
+id	u	code	HEX(note)	amount	f	dt
+1	18446744073709551614	B	62657461	98.76	3.5	2026-01-02 03:04:05.123456
+3	0	NULL	NULL	NULL	NULL	NULL
+4	42	B	E4B8ADE69687	0.00	0	2024-02-29 00:00:00.000000
+5	9223372036854775809	C	6E6577	-0.01	0.5	2026-10-13 10:00:00.000002
+SELECT id,u FROM t WHERE id=1;
+id	u
+1	18446744073709551614
+SELECT id FROM t WHERE note IS NULL ORDER BY id;
+id
+3
+DROP DATABASE sh_native_format;

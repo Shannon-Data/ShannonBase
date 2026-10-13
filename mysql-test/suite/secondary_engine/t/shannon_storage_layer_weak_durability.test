@@ -7,6 +7,7 @@ SET GLOBAL sync_binlog=0;
 UPDATE t SET v=11 WHERE id=1;
 # Restore strict settings before a clean OS-level crash; the Rapid fence stays.
 SET GLOBAL sync_binlog=1;
+--let $storage_restart_debug = --loose-rapid_schema_embedding=OFF
 --let $storage_route = primary_reloads
 --let $storage_expected = 1:11,2:20,3:30
---source suite/secondary_engine/include/storage_layer_verify.inc
+--source suite/secondary_engine/include/storage_layer_manual_load.inc

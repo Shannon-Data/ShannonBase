@@ -1082,6 +1082,12 @@ bool SelfLoadManager::can_load_table(uint64_t table_size) {
 int SelfLoadManager::perform_self_load(const std::string &schema, const std::string &table) {
   if (Recovery::RecoveryFramework::instance().restart_in_progress()) return HA_ERR_GENERIC;
   if (ShannonBase::shannon_loaded_tables->get(schema, table)) return SHANNON_SUCCESS;
+  // Automatic self-load must not bypass a restart recovery failure that
+  // requires an explicit SECONDARY_LOAD. Check before memory eviction or MDL.
+  auto *scheduler = Recovery::CheckpointScheduler::global();
+  auto *recovery = scheduler ? scheduler->recovery_manager() : nullptr;
+  auto manager = recovery ? recovery->table_manager(schema, table) : nullptr;
+  if (manager && (manager->recovery_required() || manager->recovery_tainted())) return HA_ERR_GENERIC;
   auto table_info = RpdMirror::Registry::find(schema + "." + table);
   if (!table_info) return HA_ERR_GENERIC;
 

@@ -43,7 +43,7 @@ class Imcu;
 static constexpr uint32_t SNAP_MAGIC = 0x50414E53u;
 static constexpr uint16_t SNAP_FORMAT_VER = 2u;
 static constexpr uint32_t MANIFEST_MAGIC = 0x4E414D52u;
-static constexpr uint16_t MANIFEST_FORMAT_VER = 2u;
+static constexpr uint16_t MANIFEST_FORMAT_VER = 3u;
 static constexpr uint64_t MAX_CU_SNAPSHOT_SIZE = (1ull << 40);
 static constexpr size_t kMaxRetainedGenerations = 2;
 static constexpr size_t SNAP_FILE_HEADER_SIZE = 36;
@@ -70,12 +70,14 @@ struct RecoveryManifest {
   uint64_t table_id{0};
   uint64_t generation{0};
   uint64_t schema_fingerprint{0};
+  uint64_t snapshot_scn{0};
+  uint64_t persisted_scn{0};
   Recovery::BinlogPosition binlog;
   std::vector<ManifestImcuEntry> imcus;
 };
 
 // Owns immutable committed checkpoints. MySQL binlog is the only replay log.
-// Legacy manifests are rejected and rebuilt from InnoDB; there is no WAL I/O.
+// Manifest v2/v3 are readable; unsupported formats require source reload.
 class TablePersistenceManager {
  public:
   TablePersistenceManager(const std::string &data_dir, const std::string &db, const std::string &table);
@@ -99,7 +101,7 @@ class TablePersistenceManager {
   void require_recovery() { m_recovery_required.store(true); }
   // Fence live recovery first; provider/path allocation failures return false.
   bool revoke_fast_recovery() noexcept;
-  bool mark_recovery_taint();
+  bool mark_recovery_taint() noexcept;
   bool recovery_tainted() const;
   void clear_recovery_taint();
   std::filesystem::path recovery_taint_path() const { return m_partition_dir / "reload_required"; }
@@ -108,6 +110,7 @@ class TablePersistenceManager {
   }
 
  private:
+  Result<uint64_t> load_snapshot_impl(Imcu *imcu, uint64_t generation);
   bool persist_manifest(const RecoveryManifest &manifest);
   bool write_snap_header(std::ostream &out, uint32_t imcu_id, uint32_t cols, uint64_t sequence) const;
   bool read_snap_header(std::istream &in, uint32_t &imcu_id, uint32_t &cols, uint64_t &sequence) const;
