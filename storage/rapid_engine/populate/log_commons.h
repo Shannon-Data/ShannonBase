@@ -127,6 +127,7 @@
 
 namespace ShannonBase {
 namespace Populate {
+
 // running flag of pop thread.
 extern std::atomic<bool> shannon_propagation_thread_started;
 

@@ -29,7 +29,6 @@
 namespace ShannonBase {
 namespace Utils {
 namespace SIMD {
-
 /*
  * Compile AVX2 kernels as function-level ISA variants on GCC/Clang. This keeps
  * the rest of the binary at the baseline target while allowing one binary to

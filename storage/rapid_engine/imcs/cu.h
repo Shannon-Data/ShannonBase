@@ -394,6 +394,15 @@ class CU : public MemoryObject {
   int serialize_payload(std::ostream &out, size_t snapshot_row_count, bool checkpoint) const;
   int deserialize_payload(std::istream &in, size_t expected_rows);
 
+  struct DecodedSnapshot;
+  int read_snapshot(std::istream &in, size_t expected_rows, DecodedSnapshot &snapshot) const;
+  int restore_snapshot(const DecodedSnapshot &snapshot);
+
+  bool uses_dictionary_encoding() const {
+    return m_header.field_desc.dictionary && m_header.field_desc.real_type() != MYSQL_TYPE_ENUM &&
+           m_header.field_desc.real_type() != MYSQL_TYPE_SET && !is_blob_like();
+  }
+
   /** Decompress without locking.  Caller MUST hold m_data_mutex write-lock. */
   int decompress_locked();
 

@@ -46,11 +46,14 @@
 #include <vector>
 
 class THD;
-namespace ShannonBase::Utils {
+namespace ShannonBase {
+namespace Utils {
 class MemoryPool;
-}
+}  // namespace Utils
+}  // namespace ShannonBase
 
-namespace ShannonBase::ResMgmt {
+namespace ShannonBase {
+namespace ResMgmt {
 /** V1 separates active AP, SYNC and MAINT work; source DML never enters this governor.
     CPU groups are native MySQL groups. Memory/spill continue using their existing
     budgets. This is not an RSS, I/O or physical worker-count limit. */
@@ -497,5 +500,6 @@ class BoundedMemoryResource final : public std::pmr::memory_resource {
   std::pmr::memory_resource *m_upstream;
   size_t m_used{0}, m_peak{0};
 };
-}  // namespace ShannonBase::ResMgmt
+}  // namespace ResMgmt
+}  // namespace ShannonBase
 #endif

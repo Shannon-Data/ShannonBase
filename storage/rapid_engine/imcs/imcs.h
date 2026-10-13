@@ -404,7 +404,7 @@ class PartitionLoadThreadContext {
    * parallel data loading operations.
    *
    * @param context The rapid load context containing table and schema information
-   * @return true if initialization failed, false if successful
+   * @return true if initialization failed, false if successful (MySQL error convention)
    */
   bool initialize(const Rapid_load_context *context);
 

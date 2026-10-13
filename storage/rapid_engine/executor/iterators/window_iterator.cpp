@@ -52,7 +52,6 @@
 
 namespace ShannonBase {
 namespace Executor {
-
 namespace {
 std::atomic<uint64_t> window_spill_reserved{0};
 void SwitchSlice(JOIN *join, int slice_num) {

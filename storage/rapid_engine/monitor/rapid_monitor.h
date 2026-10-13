@@ -37,7 +37,6 @@ namespace Populate {
 class PopulatorImpl;
 }
 namespace RapidMonitor {
-
 /**
  * @struct Metrics
  * @brief Comprehensive runtime metrics for the ShannonBase Rapid Engine.

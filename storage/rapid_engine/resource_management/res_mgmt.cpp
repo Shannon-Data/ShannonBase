@@ -47,8 +47,8 @@
 #include <unistd.h>
 #endif
 
-namespace ShannonBase::ResMgmt {
-
+namespace ShannonBase {
+namespace ResMgmt {
 class SystemPoolState {
  public:
   SystemPoolState(std::shared_ptr<Utils::MemoryPool> parent, std::shared_ptr<Utils::MemoryPool> child,
@@ -1044,4 +1044,5 @@ const char *WorkScope::enter(THD *thd, WorkClass kind, bool wait, const std::fun
   m_state = std::move(state);
   return nullptr;
 }
-}  // namespace ShannonBase::ResMgmt
+}  // namespace ResMgmt
+}  // namespace ShannonBase

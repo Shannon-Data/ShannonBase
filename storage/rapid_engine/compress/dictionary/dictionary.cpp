@@ -46,7 +46,6 @@
  */
 namespace ShannonBase {
 namespace Compress {
-
 Dictionary::Dictionary(ENCODING_TYPE type) : m_encoding_type(type), m_next_id(1) {  // 0 reserved for unknown
   // "unknown" takes ID 0. It is deliberately left out of the reverse index:
   // it is a sentinel, not a value any row stores, and indexing it would let

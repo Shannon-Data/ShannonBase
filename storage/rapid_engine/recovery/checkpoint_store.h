@@ -27,7 +27,8 @@
 #include <memory>
 #include <mutex>
 #include <string>
-namespace ShannonBase::Recovery {
+namespace ShannonBase {
+namespace Recovery {
 /** Transport for immutable native-format recovery generations.
  * Install before recovery workers start. Implementations must preserve schema,
  * source identity and committed-binlog boundary metadata alongside column data.
@@ -72,5 +73,6 @@ class CheckpointStores {
   inline static std::mutex m_mutex;
   inline static std::shared_ptr<CheckpointStore> m_store = std::make_shared<LocalCheckpointStore>();
 };
-}  // namespace ShannonBase::Recovery
+}  // namespace Recovery
+}  // namespace ShannonBase
 #endif

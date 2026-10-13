@@ -6,7 +6,8 @@
 #include <cstdint>
 #include <streambuf>
 
-namespace ShannonBase::Recovery {
+namespace ShannonBase {
+namespace Recovery {
 /** Read one length-delimited native column directly from the source stream.
  * A malformed column cannot consume the next column's header or payload.
  * No whole-column staging buffer is allocated here; the CU owns decoding.
@@ -38,5 +39,6 @@ class NativeColumnStream final : public std::streambuf {
   std::streambuf *m_source;
   uint64_t m_remaining;
 };
-}  // namespace ShannonBase::Recovery
+}  // namespace Recovery
+}  // namespace ShannonBase
 #endif

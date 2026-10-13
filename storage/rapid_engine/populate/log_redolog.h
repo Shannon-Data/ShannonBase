@@ -52,10 +52,13 @@
 class Field;
 class TABLE;
 namespace ShannonBase {
-namespace Imcs{
+namespace Imcs {
+
 class RpdTable;
-}
+}  // namespace Imcs
 class Rapid_load_context;
+}  // namespace ShannonBase
+namespace ShannonBase {
 namespace Populate {
 namespace RedoLog {
 

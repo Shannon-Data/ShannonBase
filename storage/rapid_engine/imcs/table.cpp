@@ -62,7 +62,6 @@ namespace ShannonBase {
 // global memory pool
 extern std::shared_ptr<ShannonBase::Utils::MemoryPool> shannon_rpd_memory_pool;
 namespace Imcs {
-
 // Out-of-line special members of FieldMetadata, defined here because this TU has
 // the complete ColumnStatistics (table.h -> cu.h -> col0stats.h). Defining them
 // in the header would force every includer of table0meta.h to see that type.

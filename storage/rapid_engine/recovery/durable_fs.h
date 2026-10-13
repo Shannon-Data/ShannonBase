@@ -48,7 +48,6 @@
 
 namespace ShannonBase {
 namespace Recovery {
-
 namespace fs = std::filesystem;
 
 namespace durable_detail {

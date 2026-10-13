@@ -28,7 +28,8 @@
 #include "storage/rapid_engine/recovery/notification_tracker.h"
 class THD;
 struct TABLE;
-namespace ShannonBase::Recovery {
+namespace ShannonBase {
+namespace Recovery {
 // Recovery-only reader of local committed MySQL transactions. Never executes
 // replication events against the primary. Failure discards the private restore.
 class BinlogRecovery {
@@ -40,5 +41,6 @@ class BinlogRecovery {
   static bool replay(THD *thd, TABLE *table, const BinlogPosition &start,
                      const std::function<bool(Populate::change_record_buff_t &)> &apply);
 };
-}  // namespace ShannonBase::Recovery
+}  // namespace Recovery
+}  // namespace ShannonBase
 #endif

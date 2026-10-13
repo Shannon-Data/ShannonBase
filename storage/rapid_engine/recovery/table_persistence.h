@@ -38,7 +38,8 @@
 #include "storage/rapid_engine/recovery/checkpoint_store.h"
 #include "storage/rapid_engine/recovery/durable_fs.h"
 #include "storage/rapid_engine/recovery/notification_tracker.h"
-namespace ShannonBase::Imcs {
+namespace ShannonBase {
+namespace Imcs {
 class Imcu;
 static constexpr uint32_t SNAP_MAGIC = 0x50414E53u;
 static constexpr uint16_t SNAP_FORMAT_VER = 2u;
@@ -141,5 +142,6 @@ class TablePersistenceManager {
   Recovery::NotificationTracker m_notifications;
   std::atomic<bool> m_recovery_required{false};
 };
-}  // namespace ShannonBase::Imcs
+}  // namespace Imcs
+}  // namespace ShannonBase
 #endif

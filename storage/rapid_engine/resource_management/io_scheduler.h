@@ -35,7 +35,8 @@
 #include <utility>
 
 class THD;
-namespace ShannonBase::ResMgmt {
+namespace ShannonBase {
+namespace ResMgmt {
 // Logical spill-request depth, not kernel IOPS or device throughput.
 // Device domains have independent FIFO admission and bounded registry size.
 class IoDepthGovernor {
@@ -142,5 +143,6 @@ class SpillIoScope {
   bool m_allowed{true};
 };
 IoDepthGovernor::Snapshot spill_io_snapshot();
-}  // namespace ShannonBase::ResMgmt
+}  // namespace ResMgmt
+}  // namespace ShannonBase
 #endif

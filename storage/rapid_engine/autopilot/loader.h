@@ -104,7 +104,6 @@ struct TABLE;
 class IB_thread;
 
 namespace ShannonBase {
-
 /**
  * Backing store of performance_schema.rpd_mirror / performance_schema.rpd_tables:
  * one entry per tracked table.
@@ -196,10 +195,11 @@ class Registry final {
 void refresh_propagation_health(std::vector<std::pair<std::string, std::string>> *self_loaded_stale);
 
 }  // namespace RpdMirror
+}  // namespace ShannonBase
 
+namespace ShannonBase {
 namespace Autopilot {
 namespace detail {
-
 inline uint64_t memory_threshold_bytes(uint64_t max_memory, int fill_percentage) {
   const uint64_t percentage = static_cast<uint64_t>(std::clamp(fill_percentage, 0, 100));
   // Split the calculation so even a UINT64_MAX memory limit cannot overflow.

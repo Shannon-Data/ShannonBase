@@ -85,7 +85,6 @@ namespace ShannonBase {
 enum class AggregateStrategy : uint8_t;
 
 namespace Executor {
-
 /**
   The argument of `item` when it is an aggregate whose value the vectorized
   aggregate can evaluate into a synthetic field -- SUM/AVG/COUNT over an

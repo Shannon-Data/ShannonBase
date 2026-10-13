@@ -89,9 +89,7 @@ double ColumnStatistics::EquiHeightHistogram::estimate_selectivity(double lower,
   for (const auto &bucket : m_buckets) {
     total_rows += bucket.count;
 
-    if (bucket.upper_bound < lower || bucket.lower_bound > upper) {
-      continue;  // No overlap
-    }
+    if (bucket.upper_bound < lower || bucket.lower_bound > upper) continue;  // No overlap
 
     if (bucket.lower_bound >= lower && bucket.upper_bound <= upper) {
       estimated_rows += static_cast<double>(bucket.count);  // Fully contained
@@ -125,16 +123,12 @@ double ColumnStatistics::EquiHeightHistogram::estimate_equality_selectivity(doub
   // selectivity of 1/64 instead of 1/4).
   double matched_rows = 0.0;
   for (const auto &bucket : m_buckets) {
-    if (value < bucket.lower_bound || value > bucket.upper_bound) continue;
-    if (bucket.distinct_count == 0) continue;
+    if (value < bucket.lower_bound || value > bucket.upper_bound || bucket.distinct_count == 0) continue;
 
-    if (bucket.lower_bound == bucket.upper_bound) {
-      // The bucket holds this value and nothing else: all of its rows match.
-      matched_rows += static_cast<double>(bucket.count);
-    } else {
-      // Mixed bucket: assume its rows spread evenly over its distinct values.
-      matched_rows += static_cast<double>(bucket.count) / bucket.distinct_count;
-    }
+    // Constant buckets match all rows; mixed buckets assume uniform distinct values.
+    matched_rows += (bucket.lower_bound == bucket.upper_bound)
+                        ? static_cast<double>(bucket.count)
+                        : static_cast<double>(bucket.count) / bucket.distinct_count;
   }
 
   return matched_rows / static_cast<double>(total);
@@ -507,14 +501,10 @@ double ColumnStatistics::estimate_range_selectivity(double lower, double upper) 
 
 double ColumnStatistics::estimate_equality_selectivity(double value) const {
   std::shared_lock<std::shared_mutex> lk(m_stats_mutex);
-  if (m_histogram) {
-    return m_histogram->estimate_equality_selectivity(value);
-  }
+  if (m_histogram) return m_histogram->estimate_equality_selectivity(value);
 
   // Fallback: assume uniform distribution
-  if (m_basic_stats.distinct_count > 0) {
-    return 1.0 / m_basic_stats.distinct_count;
-  }
+  if (m_basic_stats.distinct_count > 0) return 1.0 / m_basic_stats.distinct_count;
 
   return 0.1;  // Default 10%
 }

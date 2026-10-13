@@ -75,7 +75,6 @@
 */
 namespace ShannonBase {
 namespace Imcs {
-
 namespace {
 /**
  * Zero-initialised scratch for one slot image, on the stack for the widths
@@ -224,35 +223,35 @@ void CU::ColumnVersionManager::create_version(row_id_t local_row_id, Transaction
                                               size_t slot_len, VarlenDataPool *retained_pool, bool owns_varlen_ref) {
   VersionedRowsLock guard(this);
 
-  auto nv = std::make_unique<Column_Version>();
-  nv->txn_id = txn_id;
-  nv->scn = scn;
-  nv->timestamp = std::chrono::system_clock::now();
-  nv->value_length = len;
-  nv->retained_pool = retained_pool;
-  nv->owns_varlen_ref = owns_varlen_ref;
+  auto new_version = std::make_unique<Column_Version>();
+  new_version->txn_id = txn_id;
+  new_version->scn = scn;
+  new_version->timestamp = std::chrono::system_clock::now();
+  new_version->value_length = len;
+  new_version->retained_pool = retained_pool;
+  new_version->owns_varlen_ref = owns_varlen_ref;
 
   if (len != UNIV_SQL_NULL && old_value != nullptr && len > 0) {
-    nv->old_value = std::make_unique<uchar[]>(len);
-    std::memcpy(nv->old_value.get(), old_value, len);
+    new_version->old_value = std::make_unique<uchar[]>(len);
+    std::memcpy(new_version->old_value.get(), old_value, len);
   }
   if (old_slot != nullptr && slot_len > 0) {
-    nv->old_slot.assign(old_slot, old_slot + slot_len);
+    new_version->old_slot.assign(old_slot, old_slot + slot_len);
   }
 
-  Column_Version *raw = nv.get();
+  Column_Version *version_ptr = new_version.get();
   auto it = m_versions.find(local_row_id);
   if (it != m_versions.end()) {
-    nv->prev = std::move(it->second);
-    it->second = std::move(nv);
+    new_version->prev = std::move(it->second);
+    it->second = std::move(new_version);
   } else {
-    m_versions[local_row_id] = std::move(nv);
+    m_versions[local_row_id] = std::move(new_version);
   }
 
   if (scn == 0) {
     auto &refs = m_active_versions[txn_id];
-    raw->active_idx = refs.size();
-    refs.push_back({local_row_id, raw});
+    version_ptr->active_idx = refs.size();
+    refs.push_back({local_row_id, version_ptr});
   }
 }
 
@@ -479,8 +478,7 @@ VarlenDataPool::VarlenReadGuard CU::resolve_data(row_id_t local_row_id, size_t &
 }
 
 size_t CU::logical_length_of_inline_slot(const uchar *slot) const {
-  if (m_header.field_desc.dictionary && m_header.field_desc.real_type() != MYSQL_TYPE_ENUM &&
-      m_header.field_desc.real_type() != MYSQL_TYPE_SET && !is_blob_like()) {
+  if (uses_dictionary_encoding()) {
     uint32 dict_id = 0;
     std::memcpy(&dict_id, slot, sizeof(dict_id));
     // length_of(), not get().size(): resolve_data() calls this for every cell
@@ -552,8 +550,7 @@ bool CU::get_visible_cell(row_id_t local_row_id, bool current_is_null, Transacti
     VarlenDataPool::VarlenReference ref{};
     std::memcpy(&ref, out.slot, std::min(sizeof(ref), m_header.field_desc.normalized_length));
     out.logical_length = static_cast<size_t>(ref.length);
-  } else if (m_header.field_desc.dictionary && m_header.field_desc.real_type() != MYSQL_TYPE_ENUM &&
-             m_header.field_desc.real_type() != MYSQL_TYPE_SET && !is_blob_like()) {
+  } else if (uses_dictionary_encoding()) {
     uint32 dict_id = 0;
     std::memcpy(&dict_id, out.slot, sizeof(dict_id));
     out.logical_length = m_header.field_desc.dictionary->length_of(dict_id);
@@ -652,8 +649,7 @@ int CU::write(const Rapid_context *context, row_id_t local_row_id, const uchar *
     // other path that never reported anything; feed the value, not the slot.
     update_statistics(data, len);
   } else {
-    if (m_header.field_desc.dictionary && m_header.field_desc.real_type() != MYSQL_TYPE_ENUM &&
-        m_header.field_desc.real_type() != MYSQL_TYPE_SET && !is_blob_like()) {
+    if (uses_dictionary_encoding()) {
       std::memset(dest, 0, m_header.field_desc.normalized_length);
       uint32 dict_id = m_header.field_desc.dictionary->store(data, len, m_header.field_desc.encoding);
       std::memcpy(dest, &dict_id, sizeof(uint32));
@@ -710,8 +706,7 @@ int CU::update(const Rapid_context *context, row_id_t local_row_id, const uchar 
           old_value.resize(old_len);
           std::memcpy(old_value.data(), src, old_len);
         }
-      } else if (m_header.field_desc.dictionary && m_header.field_desc.real_type() != MYSQL_TYPE_ENUM &&
-                 m_header.field_desc.real_type() != MYSQL_TYPE_SET && !is_blob_like()) {
+      } else if (uses_dictionary_encoding()) {
         uint32 dict_id = 0;
         std::memcpy(&dict_id, old_slot.data(), sizeof(dict_id));
         auto decode_str = m_header.field_desc.dictionary->get(dict_id);
@@ -747,8 +742,7 @@ int CU::update(const Rapid_context *context, row_id_t local_row_id, const uchar 
       // A NULL cell is a zeroed slot; the null mask is what makes it NULL.
     } else if (m_varlen_pool) {
       if (len > 0) std::memcpy(staged.data(), &new_ref, std::min(sizeof(new_ref), slot_len));
-    } else if (m_header.field_desc.dictionary && m_header.field_desc.real_type() != MYSQL_TYPE_ENUM &&
-               m_header.field_desc.real_type() != MYSQL_TYPE_SET && !is_blob_like()) {
+    } else if (uses_dictionary_encoding()) {
       uint32 dict_id = m_header.field_desc.dictionary->store(new_data, len, m_header.field_desc.encoding);
       std::memcpy(staged.data(), &dict_id, std::min(sizeof(uint32), slot_len));
     } else {
@@ -972,6 +966,19 @@ int CU::decompress() {
   return decompress_locked();
 }
 
+namespace {
+Compress::CompressAlgorithm *decompressor_for(CU_CompressAlgo algorithm) {
+  switch (algorithm) {
+    case CU_CompressAlgo::ZSTD:
+      return Compress::get_compressor(Compress::COMPRESS_ALGO::ZSTD);
+    case CU_CompressAlgo::ZLIB:
+      return Compress::get_compressor(Compress::COMPRESS_ALGO::ZLIB);
+    default:
+      return Compress::get_compressor(Compress::COMPRESS_ALGO::LZ4);
+  }
+}
+}  // namespace
+
 int CU::decompress_locked() {
   if (!m_is_compressed.load(std::memory_order_relaxed)) return ShannonBase::SHANNON_SUCCESS;
 
@@ -991,10 +998,7 @@ int CU::decompress_locked() {
   const size_t compressed_sz = m_compressed_data_size.load(std::memory_order_relaxed);
   const size_t original_sz = m_original_data_size.load(std::memory_order_relaxed);
   const auto algo = static_cast<CU_CompressAlgo>(m_compress_algo_used.load(std::memory_order_relaxed));
-  Compress::CompressAlgorithm *decompressor =
-      (algo == CU_CompressAlgo::ZSTD)   ? Compress::get_compressor(Compress::COMPRESS_ALGO::ZSTD)
-      : (algo == CU_CompressAlgo::ZLIB) ? Compress::get_compressor(Compress::COMPRESS_ALGO::ZLIB)
-                                        : Compress::get_compressor(Compress::COMPRESS_ALGO::LZ4);
+  auto *decompressor = decompressor_for(algo);
 
   std::string_view payload(reinterpret_cast<const char *>(m_data.get()), compressed_sz);
   std::string plain = decompressor->decompress(payload);
@@ -1014,10 +1018,7 @@ bool CU::decompress_stripe_locked(size_t stripe_idx, uchar *out_buffer, size_t o
   if (stripe_idx >= m_stripes.size() || !m_stripes[stripe_idx].active) return false;
 
   const auto &stripe = m_stripes[stripe_idx];
-  Compress::CompressAlgorithm *decompressor =
-      (stripe.algo == CU_CompressAlgo::ZSTD)   ? Compress::get_compressor(Compress::COMPRESS_ALGO::ZSTD)
-      : (stripe.algo == CU_CompressAlgo::ZLIB) ? Compress::get_compressor(Compress::COMPRESS_ALGO::ZLIB)
-                                               : Compress::get_compressor(Compress::COMPRESS_ALGO::LZ4);
+  auto *decompressor = decompressor_for(stripe.algo);
 
   std::string_view payload(reinterpret_cast<const char *>(stripe.compressed_data.get()), stripe.compressed_size);
   std::string plain = decompressor->decompress(payload);
@@ -1111,8 +1112,8 @@ int CU::serialize(std::ostream &out, size_t snapshot_row_count, bool checkpoint)
 }
 
 int CU::serialize_payload(std::ostream &out, size_t snapshot_row_count, bool checkpoint) const {
-  // If the CU is currently compressed, we can serialize the compressed payload directly (saves I/O). If not, we
-  // compress on-the-fly into a temp buffer so the snapshot is as compact as possible.
+  // Reuse an existing compressed payload. Only non-checkpoint snapshots attempt
+  // new compression; checkpoints keep an uncompressed CU in its current format.
   std::lock_guard lock(m_data_mutex);
   if (snapshot_row_count == 0) snapshot_row_count = m_header.owner_imcu ? m_header.owner_imcu->get_row_count() : 0;
 
@@ -1130,7 +1131,7 @@ int CU::serialize_payload(std::ostream &out, size_t snapshot_row_count, bool che
   // stripe mode m_data is the raw image and m_compressed_data_size is the sum of
   // the stripe buffers, so writing the first m_compressed_data_size bytes of m_data labelled as
   // compressed produced a snapshot whose CRC verifies and whose payload cannot
-  // be decoded. Treat that case as uncompressed and recompress below.
+  // be decoded. Treat stripe data as uncompressed; only non-checkpoint snapshots may recompress it.
   bool payload_compressed =
       m_is_compressed.load(std::memory_order_relaxed) && !m_stripes_valid.load(std::memory_order_relaxed);
   size_t payload_size = 0;
@@ -1306,11 +1307,35 @@ int CU::deserialize(std::istream &in, size_t expected_rows) {
   return result;
 }
 
-int CU::deserialize_payload(std::istream &in, size_t expected_rows) {
-  // Step 1: Read entire record into a memory buffer so we can verify CRC
-  // We read the stream progressively via CrcIStream, then verify at the end
-  // before touching any live state.
+struct CU::DecodedSnapshot {
+  struct VersionRecord {
+    uint64_t row_id, txn_id, scn, val_len;
+    std::vector<uchar> val_data;
+  };
+  struct VarlenRecord {
+    uint64_t row_id = 0;
+    std::vector<uchar> val_data;
+  };
 
+  uint8_t flags = 0;
+  uint8_t compression_algorithm = 0;
+  uint64_t pack_length = 0, slot_width = 0, uncompressed_bytes = 0, row_count = 0, payload_bytes = 0;
+  double min_value = 0, max_value = 0, sum = 0;
+  std::vector<uchar> payload;
+  std::vector<std::string> dictionary_entries;
+  std::vector<VersionRecord> versions;
+  std::vector<VarlenRecord> varlen_values;
+};
+
+int CU::deserialize_payload(std::istream &in, size_t expected_rows) {
+  DecodedSnapshot snapshot;
+  const int result = read_snapshot(in, expected_rows, snapshot);
+  if (result != ShannonBase::SHANNON_SUCCESS) return result;
+  return restore_snapshot(snapshot);
+}
+
+int CU::read_snapshot(std::istream &in, size_t expected_rows, DecodedSnapshot &snapshot) const {
+  // Parse and verify the record before touching live state.
   CrcIStream cis(in);
 
   constexpr size_t kMaxDictEntries = 1u << 20;      // 1M
@@ -1321,20 +1346,18 @@ int CU::deserialize_payload(std::istream &in, size_t expected_rows) {
   // Fixed header
   uint32_t magic = 0;
   uint16_t version = 0;
-  uint8_t flags = 0;
   uint32_t col_id = 0;
   uint8_t ftype = 0;
   uint8_t enc = 0;
-  uint8_t algo = 0;
   uint8_t reserved[6] = {};
 
   if (!cis.read_pod(magic) || magic != CU_SERIAL_MAGIC) return HA_ERR_GENERIC;
   if (!cis.read_pod(version) || version != CU_FORMAT_VERSION) return HA_ERR_GENERIC;
-  if (!cis.read_pod(flags)) return HA_ERR_GENERIC;
+  if (!cis.read_pod(snapshot.flags)) return HA_ERR_GENERIC;
   if (!cis.read_pod(col_id)) return HA_ERR_GENERIC;
   if (!cis.read_pod(ftype)) return HA_ERR_GENERIC;
   if (!cis.read_pod(enc)) return HA_ERR_GENERIC;
-  if (!cis.read_pod(algo)) return HA_ERR_GENERIC;
+  if (!cis.read_pod(snapshot.compression_algorithm)) return HA_ERR_GENERIC;
   if (!cis.read(reserved, 6)) return HA_ERR_GENERIC;
 
   // Cross-check header identity before trusting any sizes that follow.
@@ -1342,79 +1365,76 @@ int CU::deserialize_payload(std::istream &in, size_t expected_rows) {
   if (ftype != static_cast<uint8_t>(m_header.field_desc.type)) return HA_ERR_GENERIC;
   if (enc != static_cast<uint8_t>(m_header.field_desc.encoding)) return HA_ERR_GENERIC;
   constexpr uint8_t known_flags = CU_FLAG_COMPRESSED | CU_FLAG_HAS_DICT | CU_FLAG_HAS_VERSIONS | CU_FLAG_HAS_VARLEN;
-  if (flags & ~known_flags) return HA_ERR_GENERIC;
-  if ((flags & CU_FLAG_HAS_DICT) && !m_header.field_desc.dictionary) return HA_ERR_GENERIC;
-  if (bool(flags & CU_FLAG_HAS_VARLEN) != bool(m_varlen_pool)) return HA_ERR_GENERIC;
+  if (snapshot.flags & ~known_flags) return HA_ERR_GENERIC;
+  if ((snapshot.flags & CU_FLAG_HAS_DICT) && !m_header.field_desc.dictionary) return HA_ERR_GENERIC;
+  if (bool(snapshot.flags & CU_FLAG_HAS_VARLEN) != bool(m_varlen_pool)) return HA_ERR_GENERIC;
 
   // Lengths
-  uint64_t pack_len = 0, norm_len = 0, orig_sz = 0, row_cnt = 0;
-  if (!cis.read_pod(pack_len)) return HA_ERR_GENERIC;
-  if (!cis.read_pod(norm_len)) return HA_ERR_GENERIC;
-  if (!cis.read_pod(orig_sz)) return HA_ERR_GENERIC;
-  if (!cis.read_pod(row_cnt)) return HA_ERR_GENERIC;
-  if (expected_rows != SIZE_MAX && (row_cnt != expected_rows || (flags & CU_FLAG_HAS_VERSIONS))) return HA_ERR_GENERIC;
+  if (!cis.read_pod(snapshot.pack_length)) return HA_ERR_GENERIC;
+  if (!cis.read_pod(snapshot.slot_width)) return HA_ERR_GENERIC;
+  if (!cis.read_pod(snapshot.uncompressed_bytes)) return HA_ERR_GENERIC;
+  if (!cis.read_pod(snapshot.row_count)) return HA_ERR_GENERIC;
+  if (expected_rows != SIZE_MAX && (snapshot.row_count != expected_rows || (snapshot.flags & CU_FLAG_HAS_VERSIONS)))
+    return HA_ERR_GENERIC;
 
   // Zone map
-  double zm_min = 0, zm_max = 0, zm_sum = 0;
-  if (!cis.read_pod(zm_min)) return HA_ERR_GENERIC;
-  if (!cis.read_pod(zm_max)) return HA_ERR_GENERIC;
-  if (!cis.read_pod(zm_sum)) return HA_ERR_GENERIC;
+  if (!cis.read_pod(snapshot.min_value)) return HA_ERR_GENERIC;
+  if (!cis.read_pod(snapshot.max_value)) return HA_ERR_GENERIC;
+  if (!cis.read_pod(snapshot.sum)) return HA_ERR_GENERIC;
 
   // Data payload
-  uint64_t payload_sz = 0;
-  if (!cis.read_pod(payload_sz)) return HA_ERR_GENERIC;
+  if (!cis.read_pod(snapshot.payload_bytes)) return HA_ERR_GENERIC;
 
   // ---- Defensive boundary: validate every untrusted size before allocating. ----
   const size_t data_capacity = m_data_capacity.load(std::memory_order_acquire);
-  if (orig_sz > data_capacity) return HA_ERR_GENERIC;
-  if (payload_sz > orig_sz) return HA_ERR_GENERIC;
-  if (!(flags & CU_FLAG_COMPRESSED) && (payload_sz != orig_sz || algo != static_cast<uint8_t>(CU_CompressAlgo::NONE)))
+  if (snapshot.uncompressed_bytes > data_capacity) return HA_ERR_GENERIC;
+  if (snapshot.payload_bytes > snapshot.uncompressed_bytes) return HA_ERR_GENERIC;
+  if (!(snapshot.flags & CU_FLAG_COMPRESSED) &&
+      (snapshot.payload_bytes != snapshot.uncompressed_bytes ||
+       snapshot.compression_algorithm != static_cast<uint8_t>(CU_CompressAlgo::NONE)))
     return HA_ERR_GENERIC;
-  if ((flags & CU_FLAG_COMPRESSED) && (algo == static_cast<uint8_t>(CU_CompressAlgo::NONE) || payload_sz == 0))
+  if ((snapshot.flags & CU_FLAG_COMPRESSED) &&
+      (snapshot.compression_algorithm == static_cast<uint8_t>(CU_CompressAlgo::NONE) || snapshot.payload_bytes == 0))
     return HA_ERR_GENERIC;
-  if (pack_len != m_header.field_desc.pack_length) return HA_ERR_GENERIC;
-  if (norm_len != m_header.field_desc.normalized_length) return HA_ERR_GENERIC;
-  if (norm_len == 0) {
-    if (orig_sz != 0 || row_cnt != 0) return HA_ERR_GENERIC;
+  if (snapshot.pack_length != m_header.field_desc.pack_length) return HA_ERR_GENERIC;
+  if (snapshot.slot_width != m_header.field_desc.normalized_length) return HA_ERR_GENERIC;
+  if (snapshot.slot_width == 0) {
+    if (snapshot.uncompressed_bytes != 0 || snapshot.row_count != 0) return HA_ERR_GENERIC;
   } else {
-    if (orig_sz % norm_len != 0 || row_cnt != orig_sz / norm_len) return HA_ERR_GENERIC;
+    if (snapshot.uncompressed_bytes % snapshot.slot_width != 0 ||
+        snapshot.row_count != snapshot.uncompressed_bytes / snapshot.slot_width)
+      return HA_ERR_GENERIC;
   }
   if (enc > static_cast<uint8_t>(Compress::ENCODING_TYPE::VARLEN)) return HA_ERR_GENERIC;
-  if (algo > static_cast<uint8_t>(CU_CompressAlgo::ZLIB)) return HA_ERR_GENERIC;
+  if (snapshot.compression_algorithm > static_cast<uint8_t>(CU_CompressAlgo::ZLIB)) return HA_ERR_GENERIC;
 
-  std::vector<uchar> payload(payload_sz);
-  if (payload_sz > 0 && !cis.read(payload.data(), payload_sz)) return HA_ERR_GENERIC;
+  snapshot.payload.resize(snapshot.payload_bytes);
+  if (snapshot.payload_bytes > 0 && !cis.read(snapshot.payload.data(), snapshot.payload_bytes)) return HA_ERR_GENERIC;
 
   // Dictionary (optional)
-  std::vector<std::string> dict_entries;
-  if (flags & CU_FLAG_HAS_DICT) {
+  if (snapshot.flags & CU_FLAG_HAS_DICT) {
     uint32_t entry_count = 0;
     if (!cis.read_pod(entry_count)) return HA_ERR_GENERIC;
     if (entry_count > kMaxDictEntries) return HA_ERR_GENERIC;
-    dict_entries.resize(entry_count);
+    snapshot.dictionary_entries.resize(entry_count);
     for (uint32_t i = 1; i < entry_count; ++i) {
       uint64_t vlen = 0;
       if (!cis.read_pod(vlen)) return HA_ERR_GENERIC;
       if (vlen > kMaxVarlenValueLen) return HA_ERR_GENERIC;
       if (vlen > 0) {
-        dict_entries[i].resize(vlen);
-        if (!cis.read(&dict_entries[i][0], vlen)) return HA_ERR_GENERIC;
+        snapshot.dictionary_entries[i].resize(vlen);
+        if (!cis.read(&snapshot.dictionary_entries[i][0], vlen)) return HA_ERR_GENERIC;
       }
     }
   }
 
   // Version journal (optional)
-  struct VersionRec {
-    uint64_t row_id, txn_id, scn, val_len;
-    std::vector<uchar> val_data;
-  };
-  std::vector<VersionRec> version_recs;
-  if (flags & CU_FLAG_HAS_VERSIONS) {
+  if (snapshot.flags & CU_FLAG_HAS_VERSIONS) {
     uint64_t vcnt = 0;
     if (!cis.read_pod(vcnt)) return HA_ERR_GENERIC;
     if (vcnt > kMaxVersionEntries) return HA_ERR_GENERIC;
-    version_recs.resize(vcnt);
-    for (auto &vr : version_recs) {
+    snapshot.versions.resize(vcnt);
+    for (auto &vr : snapshot.versions) {
       if (!cis.read_pod(vr.row_id)) return HA_ERR_GENERIC;
       if (!cis.read_pod(vr.txn_id)) return HA_ERR_GENERIC;
       if (!cis.read_pod(vr.scn)) return HA_ERR_GENERIC;
@@ -1427,17 +1447,12 @@ int CU::deserialize_payload(std::istream &in, size_t expected_rows) {
     }
   }
 
-  struct VarlenRec {
-    uint64_t row_id = 0;
-    std::vector<uchar> val_data;
-  };
-  std::vector<VarlenRec> varlen_recs;
-  if (flags & CU_FLAG_HAS_VARLEN) {
+  if (snapshot.flags & CU_FLAG_HAS_VARLEN) {
     uint64_t vcnt = 0;
     if (!cis.read_pod(vcnt)) return HA_ERR_GENERIC;
     if (vcnt > kMaxVarlenEntries) return HA_ERR_GENERIC;
-    varlen_recs.resize(vcnt);
-    for (auto &vr : varlen_recs) {
+    snapshot.varlen_values.resize(vcnt);
+    for (auto &vr : snapshot.varlen_values) {
       if (!cis.read_pod(vr.row_id)) return HA_ERR_GENERIC;
       uint64_t vlen = 0;
       if (!cis.read_pod(vlen)) return HA_ERR_GENERIC;
@@ -1458,50 +1473,52 @@ int CU::deserialize_payload(std::istream &in, size_t expected_rows) {
     return HA_ERR_GENERIC;
   }
 
+  return ShannonBase::SHANNON_SUCCESS;
+}
+
+int CU::restore_snapshot(const DecodedSnapshot &snapshot) {
   // All checks passed — commit to live state
   std::lock_guard lock(m_data_mutex);
 
   // Ensure our buffer is large enough.
-  if (orig_sz > m_data_capacity.load(std::memory_order_relaxed)) {
-    DBUG_PRINT("cu_deserialize", ("snapshot size %llu exceeds buffer capacity %llu", (unsigned long long)orig_sz,
-                                  (unsigned long long)m_data_capacity.load()));
+  if (snapshot.uncompressed_bytes > m_data_capacity.load(std::memory_order_relaxed)) {
+    DBUG_PRINT("cu_deserialize",
+               ("snapshot size %llu exceeds buffer capacity %llu", (unsigned long long)snapshot.uncompressed_bytes,
+                (unsigned long long)m_data_capacity.load()));
     return HA_ERR_GENERIC;
   }
 
   // Decompress payload if needed before writing into m_data.
-  bool snap_compressed = (flags & CU_FLAG_COMPRESSED) != 0;
+  bool snap_compressed = (snapshot.flags & CU_FLAG_COMPRESSED) != 0;
 
   if (snap_compressed) {
-    auto snap_algo = static_cast<CU_CompressAlgo>(algo);
-    Compress::CompressAlgorithm *decomp =
-        (snap_algo == CU_CompressAlgo::ZSTD)   ? Compress::get_compressor(Compress::COMPRESS_ALGO::ZSTD)
-        : (snap_algo == CU_CompressAlgo::ZLIB) ? Compress::get_compressor(Compress::COMPRESS_ALGO::ZLIB)
-                                               : Compress::get_compressor(Compress::COMPRESS_ALGO::LZ4);
+    auto snap_algo = static_cast<CU_CompressAlgo>(snapshot.compression_algorithm);
+    auto *decomp = decompressor_for(snap_algo);
 
-    std::string_view cv(reinterpret_cast<const char *>(payload.data()), payload_sz);
+    std::string_view cv(reinterpret_cast<const char *>(snapshot.payload.data()), snapshot.payload_bytes);
     std::string plain = decomp->decompress(cv);
-    if (plain.size() != static_cast<size_t>(orig_sz)) return HA_ERR_GENERIC;
-    std::memcpy(m_data.get(), plain.data(), orig_sz);
+    if (plain.size() != static_cast<size_t>(snapshot.uncompressed_bytes)) return HA_ERR_GENERIC;
+    std::memcpy(m_data.get(), plain.data(), snapshot.uncompressed_bytes);
   } else {
-    std::memcpy(m_data.get(), payload.data(), payload_sz);
+    std::memcpy(m_data.get(), snapshot.payload.data(), snapshot.payload_bytes);
   }
 
   // Mark uncompressed after loading (runtime can re-compress if desired).
   m_is_compressed.store(false, std::memory_order_release);
-  m_original_data_size.store(orig_sz, std::memory_order_relaxed);
+  m_original_data_size.store(snapshot.uncompressed_bytes, std::memory_order_relaxed);
   m_compressed_data_size.store(0, std::memory_order_relaxed);
   m_compress_algo_used.store(static_cast<uint8_t>(CU_CompressAlgo::NONE), std::memory_order_relaxed);
 
   // Restore zone-map statistics.
-  m_header.field_desc.pack_length = static_cast<size_t>(pack_len);
-  m_header.field_desc.normalized_length = static_cast<size_t>(norm_len);
-  m_header.min_value.store(zm_min, std::memory_order_relaxed);
-  m_header.max_value.store(zm_max, std::memory_order_relaxed);
-  m_header.sum.store(zm_sum, std::memory_order_relaxed);
+  m_header.field_desc.pack_length = static_cast<size_t>(snapshot.pack_length);
+  m_header.field_desc.normalized_length = static_cast<size_t>(snapshot.slot_width);
+  m_header.min_value.store(snapshot.min_value, std::memory_order_relaxed);
+  m_header.max_value.store(snapshot.max_value, std::memory_order_relaxed);
+  m_header.sum.store(snapshot.sum, std::memory_order_relaxed);
 
-  if ((flags & CU_FLAG_HAS_DICT) && m_header.field_desc.dictionary) {
-    for (size_t i = 1; i < dict_entries.size(); ++i) {
-      const auto &val = dict_entries[i];
+  if ((snapshot.flags & CU_FLAG_HAS_DICT) && m_header.field_desc.dictionary) {
+    for (size_t i = 1; i < snapshot.dictionary_entries.size(); ++i) {
+      const auto &val = snapshot.dictionary_entries[i];
       m_header.field_desc.dictionary->restore_entry(i, reinterpret_cast<const uchar *>(val.data()), val.size());
     }
   }
@@ -1509,7 +1526,7 @@ int CU::deserialize_payload(std::istream &in, size_t expected_rows) {
   // Restore version journal. serialize() flattens each row newest -> oldest;
   // create_version() pushes at the head, so replay in reverse to preserve the
   // original chain order.
-  for (auto it = version_recs.rbegin(); it != version_recs.rend(); ++it) {
+  for (auto it = snapshot.versions.rbegin(); it != snapshot.versions.rend(); ++it) {
     const auto &vr = *it;
     const size_t logical_len = static_cast<size_t>(vr.val_len);
     const uchar *val_ptr = vr.val_len != UNIV_SQL_NULL && !vr.val_data.empty() ? vr.val_data.data() : nullptr;
@@ -1525,8 +1542,7 @@ int CU::deserialize_payload(std::istream &in, size_t expected_rows) {
           std::memcpy(old_slot.data(), &ref, std::min(sizeof(ref), old_slot.size()));
           owns_varlen_ref = !ref.is_inline() && ref.block_id != 0;
         }
-      } else if (m_header.field_desc.dictionary && m_header.field_desc.real_type() != MYSQL_TYPE_ENUM &&
-                 m_header.field_desc.real_type() != MYSQL_TYPE_SET && !is_blob_like()) {
+      } else if (uses_dictionary_encoding()) {
         // Dictionary::store() should never receive a null pointer for a
         // non-NULL logical value, even when that value is the empty string.
         static const uchar kEmptyValue = 0;
@@ -1543,9 +1559,9 @@ int CU::deserialize_payload(std::istream &in, size_t expected_rows) {
                                       owns_varlen_ref);
   }
 
-  if ((flags & CU_FLAG_HAS_VARLEN) && m_varlen_pool) {
-    for (const auto &vr : varlen_recs) {
-      if (vr.row_id >= row_cnt) return HA_ERR_GENERIC;
+  if ((snapshot.flags & CU_FLAG_HAS_VARLEN) && m_varlen_pool) {
+    for (const auto &vr : snapshot.varlen_values) {
+      if (vr.row_id >= snapshot.row_count) return HA_ERR_GENERIC;
 
       uchar *slot = m_data.get() + static_cast<size_t>(vr.row_id) * m_header.field_desc.normalized_length;
       std::memset(slot, 0, m_header.field_desc.normalized_length);
@@ -1567,5 +1583,6 @@ int CU::deserialize_payload(std::istream &in, size_t expected_rows) {
   }
   return ShannonBase::SHANNON_SUCCESS;
 }
+
 }  // namespace Imcs
 }  // namespace ShannonBase
