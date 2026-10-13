@@ -17,6 +17,7 @@ let $holder_id= `SELECT CONNECTION_ID()`;
 --send SELECT SUM(v) FROM ri_cpu
 connection default;
 SET DEBUG_SYNC='now WAIT_FOR ri_cpu_ready';
+--replace_result $holder_id HOLDER_ID
 eval SELECT RESOURCE_GROUP FROM performance_schema.threads WHERE PROCESSLIST_ID=$holder_id;
 # Destination group MDL is pinned during execution.
 SET lock_wait_timeout=1;

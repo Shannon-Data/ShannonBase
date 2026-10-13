@@ -221,3 +221,21 @@ SIGKILL 后均恢复全部 12 张表，逐表验证数据，并断言 12 次原�
 验证日志：/tmp/shannon-table-state-build.log、
 /tmp/shannon-table-state-gunit.log、/tmp/shannon-table-state-final-mtr.log、
 /tmp/shannon-many-table-final.log。git diff --check 通过。
+
+
+## Debug CI 预期差异修正
+
+ARM Debug CI 日志中的 all_persisted_variables 为实际 460、旧预期 459。
+当前分支已包含 5416fe792 的 460 修正及对应 result，本轮独立验证通过，
+保留精确变量数量断言。shannon_resource_cpu 将动态 CONNECTION_ID
+替换为 HOLDER_ID，继续精确断言 ri_ap/ri_original、MDL 保护及错误行为。
+shannon_resource_auto_fallback 的四处平台相关 reason_reported 列使用
+IGNORE：CPU 拓扑或服务前置条件可能先于故障注入触发合法回退；
+effective=SOFT、查询数据及 DBA 资源组保持不变仍精确校验。
+
+本地 Debug 三个目标用例独立非 record 全部通过，日志为
+/tmp/shannon-debug-case-final.log。taskset 两 CPU 环境下 AUTO fallback
+通过，CPU 用例按现有四 VCPU 前置条件跳过，日志为
+/tmp/shannon-debug-case-restricted-cpu.log。本轮未在 ARM 主机实测。
+taskset 四 CPU 环境下两项资源测试均通过，日志为
+/tmp/shannon-debug-case-four-cpu.log。git diff --check 通过。
