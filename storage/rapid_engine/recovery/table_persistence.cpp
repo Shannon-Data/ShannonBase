@@ -920,12 +920,19 @@ void TablePersistenceManager::gc_old_generations() {
 }
 
 Result<uint64_t> TablePersistenceManager::load_snapshot(Imcu *imcu, uint64_t generation) {
+  return load_snapshot_with_dictionary(nullptr, imcu, generation);
+}
+
+Result<uint64_t> TablePersistenceManager::load_snapshot_with_dictionary(CU::DictionaryRestoreContext *dictionaries,
+                                                                        Imcu *imcu, uint64_t generation) {
   Result<uint64_t> result{ErrorCode::IO_ERROR, 0};
-  if (!Utils::try_operation([&] { result = load_snapshot_impl(imcu, generation); })) return {ErrorCode::IO_ERROR, 0};
+  if (!Utils::try_operation([&] { result = load_snapshot_impl(dictionaries, imcu, generation); }))
+    return {ErrorCode::IO_ERROR, 0};
   return result;
 }
 
-Result<uint64_t> TablePersistenceManager::load_snapshot_impl(Imcu *imcu, uint64_t generation) {
+Result<uint64_t> TablePersistenceManager::load_snapshot_impl(CU::DictionaryRestoreContext *dictionaries, Imcu *imcu,
+                                                             uint64_t generation) {
   if (!imcu) return {ErrorCode::INTERNAL, 0};
 
   uint32_t imcu_id = imcu->get_imcu_id();
@@ -994,7 +1001,7 @@ Result<uint64_t> TablePersistenceManager::load_snapshot_impl(Imcu *imcu, uint64_
     // Keep native column boundaries without retaining a second whole-CU copy.
     Recovery::NativeColumnStream column(snap.rdbuf(), cu_size);
     std::istream cu_in(&column);
-    int deser_ret = cu->deserialize(cu_in, imcu->get_row_count());
+    int deser_ret = cu->deserialize(dictionaries, cu_in, imcu->get_row_count());
     if (deser_ret != ShannonBase::SHANNON_SUCCESS || column.remaining() != 0) {
       DBUG_PRINT("cu_recovery", ("CU %u deserialize failed", c));
       return {ErrorCode::CORRUPTION, 0};
@@ -1107,11 +1114,16 @@ Result<size_t> TablePersistenceManager::recover(const std::vector<Imcu *> &imcus
   // Phase 1: load snapshots, record per-IMCU checkpoint LSN
   // imcu_id → checkpoint LSN (0 if no snapshot found)
   std::unordered_map<uint32_t, uint64_t> checkpoint_lsn;
+  CU::DictionaryRestoreContext dictionaries;
+  bool reuse_dictionary = true;
+  DBUG_EXECUTE_IF("rapid_recovery_repeat_dictionary", { reuse_dictionary = false; });
+  const auto load_begin = std::chrono::steady_clock::now();
+  size_t loaded = 0;
 
   for (Imcu *imcu : imcus) {
     if (!imcu) continue;
     uint32_t iid = imcu->get_imcu_id();
-    auto snap_result = load_snapshot(imcu, generation);
+    auto snap_result = load_snapshot_with_dictionary(reuse_dictionary ? &dictionaries : nullptr, imcu, generation);
 
     if (snap_result.error == ErrorCode::CORRUPTION || snap_result.error == ErrorCode::IO_ERROR ||
         snap_result.error == ErrorCode::CONFLICT) {
@@ -1131,11 +1143,19 @@ Result<size_t> TablePersistenceManager::recover(const std::vector<Imcu *> &imcus
     }
 
     uint64_t lsn = snap_result.ok() ? snap_result.value : 0;
+    if (snap_result.ok()) ++loaded;
     checkpoint_lsn[iid] = lsn;
     DBUG_PRINT("cu_recovery", ("IMCU %u checkpoint_lsn=%llu", iid, (unsigned long long)lsn));
   }
 
   if (restored_generation) *restored_generation = generation;
+  const auto load_ms =
+      std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - load_begin).count();
+  sql_print_information(
+      "Rapid native dictionary recovery %s.%s: dictionary_reuse=%d imcus=%zu load_ms=%lld "
+      "dictionaries_restored=%zu dictionary_entries_restored=%zu",
+      m_db_name.c_str(), m_tbl_name.c_str(), reuse_dictionary, loaded, static_cast<long long>(load_ms),
+      dictionaries.dictionaries_restored.load(), dictionaries.entries_restored.load());
   return {ErrorCode::OK, 0};
 }
 

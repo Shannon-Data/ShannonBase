@@ -34,6 +34,7 @@
 #include <mutex>
 #include <string>
 #include <vector>
+#include "storage/rapid_engine/imcs/cu.h"
 #include "storage/rapid_engine/include/rapid_const.h"
 #include "storage/rapid_engine/recovery/checkpoint_store.h"
 #include "storage/rapid_engine/recovery/durable_fs.h"
@@ -127,7 +128,9 @@ class TablePersistenceManager {
  private:
   std::mutex m_recovery_mutex;
   bool persist_table_state_locked(RecoveryTableState state);
-  Result<uint64_t> load_snapshot_impl(Imcu *imcu, uint64_t generation);
+  Result<uint64_t> load_snapshot_with_dictionary(CU::DictionaryRestoreContext *dictionaries, Imcu *imcu,
+                                                 uint64_t generation);
+  Result<uint64_t> load_snapshot_impl(CU::DictionaryRestoreContext *dictionaries, Imcu *imcu, uint64_t generation);
   bool persist_manifest(const RecoveryManifest &manifest);
   bool write_snap_header(std::ostream &out, uint32_t imcu_id, uint32_t cols, uint64_t sequence) const;
   bool read_snap_header(std::istream &in, uint32_t &imcu_id, uint32_t &cols, uint64_t &sequence) const;

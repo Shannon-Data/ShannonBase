@@ -16,6 +16,7 @@
 #include <gtest/gtest.h>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <memory>
 #include <sstream>
 
@@ -79,7 +80,172 @@ void update_native_crc(std::string &bytes) {
   const auto crc = Utils::crc32c_compute(bytes.data(), bytes.size() - sizeof(uint32_t), 0);
   std::memcpy(bytes.data() + bytes.size() - sizeof(crc), &crc, sizeof(crc));
 }
+
+FieldMetadata native_dictionary_field() {
+  auto field = native_field();
+  field.type = MYSQL_TYPE_VARCHAR;
+  field.pack_length = 32;
+  field.encoding = Compress::ENCODING_TYPE::SORTED;
+  field.dictionary = std::make_shared<Compress::Dictionary>(field.encoding);
+  return field;
+}
+
+std::string native_dictionary_record(const std::string &value = "alpha", bool dictionary = true,
+                                     const std::string &extra = "") {
+  auto bytes = native_record();
+  bytes[6] = dictionary ? CU_FLAG_HAS_DICT : 0;
+  bytes[11] = MYSQL_TYPE_VARCHAR;
+  bytes[12] = static_cast<char>(Compress::ENCODING_TYPE::SORTED);
+  const uint64_t pack_length = 32;
+  std::memcpy(bytes.data() + 20, &pack_length, sizeof(pack_length));
+  const uint32_t ids[] = {1, 2};
+  std::memcpy(bytes.data() + 84, ids, sizeof(ids));
+  bytes.resize(bytes.size() - sizeof(uint32_t));
+  auto pod = [&](auto v) { bytes.append(reinterpret_cast<const char *>(&v), sizeof(v)); };
+  if (dictionary) {
+    pod(uint32_t{extra.empty() ? 3u : 4u});
+    pod(uint64_t{value.size()});
+    bytes.append(value);
+    pod(uint64_t{0});  // Existing empty values have a non-null arena view.
+    if (!extra.empty()) {
+      pod(uint64_t{extra.size()});
+      bytes.append(extra);
+    }
+  }
+  pod(Utils::crc32c_compute(bytes.data(), bytes.size(), 0));
+  return bytes;
+}
 }  // namespace
+
+TEST(NativeCuPersistence, SharedDictionaryRestoresOnceAndKeepsArenaViews) {
+  auto pool = native_pool();
+  auto field = native_dictionary_field();
+  CU first(nullptr, field, 0, 2, pool), second(nullptr, field, 0, 2, pool);
+  CU::DictionaryRestoreContext dictionaries;
+  std::istringstream a(native_dictionary_record()), b(native_dictionary_record());
+  ASSERT_EQ(first.deserialize(&dictionaries, a, 2), SHANNON_SUCCESS);
+  const auto original = field.dictionary->get_view(1).data();
+  ASSERT_EQ(second.deserialize(&dictionaries, b, 2), SHANNON_SUCCESS);
+  EXPECT_EQ(field.dictionary->get_view(1).data(), original);
+  EXPECT_EQ(field.dictionary->get(1), "alpha");
+  EXPECT_NE(field.dictionary->get_view(2).data(), nullptr);
+  EXPECT_EQ(dictionaries.dictionaries_restored.load(), 1u);
+  EXPECT_EQ(dictionaries.entries_restored.load(), 2u);
+}
+
+TEST(NativeCuPersistence, SharedDictionaryRejectsValidCrcConflictsAndMissingSections) {
+  auto pool = native_pool();
+  auto field = native_dictionary_field();
+  CU first(nullptr, field, 0, 2, pool);
+  CU::DictionaryRestoreContext dictionaries;
+  std::istringstream good(native_dictionary_record());
+  ASSERT_EQ(first.deserialize(&dictionaries, good, 2), SHANNON_SUCCESS);
+  const auto original = field.dictionary->get_view(1).data();
+  for (auto bytes : {native_dictionary_record("other"), native_dictionary_record("alpha", false)}) {
+    CU second(nullptr, field, 0, 2, pool);
+    std::istringstream input(bytes);
+    EXPECT_NE(second.deserialize(&dictionaries, input, 2), SHANNON_SUCCESS);
+    EXPECT_EQ(field.dictionary->get_view(1).data(), original);
+    EXPECT_EQ(field.dictionary->get(1), "alpha");
+  }
+}
+
+TEST(NativeCuPersistence, CorruptFirstDictionaryDoesNotPublishCanonicalState) {
+  auto pool = native_pool();
+  auto field = native_dictionary_field();
+  CU first(nullptr, field, 0, 2, pool), second(nullptr, field, 0, 2, pool);
+  CU::DictionaryRestoreContext dictionaries;
+  auto bytes = native_dictionary_record();
+  bytes.back() ^= 1;
+  std::istringstream corrupt(bytes), good(native_dictionary_record());
+  EXPECT_NE(first.deserialize(&dictionaries, corrupt, 2), SHANNON_SUCCESS);
+  EXPECT_EQ(dictionaries.dictionaries_restored.load(), 0u);
+  EXPECT_EQ(field.dictionary->size(), 1u);
+  EXPECT_EQ(second.deserialize(&dictionaries, good, 2), SHANNON_SUCCESS);
+  EXPECT_EQ(dictionaries.dictionaries_restored.load(), 1u);
+}
+
+TEST(NativeCuPersistence, ConcurrentChunksShareOneDictionaryInitialization) {
+  auto pool = native_pool();
+  auto field = native_dictionary_field();
+  CU::DictionaryRestoreContext dictionaries;
+  std::vector<std::unique_ptr<CU>> columns;
+  std::vector<std::future<int>> results;
+  for (size_t i = 0; i < 4; ++i) columns.push_back(std::make_unique<CU>(nullptr, field, 0, 2, pool));
+  for (auto &column : columns) {
+    results.push_back(std::async(std::launch::async, [cu = column.get(), &dictionaries] {
+      std::istringstream input(native_dictionary_record());
+      return cu->deserialize(&dictionaries, input, 2);
+    }));
+  }
+  for (auto &result : results) EXPECT_EQ(result.get(), SHANNON_SUCCESS);
+  EXPECT_EQ(dictionaries.dictionaries_restored.load(), 1u);
+  EXPECT_EQ(dictionaries.entries_restored.load(), 2u);
+}
+
+TEST(NativeCuPersistence, LaterChunksCanExtendTheCanonicalDictionaryAfterValidation) {
+  auto pool = native_pool();
+  auto field = native_dictionary_field();
+  CU first(nullptr, field, 0, 2, pool), later(nullptr, field, 0, 2, pool);
+  CU::DictionaryRestoreContext dictionaries;
+  auto extended = native_dictionary_record("alpha", true, "new");
+  const uint32_t new_id = 3;
+  std::memcpy(extended.data() + 88, &new_id, sizeof(new_id));
+  update_native_crc(extended);
+  std::istringstream a(native_dictionary_record()), b(extended);
+  ASSERT_EQ(first.deserialize(&dictionaries, a, 2), SHANNON_SUCCESS);
+  const auto original = field.dictionary->get_view(1).data();
+  ASSERT_EQ(later.deserialize(&dictionaries, b, 2), SHANNON_SUCCESS);
+  EXPECT_EQ(field.dictionary->get_view(1).data(), original);
+  EXPECT_EQ(field.dictionary->get(3), "new");
+  std::ostringstream output;
+  ASSERT_EQ(later.serialize(output, 2, true), SHANNON_SUCCESS);
+  uint32_t recovered_id = 0;
+  const auto bytes = output.str();
+  std::memcpy(&recovered_id, bytes.data() + 88, sizeof(recovered_id));
+  EXPECT_EQ(recovered_id, new_id);
+  EXPECT_EQ(dictionaries.dictionaries_restored.load(), 1u);
+  EXPECT_EQ(dictionaries.entries_restored.load(), 3u);
+  CU shorter(nullptr, field, 0, 2, pool);
+  std::istringstream previous(native_dictionary_record());
+  EXPECT_EQ(shorter.deserialize(&dictionaries, previous, 2), SHANNON_SUCCESS);
+  EXPECT_EQ(field.dictionary->get(3), "new");
+  EXPECT_EQ(dictionaries.entries_restored.load(), 3u);
+}
+
+TEST(NativeCuPersistence, CorruptExtensionDoesNotAddNewEntries) {
+  auto pool = native_pool();
+  auto field = native_dictionary_field();
+  CU first(nullptr, field, 0, 2, pool), later(nullptr, field, 0, 2, pool);
+  CU::DictionaryRestoreContext dictionaries;
+  std::istringstream a(native_dictionary_record());
+  ASSERT_EQ(first.deserialize(&dictionaries, a, 2), SHANNON_SUCCESS);
+  auto bytes = native_dictionary_record("alpha", true, "new");
+  bytes.back() ^= 1;
+  std::istringstream b(bytes);
+  EXPECT_NE(later.deserialize(&dictionaries, b, 2), SHANNON_SUCCESS);
+  EXPECT_EQ(field.dictionary->get_view(3).data(), nullptr);
+  EXPECT_EQ(dictionaries.entries_restored.load(), 2u);
+}
+
+TEST(NativeCuPersistence, ConcurrentConflictingExtensionsCannotOverwriteAnId) {
+  auto pool = native_pool();
+  auto field = native_dictionary_field();
+  CU first(nullptr, field, 0, 2, pool), a(nullptr, field, 0, 2, pool), b(nullptr, field, 0, 2, pool);
+  CU::DictionaryRestoreContext dictionaries;
+  std::istringstream initial(native_dictionary_record());
+  ASSERT_EQ(first.deserialize(&dictionaries, initial, 2), SHANNON_SUCCESS);
+  auto apply = [&](CU &cu, const std::string &value) {
+    std::istringstream input(native_dictionary_record("alpha", true, value));
+    return cu.deserialize(&dictionaries, input, 2);
+  };
+  auto x = std::async(std::launch::async, [&] { return apply(a, "one"); });
+  auto y = std::async(std::launch::async, [&] { return apply(b, "two"); });
+  const auto xr = x.get(), yr = y.get();
+  EXPECT_NE(xr == SHANNON_SUCCESS, yr == SHANNON_SUCCESS);
+  EXPECT_EQ(field.dictionary->get(3), xr == SHANNON_SUCCESS ? "one" : "two");
+  EXPECT_EQ(dictionaries.entries_restored.load(), 3u);
+}
 
 TEST(NativeCuPersistence, FixedWidthAndEmptyRecordsRoundTrip) {
   auto pool = native_pool();
@@ -88,7 +254,7 @@ TEST(NativeCuPersistence, FixedWidthAndEmptyRecordsRoundTrip) {
     CU column(nullptr, field, 0, 2, pool);
     const auto bytes = native_record(empty);
     std::istringstream input(bytes);
-    ASSERT_EQ(column.deserialize(input, empty ? 0 : 2), SHANNON_SUCCESS);
+    ASSERT_EQ(column.deserialize(nullptr, input, empty ? 0 : 2), SHANNON_SUCCESS);
     std::ostringstream output;
     ASSERT_EQ(column.serialize(output, empty ? 0 : 2, true), SHANNON_SUCCESS);
     EXPECT_EQ(output.str(), bytes);
@@ -104,14 +270,14 @@ TEST(NativeCuPersistence, ValidCrcCannotHideShortRawPayload) {
   bytes.erase(88, 4);
   update_native_crc(bytes);
   std::istringstream input(bytes);
-  EXPECT_NE(column.deserialize(input, 2), SHANNON_SUCCESS);
+  EXPECT_NE(column.deserialize(nullptr, input, 2), SHANNON_SUCCESS);
 }
 TEST(NativeCuPersistence, ColumnRowsMustMatchContainingChunk) {
   auto pool = native_pool();
   auto field = native_field();
   CU column(nullptr, field, 0, 3, pool);
   std::istringstream input(native_record());
-  EXPECT_NE(column.deserialize(input, 3), SHANNON_SUCCESS);
+  EXPECT_NE(column.deserialize(nullptr, input, 3), SHANNON_SUCCESS);
 }
 TEST(NativeCuPersistence, ValidCrcCannotChangeEncodingOrFlags) {
   auto pool = native_pool();
@@ -122,7 +288,7 @@ TEST(NativeCuPersistence, ValidCrcCannotChangeEncodingOrFlags) {
     bytes[offset] = offset == 6 ? char{0x40} : static_cast<char>(Compress::ENCODING_TYPE::VARLEN);
     update_native_crc(bytes);
     std::istringstream input(bytes);
-    EXPECT_NE(column.deserialize(input, 2), SHANNON_SUCCESS);
+    EXPECT_NE(column.deserialize(nullptr, input, 2), SHANNON_SUCCESS);
   }
 }
 TEST(NativeCuPersistence, CompressedRecordNeedsAnExplicitCodec) {
@@ -133,7 +299,7 @@ TEST(NativeCuPersistence, CompressedRecordNeedsAnExplicitCodec) {
   bytes[6] = CU_FLAG_COMPRESSED;
   update_native_crc(bytes);
   std::istringstream input(bytes);
-  EXPECT_NE(column.deserialize(input, 2), SHANNON_SUCCESS);
+  EXPECT_NE(column.deserialize(nullptr, input, 2), SHANNON_SUCCESS);
 }
 TEST(NativeCuPersistence, InputExceptionsReturnFailure) {
   auto pool = native_pool();
@@ -141,7 +307,7 @@ TEST(NativeCuPersistence, InputExceptionsReturnFailure) {
   CU column(nullptr, field, 0, 2, pool);
   std::istringstream input("");
   input.exceptions(std::ios::failbit | std::ios::badbit);
-  EXPECT_NO_THROW(EXPECT_NE(column.deserialize(input, 2), SHANNON_SUCCESS));
+  EXPECT_NO_THROW(EXPECT_NE(column.deserialize(nullptr, input, 2), SHANNON_SUCCESS));
 }
 TEST(NativeCuPersistence, OutputExceptionsReturnFailure) {
   class ThrowingBuffer : public std::streambuf {

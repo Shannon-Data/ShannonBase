@@ -274,12 +274,21 @@ class CU : public MemoryObject {
    * CRC-32C is verified before any in-memory state is modified, so a corrupt
    * file leaves the CU unchanged.
    *
+   * @param dictionaries  Dictionary restore context; nullptr for an independent snapshot.
    * @param in  Binary input stream.
    * @param expected_rows  Native checkpoint chunk row count; SIZE_MAX for a
    *                       generic CU snapshot, which may contain MVCC versions.
    * @return SHANNON_SUCCESS (0) on success, otherwise an error code.
    */
-  int deserialize(std::istream &in, size_t expected_rows = SIZE_MAX);
+  // One private native recovery image owns this context. It must not be reused
+  // across generations or used with a published table / MVCC snapshot.
+  struct DictionaryRestoreContext {
+    struct State;
+    std::mutex mutex;
+    std::unordered_map<const Compress::Dictionary *, std::shared_ptr<State>> states;
+    std::atomic<size_t> dictionaries_restored{0}, entries_restored{0};
+  };
+  int deserialize(DictionaryRestoreContext *dictionaries, std::istream &in, size_t expected_rows = SIZE_MAX);
 
   inline void reconstruct_field_metadata(Field *f, const CHARSET_INFO *cs) {
     m_header.field_desc.src_field = f;
@@ -392,10 +401,11 @@ class CU : public MemoryObject {
   void retire_slot_varlen_ref_locked(const uchar *slot);
 
   int serialize_payload(std::ostream &out, size_t snapshot_row_count, bool checkpoint) const;
-  int deserialize_payload(std::istream &in, size_t expected_rows);
+  int deserialize_payload(DictionaryRestoreContext *dictionaries, std::istream &in, size_t expected_rows);
 
   struct DecodedSnapshot;
-  int read_snapshot(std::istream &in, size_t expected_rows, DecodedSnapshot &snapshot) const;
+  int read_snapshot(DictionaryRestoreContext *dictionaries, std::istream &in, size_t expected_rows,
+                    DecodedSnapshot &snapshot) const;
   int restore_snapshot(const DecodedSnapshot &snapshot);
 
   bool uses_dictionary_encoding() const {

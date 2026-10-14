@@ -1340,7 +1340,7 @@ bool Imcu::deserialize(std::istream &in) {
 
     MemStreamBuf msb(cur.p, static_cast<size_t>(payload_size));
     std::istream cu_in(&msb);
-    const int rc = m_cu_array[column_id]->deserialize(cu_in);
+    const int rc = m_cu_array[column_id]->deserialize(nullptr, cu_in);
     if (rc != ShannonBase::SHANNON_SUCCESS) return false;
     cur.p += static_cast<ptrdiff_t>(payload_size);
   }

@@ -1301,11 +1301,18 @@ int CU::serialize_payload(std::ostream &out, size_t snapshot_row_count, bool che
   return out.good() ? ShannonBase::SHANNON_SUCCESS : HA_ERR_GENERIC;
 }
 
-int CU::deserialize(std::istream &in, size_t expected_rows) {
+int CU::deserialize(DictionaryRestoreContext *dictionaries, std::istream &in, size_t expected_rows) {
+  if (dictionaries && expected_rows == SIZE_MAX) return HA_ERR_GENERIC;
   int result = HA_ERR_GENERIC;
-  if (!Utils::try_operation([&] { result = deserialize_payload(in, expected_rows); })) return HA_ERR_GENERIC;
+  if (!Utils::try_operation([&] { result = deserialize_payload(dictionaries, in, expected_rows); }))
+    return HA_ERR_GENERIC;
   return result;
 }
+
+struct CU::DictionaryRestoreContext::State {
+  std::mutex mutex;
+  bool ready{false}, has_dictionary{false};
+};
 
 struct CU::DecodedSnapshot {
   struct VersionRecord {
@@ -1323,18 +1330,49 @@ struct CU::DecodedSnapshot {
   double min_value = 0, max_value = 0, sum = 0;
   std::vector<uchar> payload;
   std::vector<std::string> dictionary_entries;
+  std::vector<std::pair<uint32_t, std::string>> dictionary_extensions;
   std::vector<VersionRecord> versions;
   std::vector<VarlenRecord> varlen_values;
+  std::shared_ptr<DictionaryRestoreContext::State> dictionary_state;
+  std::unique_lock<std::mutex> dictionary_lock;
+  bool dictionary_shared{false};
 };
 
-int CU::deserialize_payload(std::istream &in, size_t expected_rows) {
+int CU::deserialize_payload(DictionaryRestoreContext *dictionaries, std::istream &in, size_t expected_rows) {
   DecodedSnapshot snapshot;
-  const int result = read_snapshot(in, expected_rows, snapshot);
+  const int result = read_snapshot(dictionaries, in, expected_rows, snapshot);
   if (result != ShannonBase::SHANNON_SUCCESS) return result;
+  if (snapshot.dictionary_lock.owns_lock() || !snapshot.dictionary_extensions.empty()) {
+    // Publish the canonical dictionary only after the entire first CU passes
+    // CRC and structural validation. Other CUs then compare against immutable
+    // arena views, without allocating or restoring another complete dictionary.
+    if (!snapshot.dictionary_lock.owns_lock())
+      snapshot.dictionary_lock = std::unique_lock(snapshot.dictionary_state->mutex);
+    auto &state = *snapshot.dictionary_state;
+    auto restore = [&](uint32_t id, const std::string &value) {
+      const auto existing = m_header.field_desc.dictionary->get_view(id);
+      if (existing.data()) return existing == value;
+      m_header.field_desc.dictionary->restore_entry(id, reinterpret_cast<const uchar *>(value.data()), value.size());
+      ++dictionaries->entries_restored;
+      return true;
+    };
+    for (size_t i = 1; i < snapshot.dictionary_entries.size(); ++i)
+      if (!restore(static_cast<uint32_t>(i), snapshot.dictionary_entries[i])) return HA_ERR_GENERIC;
+    // A later CU can contain a longer consistent prefix. Recheck under the
+    // per-dictionary lock: another CU may have published the same new ID while
+    // we verified this CU's CRC. Conflicting ID/value pairs are corruption.
+    for (const auto &[id, value] : snapshot.dictionary_extensions)
+      if (!restore(id, value)) return HA_ERR_GENERIC;
+    if (!state.has_dictionary && (snapshot.flags & CU_FLAG_HAS_DICT)) ++dictionaries->dictionaries_restored;
+    state.has_dictionary |= bool(snapshot.flags & CU_FLAG_HAS_DICT);
+    if (!state.ready) state.ready = true;
+    snapshot.dictionary_lock.unlock();
+  }
   return restore_snapshot(snapshot);
 }
 
-int CU::read_snapshot(std::istream &in, size_t expected_rows, DecodedSnapshot &snapshot) const {
+int CU::read_snapshot(DictionaryRestoreContext *dictionaries, std::istream &in, size_t expected_rows,
+                      DecodedSnapshot &snapshot) const {
   // Parse and verify the record before touching live state.
   CrcIStream cis(in);
 
@@ -1412,16 +1450,50 @@ int CU::read_snapshot(std::istream &in, size_t expected_rows, DecodedSnapshot &s
   if (snapshot.payload_bytes > 0 && !cis.read(snapshot.payload.data(), snapshot.payload_bytes)) return HA_ERR_GENERIC;
 
   // Dictionary (optional)
+  bool compare_dictionary = false;
+  if (dictionaries && m_header.field_desc.dictionary) {
+    {
+      std::lock_guard lock(dictionaries->mutex);
+      auto &state = dictionaries->states[m_header.field_desc.dictionary.get()];
+      if (!state) state = std::make_shared<DictionaryRestoreContext::State>();
+      snapshot.dictionary_state = state;
+    }
+    snapshot.dictionary_shared = true;
+    snapshot.dictionary_lock = std::unique_lock(snapshot.dictionary_state->mutex);
+    if (snapshot.dictionary_state->ready) {
+      if (snapshot.dictionary_state->has_dictionary && !(snapshot.flags & CU_FLAG_HAS_DICT)) return HA_ERR_GENERIC;
+      compare_dictionary = true;
+      snapshot.dictionary_lock.unlock();
+    }
+  }
   if (snapshot.flags & CU_FLAG_HAS_DICT) {
     uint32_t entry_count = 0;
     if (!cis.read_pod(entry_count)) return HA_ERR_GENERIC;
     if (entry_count > kMaxDictEntries) return HA_ERR_GENERIC;
-    snapshot.dictionary_entries.resize(entry_count);
+    if (!compare_dictionary) {
+      snapshot.dictionary_entries.resize(entry_count);
+    }
     for (uint32_t i = 1; i < entry_count; ++i) {
       uint64_t vlen = 0;
       if (!cis.read_pod(vlen)) return HA_ERR_GENERIC;
       if (vlen > kMaxVarlenValueLen) return HA_ERR_GENERIC;
-      if (vlen > 0) {
+      if (compare_dictionary) {
+        const auto canonical = m_header.field_desc.dictionary->get_view(i);
+        if (!canonical.data()) {
+          auto &entry = snapshot.dictionary_extensions.emplace_back(i, std::string{});
+          entry.second.resize(vlen);
+          if (vlen && !cis.read(entry.second.data(), vlen)) return HA_ERR_GENERIC;
+        } else {
+          if (canonical.size() != vlen) return HA_ERR_GENERIC;
+          char buffer[4096];
+          for (size_t offset = 0; offset < vlen;) {
+            const size_t count = std::min<size_t>(sizeof(buffer), vlen - offset);
+            if (!cis.read(buffer, count) || std::memcmp(buffer, canonical.data() + offset, count))
+              return HA_ERR_GENERIC;
+            offset += count;
+          }
+        }
+      } else if (vlen > 0) {
         snapshot.dictionary_entries[i].resize(vlen);
         if (!cis.read(&snapshot.dictionary_entries[i][0], vlen)) return HA_ERR_GENERIC;
       }
@@ -1516,7 +1588,7 @@ int CU::restore_snapshot(const DecodedSnapshot &snapshot) {
   m_header.max_value.store(snapshot.max_value, std::memory_order_relaxed);
   m_header.sum.store(snapshot.sum, std::memory_order_relaxed);
 
-  if ((snapshot.flags & CU_FLAG_HAS_DICT) && m_header.field_desc.dictionary) {
+  if (!snapshot.dictionary_shared && (snapshot.flags & CU_FLAG_HAS_DICT) && m_header.field_desc.dictionary) {
     for (size_t i = 1; i < snapshot.dictionary_entries.size(); ++i) {
       const auto &val = snapshot.dictionary_entries[i];
       m_header.field_desc.dictionary->restore_entry(i, reinterpret_cast<const uchar *>(val.data()), val.size());

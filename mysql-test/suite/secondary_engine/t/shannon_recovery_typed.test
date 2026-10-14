@@ -1,9 +1,10 @@
-# Restart must agree with recovered InnoDB on the source-reload path.
+# Restart must agree with recovered InnoDB after an explicit source reload.
 # LOB tables use the supported InnoDB reload path after a crash.
 # Uncommitted notifications are not a durable recovery source.
 --source include/have_debug.inc
 --source include/no_ps_protocol.inc
 --disable_query_log
+CALL mtr.add_suppression("recovery eligibility is revoked or cannot be verified; automatic recovery stopped");
 CALL mtr.add_suppression("CheckpointScheduler: on-demand checkpoint failed sh_recovery_typed.t");
 --enable_query_log
 
@@ -34,12 +35,18 @@ COMMIT;
 --let $restart_parameters = restart: --rapid_reload_on_restart=ON
 --source include/kill_and_restart_mysqld.inc
 USE sh_recovery_typed;
---let $wait_condition = SELECT COUNT(*)=1 FROM performance_schema.rpd_table_id WHERE SCHEMA_NAME='sh_recovery_typed' AND TABLE_NAME='t'
---source include/wait_condition.inc
-# Assert the recovery route, not just the result of a possible reload.
---let $wait_condition = SELECT CAST(VARIABLE_VALUE AS UNSIGNED)=1 FROM performance_schema.global_status WHERE VARIABLE_NAME='rapid_recovery_primary_reloads'
---source include/wait_condition.inc
+# The unlogged commit revokes recovery eligibility; require an explicit load.
+--let $grep_file = $MYSQLTEST_VARDIR/log/mysqld.1.err
+--let $grep_pattern = sh_recovery_typed.t recovery eligibility is revoked or cannot be verified; automatic recovery stopped
+--let $wait_timeout = 60
+--source include/wait_for_pattern_in_file.inc
+SELECT COUNT(*) AS automatically_loaded FROM performance_schema.rpd_table_id WHERE SCHEMA_NAME='sh_recovery_typed' AND TABLE_NAME='t';
 SELECT VARIABLE_VALUE FROM performance_schema.global_status WHERE VARIABLE_NAME='rapid_recovery_primary_reloads';
+SET use_secondary_engine=FORCED;
+--error ER_SECONDARY_ENGINE_PLUGIN
+SELECT id,v FROM t ORDER BY id;
+SET use_secondary_engine=OFF;
+ALTER TABLE t SECONDARY_LOAD;
 SET use_secondary_engine=OFF;
 SELECT id,v FROM t ORDER BY id;
 --let $assert_digest = SELECT GROUP_CONCAT(CONCAT(id,':',v,':',COALESCE(s,'NULL'),':',COALESCE(n,-1),':',OCTET_LENGTH(b),':',MD5(b)) ORDER BY id) FROM t
@@ -55,9 +62,9 @@ DELETE FROM t WHERE id=4;
 --let $restart_parameters = restart: --rapid_reload_on_restart=ON
 --source include/kill_and_restart_mysqld.inc
 USE sh_recovery_typed;
---let $wait_condition = SELECT COUNT(*)=1 FROM performance_schema.rpd_table_id WHERE SCHEMA_NAME='sh_recovery_typed' AND TABLE_NAME='t'
---source include/wait_condition.inc
+# Binlog remains disabled: reload the new source epoch explicitly again.
 SET use_secondary_engine=OFF;
+ALTER TABLE t SECONDARY_LOAD;
 SELECT id,v FROM t ORDER BY id;
 --let $assert_digest = SELECT GROUP_CONCAT(CONCAT(id,':',v,':',COALESCE(s,'NULL'),':',COALESCE(n,-1),':',OCTET_LENGTH(b),':',MD5(b)) ORDER BY id) FROM t
 --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
