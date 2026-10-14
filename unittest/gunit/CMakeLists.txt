@@ -276,6 +276,7 @@ SET(SERVER_TESTS
   protocol_classic
   publish_frontier
   rapid_recovery_protocol
+  rapid_parallel_load
   rapid_art
   rapid_ringbuffer
   rapid_resources
@@ -348,6 +349,7 @@ SET(RAPID_TESTS
   hash_join
   publish_frontier
   rapid_recovery_protocol
+  rapid_parallel_load
   rapid_art
   rapid_ringbuffer
   rapid_resources

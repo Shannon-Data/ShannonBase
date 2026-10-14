@@ -21,7 +21,7 @@
 
    Copyright (c) 2023, Shannon Data AI and/or its affiliates.
 
-   The fundmental code for imcs.
+   The fundmental code for recovery.
 */
 #ifndef __SHANNONBASE_RECOVERY_LOAD_H__
 #define __SHANNONBASE_RECOVERY_LOAD_H__

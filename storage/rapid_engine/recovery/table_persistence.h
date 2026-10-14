@@ -19,12 +19,9 @@
    along with this program; if not, write to the Free Software
    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
 
-   The fundmental code for imcs. The chunk is used to store the data which
-   transfer from row-based format to column-based format.
-
    Copyright (c) 2023 - 2026, Shannon Data AI and/or its affiliates.
 
-   The fundmental code for imcs.
+   The fundmental code for recovery.
 */
 #ifndef __SHANNONBASE_TABLE_PERSISTENCE_H__
 #define __SHANNONBASE_TABLE_PERSISTENCE_H__
@@ -127,7 +124,11 @@ class TablePersistenceManager {
  private:
   std::mutex m_recovery_mutex;
   bool persist_table_state_locked(RecoveryTableState state);
+  struct SnapshotLoad;
+  Result<uint64_t> prepare_snapshot(Imcu *imcu, uint64_t generation, SnapshotLoad &plan);
   Result<uint64_t> load_snapshot_impl(Imcu *imcu, uint64_t generation);
+  Result<size_t> load_snapshots(const std::vector<SnapshotLoad> &plans);
+  Result<size_t> recover_impl(const std::vector<Imcu *> &imcus, uint64_t *restored_generation);
   bool persist_manifest(const RecoveryManifest &manifest);
   bool write_snap_header(std::ostream &out, uint32_t imcu_id, uint32_t cols, uint64_t sequence) const;
   bool read_snap_header(std::istream &in, uint32_t &imcu_id, uint32_t &cols, uint64_t &sequence) const;

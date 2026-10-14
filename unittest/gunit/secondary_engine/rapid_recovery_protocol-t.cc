@@ -7,8 +7,8 @@
 #include <sstream>
 #include <thread>
 #include "storage/rapid_engine/recovery/checkpoint_store.h"
-#include "storage/rapid_engine/recovery/native_stream.h"
 #include "storage/rapid_engine/recovery/notification_tracker.h"
+#include "storage/rapid_engine/recovery/parallel_load.h"
 #include "storage/rapid_engine/recovery/source_validation.h"
 #include "storage/rapid_engine/recovery/table_persistence.h"
 #include "storage/rapid_engine/utils/crc.h"

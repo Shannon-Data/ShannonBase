@@ -48,6 +48,7 @@
 #include <unistd.h>  // fdatasync, close
 #endif
 
+#include "my_thread.h"
 #include "scope_guard.h"
 #include "sql/log.h"                          // sql_print_warning
 #include "storage/innobase/include/ut0dbg.h"  // DBUG_PRINT, UNIV_SQL_NULL
@@ -56,7 +57,8 @@
 #include "storage/rapid_engine/imcs/imcu.h"
 #include "storage/rapid_engine/imcs/table.h"
 #include "storage/rapid_engine/recovery/binlog_recovery.h"
-#include "storage/rapid_engine/recovery/native_stream.h"
+#include "storage/rapid_engine/recovery/parallel_load.h"
+#include "storage/rapid_engine/resource_management/res_mgmt.h"
 #include "storage/rapid_engine/utils/crc.h"
 
 namespace ShannonBase {
@@ -64,6 +66,23 @@ namespace Imcs {
 namespace fs = std::filesystem;
 
 namespace {
+// Active table restores share one pool. The last caller drains and destroys it,
+// including MySQL thread-local state, before recovery/table teardown proceeds.
+std::shared_ptr<Recovery::NativeLoadExecutor> native_load_executor() {
+  static std::mutex mutex;
+  static std::weak_ptr<Recovery::NativeLoadExecutor> weak;
+  std::lock_guard lock(mutex);
+  auto executor = weak.lock();
+  if (!executor) {
+    const auto limits = ResMgmt::system_memory_limits();
+    const uint64_t budget = limits.operation ? std::min<uint64_t>(limits.operation, 256ULL << 20) : (16ULL << 20);
+    executor = std::make_shared<Recovery::NativeLoadExecutor>(
+        Recovery::NativeLoadPolicy::worker_limit(), budget, [] { return !my_thread_init(); }, [] { my_thread_end(); });
+    weak = executor;
+  }
+  return executor;
+}
+
 template <typename T>
 void append_pod(std::string &out, const T &v) {
   out.append(reinterpret_cast<const char *>(&v), sizeof(T));
@@ -925,12 +944,33 @@ Result<uint64_t> TablePersistenceManager::load_snapshot(Imcu *imcu, uint64_t gen
   return result;
 }
 
+struct TablePersistenceManager::SnapshotLoad {
+  struct Column {
+    uint64_t offset, bytes;
+    uint32_t index;
+  };
+  Imcu *imcu{nullptr};
+  fs::path path;
+  uint64_t bytes{0};
+  std::vector<Column> columns;
+};
+
 Result<uint64_t> TablePersistenceManager::load_snapshot_impl(Imcu *imcu, uint64_t generation) {
+  SnapshotLoad plan;
+  auto result = prepare_snapshot(imcu, generation, plan);
+  if (!result.ok()) return result;
+  auto loaded = load_snapshots({std::move(plan)});
+  return loaded.ok() ? result : Result<uint64_t>{loaded.error, 0};
+}
+
+Result<uint64_t> TablePersistenceManager::prepare_snapshot(Imcu *imcu, uint64_t generation, SnapshotLoad &plan) {
   if (!imcu) return {ErrorCode::INTERNAL, 0};
 
   uint32_t imcu_id = imcu->get_imcu_id();
   fs::path path = snap_path(generation, imcu_id);
 
+  plan.imcu = imcu;
+  plan.path = path;
   std::ifstream snap(path, std::ios::binary);
   if (!snap.is_open()) {
     // No snapshot file — cold start requiring primary reload.
@@ -991,24 +1031,96 @@ Result<uint64_t> TablePersistenceManager::load_snapshot_impl(Imcu *imcu, uint64_
       return {ErrorCode::CONFLICT, 0};
     }
 
-    // Keep native column boundaries without retaining a second whole-CU copy.
-    Recovery::NativeColumnStream column(snap.rdbuf(), cu_size);
-    std::istream cu_in(&column);
-    int deser_ret = cu->deserialize(cu_in, imcu->get_row_count());
-    if (deser_ret != ShannonBase::SHANNON_SUCCESS || column.remaining() != 0) {
-      DBUG_PRINT("cu_recovery", ("CU %u deserialize failed", c));
-      return {ErrorCode::CORRUPTION, 0};
-    }
+    plan.columns.push_back({static_cast<uint64_t>(position), cu_size, c});
+    snap.seekg(static_cast<std::streamoff>(cu_size), std::ios::cur);
+    if (!snap) return {ErrorCode::CORRUPTION, 0};
   }
 
   if (snap.peek() != std::char_traits<char>::eof() || snap.bad()) return {ErrorCode::CORRUPTION, 0};
 
-  DBUG_PRINT("cu_recovery",
-             ("loaded snapshot for IMCU %u  snap_lsn=%llu  cols=%u", imcu_id, (unsigned long long)snap_lsn, col_count));
+  plan.bytes = static_cast<uint64_t>(snapshot_size);
   return {ErrorCode::OK, snap_lsn};
 }
 
+Result<size_t> TablePersistenceManager::load_snapshots(const std::vector<SnapshotLoad> &plans) {
+  using Recovery::NativeLoadPolicy;
+  using Recovery::saturated_add;
+  using Recovery::saturated_multiply;
+  const auto begin = std::chrono::steady_clock::now();
+  auto executor = native_load_executor();
+  uint64_t bytes = 0;
+  size_t nonempty = 0;
+  for (const auto &plan : plans) {
+    bytes = saturated_add(bytes, plan.bytes);
+    if (!plan.columns.empty()) ++nonempty;
+  }
+  // Flat tasks only: sufficient IMCUs use one task per file; wide/small-topology
+  // tables split their columns into contiguous batches, each with its own reader.
+  bool split_columns = nonempty < executor->workers();
+  DBUG_EXECUTE_IF("rapid_recovery_parallel_cu", { split_columns = true; });
+  DBUG_EXECUTE_IF("rapid_recovery_parallel_imcu", { split_columns = false; });
+  bool inject_failure = false;
+  DBUG_EXECUTE_IF("rapid_recovery_load_task_fail", { inject_failure = true; });
+  std::vector<Recovery::NativeLoadExecutor::Task> tasks;
+  for (const auto &plan : plans) {
+    for (size_t first = 0; first < plan.columns.size();) {
+      size_t last = first;
+      uint64_t group_bytes = 0, memory = 0;
+      do {
+        const auto &column = plan.columns[last++];
+        auto *cu = plan.imcu->get_cu(column.index);
+        // Include decoded container overhead and both compressed/plain buffers.
+        // Resident destination buffers were allocated before this stage.
+        const auto plain = saturated_multiply(plan.imcu->get_row_count(), cu->get_normalized_length());
+        memory = std::max(memory, saturated_add(saturated_multiply(column.bytes, 8), saturated_multiply(plain, 2)));
+        group_bytes = saturated_add(group_bytes, column.bytes);
+        bool force_boundary = false;
+        DBUG_EXECUTE_IF("rapid_recovery_parallel_cu", { force_boundary = true; });
+        if (split_columns && (force_boundary || group_bytes >= NativeLoadPolicy::column_batch_bytes)) break;
+      } while (last < plan.columns.size());
+      tasks.push_back({memory, [p = &plan, first, last, fail = inject_failure && tasks.size() == 1] {
+                         if (fail) throw std::bad_alloc();
+                         std::ifstream input(p->path, std::ios::binary);
+                         if (!input) return false;
+                         input.seekg(static_cast<std::streamoff>(p->columns[first].offset));
+                         for (size_t i = first; i < last; ++i) {
+                           const auto &column = p->columns[i];
+                           // Omitted NOT_SECONDARY columns and length prefixes may separate CUs.
+                           if (i != first) input.seekg(static_cast<std::streamoff>(column.offset));
+                           if (!input) return false;
+                           Recovery::NativeColumnStream slice(input.rdbuf(), column.bytes);
+                           std::istream bounded(&slice);
+                           auto *cu = p->imcu->get_cu(column.index);
+                           if (cu->deserialize(bounded, p->imcu->get_row_count()) != SHANNON_SUCCESS ||
+                               slice.remaining() != 0)
+                             return false;
+                         }
+                         return true;
+                       }});
+      first = last;
+    }
+  }
+  bool parallel = NativeLoadPolicy::parallel(bytes, tasks.size(), executor->workers());
+  DBUG_EXECUTE_IF("rapid_recovery_parallel_cu", { parallel = tasks.size() > 1; });
+  DBUG_EXECUTE_IF("rapid_recovery_parallel_imcu", { parallel = tasks.size() > 1; });
+  DBUG_EXECUTE_IF("rapid_recovery_serial", { parallel = false; });
+  const bool ok = executor->run(tasks, parallel);
+  const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - begin);
+  sql_print_information(
+         "Rapid native recovery %s.%s: mode=%s granularity=%s tasks=%zu bytes=%llu load_ms=%lld success=%d",
+         m_db_name.c_str(), m_tbl_name.c_str(), parallel ? "parallel" : "serial", split_columns ? "CU" : "IMCU",
+         tasks.size(), static_cast<unsigned long long>(bytes), static_cast<long long>(elapsed.count()), ok);
+  return {ok ? ErrorCode::OK : ErrorCode::CORRUPTION, ok ? plans.size() : 0};
+}
+
 Result<size_t> TablePersistenceManager::recover(const std::vector<Imcu *> &imcus, uint64_t *restored_generation) {
+  Result<size_t> result{ErrorCode::INTERNAL, 0};
+  if (!Utils::try_operation([&] { result = recover_impl(imcus, restored_generation); }))
+    return {ErrorCode::INTERNAL, 0};
+  return result;
+}
+
+Result<size_t> TablePersistenceManager::recover_impl(const std::vector<Imcu *> &imcus, uint64_t *restored_generation) {
   if (imcus.empty()) return {ErrorCode::OK, 0};
 
   // Select the newest generation whose manifest AND referenced snapshot files
@@ -1104,39 +1216,18 @@ Result<size_t> TablePersistenceManager::recover(const std::vector<Imcu *> &imcus
     }
   }
 
-  // Phase 1: load snapshots, record per-IMCU checkpoint LSN
-  // imcu_id → checkpoint LSN (0 if no snapshot found)
-  std::unordered_map<uint32_t, uint64_t> checkpoint_lsn;
-
-  for (Imcu *imcu : imcus) {
-    if (!imcu) continue;
-    uint32_t iid = imcu->get_imcu_id();
-    auto snap_result = load_snapshot(imcu, generation);
-
-    if (snap_result.error == ErrorCode::CORRUPTION || snap_result.error == ErrorCode::IO_ERROR ||
-        snap_result.error == ErrorCode::CONFLICT) {
-      DBUG_PRINT("cu_recovery", ("IMCU %u snapshot load failed — recovery aborted", iid));
-      return {snap_result.error, 0};
-    }
-
-    if (snap_result.error == ErrorCode::NOT_FOUND && has_manifest) {
-      // A manifest that declares this IMCU CHECKPOINTED but whose snapshot file
-      // is missing is corruption, NOT a legitimate cold start.
-      for (const auto &e : manifest.imcus) {
-        if (e.imcu_id == iid && e.state == ManifestImcuState::CHECKPOINTED) {
-          DBUG_PRINT("cu_recovery", ("IMCU %u snapshot missing but manifest says CHECKPOINTED — corruption", iid));
-          return {ErrorCode::CORRUPTION, 0};
-        }
-      }
-    }
-
-    uint64_t lsn = snap_result.ok() ? snap_result.value : 0;
-    checkpoint_lsn[iid] = lsn;
-    DBUG_PRINT("cu_recovery", ("IMCU %u checkpoint_lsn=%llu", iid, (unsigned long long)lsn));
+  // Prepare all metadata/ranges before dispatch. No task can outlive plans or
+  // its destination IMCU; run() drains even when a task fails or throws.
+  std::vector<SnapshotLoad> plans(imcus.size());
+  for (size_t i = 0; i < imcus.size(); ++i) {
+    auto prepared = prepare_snapshot(imcus[i], generation, plans[i]);
+    if (!prepared.ok()) return {prepared.error, 0};
   }
+  auto loaded = load_snapshots(plans);
+  if (!loaded.ok()) return loaded;
 
   if (restored_generation) *restored_generation = generation;
-  return {ErrorCode::OK, 0};
+  return loaded;
 }
 
 }  // namespace Imcs

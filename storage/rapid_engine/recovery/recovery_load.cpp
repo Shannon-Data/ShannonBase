@@ -21,7 +21,7 @@
 
    Copyright (c) 2023, Shannon Data AI and/or its affiliates.
 
-   The fundmental code for imcs.
+   The fundmental code for recovery.
 */
 
 #include "storage/rapid_engine/recovery/recovery_load.h"

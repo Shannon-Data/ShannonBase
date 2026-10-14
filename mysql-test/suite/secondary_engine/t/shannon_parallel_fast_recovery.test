@@ -1,0 +1,71 @@
+# The same multi-IMCU native generation must survive inline, CU-parallel and
+# IMCU-parallel restore. Force task splitting on a small fixture to keep CI fast.
+--source include/have_debug.inc
+--source include/no_ps_protocol.inc
+CREATE DATABASE sh_parallel_recovery;
+USE sh_parallel_recovery;
+CREATE TABLE t (
+ id INT PRIMARY KEY,
+ code VARCHAR(32) COMMENT 'RAPID_COLUMN=ENCODING=SORTED',
+ note VARCHAR(128) COMMENT 'RAPID_COLUMN=ENCODING=VARLEN',
+ amount DECIMAL(12,2),
+ excluded INT NOT SECONDARY
+) CHARACTER SET utf8mb4 SECONDARY_ENGINE=rapid;
+INSERT INTO t VALUES
+ (1,'A','Alpha',12.34,10),(2,'A','',-45.67,20),
+ (3,NULL,NULL,NULL,30),(4,'B',REPEAT('x',100),0.00,40),
+ (5,'C','five',5.25,50),(6,'B','six',6.25,60),
+ (7,'D','seven',7.25,70),(8,'A','eight',8.25,80),
+ (9,'E','nine',9.25,90),(10,'C','ten',10.25,100),
+ (11,'F','eleven',11.25,110),(12,'B','twelve',12.25,120);
+ALTER TABLE t SECONDARY_LOAD;
+# First restart creates the durable native base if the initial load did not.
+--let $restart_parameters = restart: --rapid_reload_on_restart=ON --debug=d,rapid_finalize_small_imcus
+--source include/restart_mysqld.inc
+USE sh_parallel_recovery;
+--let $wait_condition = SELECT COUNT(*)=1 FROM performance_schema.rpd_table_id WHERE SCHEMA_NAME='sh_parallel_recovery' AND TABLE_NAME='t'
+--source include/wait_condition.inc
+--let $datadir = `SELECT @@datadir`
+--file_exists $datadir/rapid_snapshots/sh_parallel_recovery/t/checkpoints/checkpoint-1.manifest 60
+
+--echo # Small native snapshots select serial loading automatically
+--let $restart_parameters = restart: --rapid_reload_on_restart=ON --debug=d,rapid_finalize_small_imcus
+--source include/kill_and_restart_mysqld.inc
+--source suite/secondary_engine/include/assert_parallel_recovery.inc
+--let $assert_text = Small snapshots use inline loading
+--let $assert_select = Rapid native recovery sh_parallel_recovery.t: mode=serial .* success=1
+--source include/assert_grep.inc
+
+# Replay changes on top of shared dictionaries and NULL/varlen masks.
+SET use_secondary_engine=OFF;
+UPDATE t SET code='Z',note=REPEAT('z',100),amount=99.99 WHERE id=1;
+DELETE FROM t WHERE id=2;
+INSERT INTO t VALUES (13,'N','new',13.25,130);
+--echo # CU tasks use independent bounded readers
+--let $restart_parameters = restart: --rapid_reload_on_restart=ON --debug=d,rapid_finalize_small_imcus,rapid_recovery_parallel_cu
+--source include/kill_and_restart_mysqld.inc
+--source suite/secondary_engine/include/assert_parallel_recovery.inc
+--let $assert_text = CU parallel loading succeeds
+--let $assert_select = Rapid native recovery sh_parallel_recovery.t: mode=parallel granularity=CU .* success=1
+--source include/assert_grep.inc
+
+--echo # Multiple IMCUs use file-level tasks
+--let $restart_parameters = restart: --rapid_reload_on_restart=ON --debug=d,rapid_finalize_small_imcus,rapid_recovery_parallel_imcu
+--source include/kill_and_restart_mysqld.inc
+--source suite/secondary_engine/include/assert_parallel_recovery.inc
+--let $assert_text = IMCU parallel loading succeeds
+--let $assert_select = Rapid native recovery sh_parallel_recovery.t: mode=parallel granularity=IMCU .* success=1
+--source include/assert_grep.inc
+
+--echo # An exception drains workers and discards the partial native image
+--let $restart_parameters = restart: --rapid_reload_on_restart=ON --debug=d,rapid_finalize_small_imcus,rapid_recovery_parallel_cu,rapid_recovery_load_task_fail
+--source include/kill_and_restart_mysqld.inc
+USE sh_parallel_recovery;
+--let $wait_condition = SELECT CAST(VARIABLE_VALUE AS UNSIGNED)=1 FROM performance_schema.global_status WHERE VARIABLE_NAME='rapid_recovery_primary_reloads'
+--source include/wait_condition.inc
+--let $assert_text = Failed native tasks cannot publish a storage restore
+--let $assert_cond = [SELECT CAST(VARIABLE_VALUE AS UNSIGNED)=0 FROM performance_schema.global_status WHERE VARIABLE_NAME='rapid_recovery_storage_restores']
+--source include/assert.inc
+--let $assert_digest = SELECT GROUP_CONCAT(CONCAT_WS(':',id,IFNULL(HEX(code),'NULL'),IFNULL(HEX(note),'NULL'),IFNULL(CAST(amount AS CHAR),'NULL')) ORDER BY id SEPARATOR '|') FROM t
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+DROP DATABASE sh_parallel_recovery;

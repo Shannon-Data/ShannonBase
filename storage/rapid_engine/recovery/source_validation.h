@@ -21,10 +21,10 @@
 
    Copyright (c) 2023, Shannon Data AI and/or its affiliates.
 
-   The fundmental code for imcs.
+   The fundmental code for recovery.
 */
-#ifndef SHANNONBASE_SOURCE_RECOVERY_VALIDATION_H
-#define SHANNONBASE_SOURCE_RECOVERY_VALIDATION_H
+#ifndef __SHANNONBASE_SOURCE_RECOVERY_VALIDATION_H__
+#define __SHANNONBASE_SOURCE_RECOVERY_VALIDATION_H__
 
 #include <chrono>
 #include <memory>

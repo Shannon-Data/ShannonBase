@@ -19,12 +19,9 @@
    along with this program; if not, write to the Free Software
    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
 
-   The fundmental code for imcs. The chunk is used to store the data which
-   transfer from row-based format to column-based format.
-
    Copyright (c) 2023 - 2026, Shannon Data AI and/or its affiliates.
 
-   The fundmental code for imcs.
+   The fundmental code for recovery.
 */
 #ifndef __SHANNONBASE_NOTIFICATION_TRACKER_H__
 #define __SHANNONBASE_NOTIFICATION_TRACKER_H__
