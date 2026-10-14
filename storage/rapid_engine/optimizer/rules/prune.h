@@ -38,6 +38,7 @@ class Query_expression;
 class Query_block;
 class Item;
 class Item_func;
+struct TABLE;
 namespace ShannonBase {
 namespace Imcs {
 class RpdTable;
@@ -146,17 +147,12 @@ class StorageIndexPrune : public Rule {
   /**
    * Get all tables referenced by an item
    */
-  std::unordered_set<std::string> get_referenced_tables(Item *item);
+  std::unordered_set<TABLE *> get_referenced_tables(Item *item);
 
   /**
    * Get available tables in a plan subtree
    */
-  std::unordered_set<std::string> get_available_tables(const Plan &node);
-
-  /**
-   * Check if item contains aggregate function references
-   */
-  bool contains_aggregate_reference(Item *item);
+  std::unordered_set<TABLE *> get_available_tables(const Plan &node);
 };
 
 /**

@@ -148,20 +148,13 @@ void StorageIndexPrune::collect_scan_predicates(PlanNode *node,
       // Associate accumulated predicates with this scan
       if (!current_predicates.empty()) {
         // Filter predicates that reference this scan's table
-        std::string table_key;
-        if (scan->source_table) {
-          table_key =
-              std::string(scan->source_table->s->db.str) + "." + std::string(scan->source_table->s->table_name.str);
-        }
-
         for (auto *pred : current_predicates) {
           auto referenced = get_referenced_tables(pred);
 
           // Only include predicates that:
           // 1. Reference only this table, or
           // 2. Are constant expressions
-          bool applicable =
-              referenced.empty() || (referenced.size() == 1 && referenced.find(table_key) != referenced.end());
+          bool applicable = referenced.empty() || (referenced.size() == 1 && referenced.count(scan->source_table) != 0);
 
           if (applicable) {
             scan_predicates[scan].push_back(pred);
@@ -171,8 +164,16 @@ void StorageIndexPrune::collect_scan_predicates(PlanNode *node,
     } break;
     case PlanNode::Type::HASH_JOIN:
     case PlanNode::Type::NESTED_LOOP_JOIN: {
-      // For joins, predicates flow to both children
-      // But we need to partition them based on table references
+      // A second pruning pass must respect the same NULL-complementation
+      // and existence semantics as PredicatePushDown. Only INNER joins may
+      // inherit predicates from above; local child filters remain eligible.
+      if (!Utils::is_provably_inner_join(node)) {
+        for (auto &child : node->children) {
+          std::vector<Item *> local_predicates;
+          collect_scan_predicates(child.get(), scan_predicates, local_predicates);
+        }
+        break;
+      }
 
       auto left_tables = get_available_tables(node->children[0]);
       auto right_tables = get_available_tables(node->children[1]);
@@ -208,26 +209,18 @@ void StorageIndexPrune::collect_scan_predicates(PlanNode *node,
       collect_scan_predicates(node->children[0].get(), scan_predicates, left_predicates);
       collect_scan_predicates(node->children[1].get(), scan_predicates, right_predicates);
     } break;
-    case PlanNode::Type::LOCAL_AGGREGATE: {
-      // Predicates BEFORE aggregation can flow through
-      // Predicates AFTER aggregation (HAVING) cannot
-      std::vector<Item *> child_predicates;
-
-      for (auto *pred : current_predicates) {
-        // Only push down predicates that don't reference aggregates
-        if (!contains_aggregate_reference(pred)) {
-          child_predicates.push_back(pred);
-        }
-      }
-
+    case PlanNode::Type::SORT: {
+      // A full sort preserves the qualifying row multiset.
       for (auto &child : node->children) {
-        collect_scan_predicates(child.get(), scan_predicates, child_predicates);
+        collect_scan_predicates(child.get(), scan_predicates, current_predicates);
       }
     } break;
     default: {
-      // For other node types, predicates flow through to children
+      // LIMIT/TOP-N, aggregation, windows and native islands are semantic
+      // barriers. Still discover filters below them, with no inherited ones.
       for (auto &child : node->children) {
-        collect_scan_predicates(child.get(), scan_predicates, current_predicates);
+        std::vector<Item *> local_predicates;
+        collect_scan_predicates(child.get(), scan_predicates, local_predicates);
       }
     } break;
   }
@@ -700,8 +693,8 @@ void StorageIndexPrune::split_conjunctions(Item *condition, std::vector<Item *> 
 /**
  * Get all tables referenced by an item
  */
-std::unordered_set<std::string> StorageIndexPrune::get_referenced_tables(Item *item) {
-  std::unordered_set<std::string> tables;
+std::unordered_set<TABLE *> StorageIndexPrune::get_referenced_tables(Item *item) {
+  std::unordered_set<TABLE *> tables;
   if (!item) return tables;
 
   std::function<void(Item *)> collect_tables = [&](Item *it) {
@@ -709,9 +702,7 @@ std::unordered_set<std::string> StorageIndexPrune::get_referenced_tables(Item *i
     if (it->type() == Item::FIELD_ITEM) {
       auto *field_item = static_cast<Item_field *>(it);
       if (field_item->field && field_item->field->table) {
-        TABLE *table = field_item->field->table;
-        std::string key = std::string(table->s->db.str) + "." + std::string(table->s->table_name.str);
-        tables.insert(key);
+        tables.insert(field_item->field->table);
       }
       return;
     }
@@ -749,16 +740,14 @@ std::unordered_set<std::string> StorageIndexPrune::get_referenced_tables(Item *i
 /**
  * Get available tables in a plan subtree
  */
-std::unordered_set<std::string> StorageIndexPrune::get_available_tables(const Plan &node) {
-  std::unordered_set<std::string> tables;
+std::unordered_set<TABLE *> StorageIndexPrune::get_available_tables(const Plan &node) {
+  std::unordered_set<TABLE *> tables;
   if (!node) return tables;
 
   if (node->type() == PlanNode::Type::SCAN) {
     auto *scan = static_cast<ScanTable *>(node.get());
     if (scan->source_table) {
-      std::string key =
-          std::string(scan->source_table->s->db.str) + "." + std::string(scan->source_table->s->table_name.str);
-      tables.insert(key);
+      tables.insert(scan->source_table);
     }
   } else {
     for (const auto &child : node->children) {
@@ -767,43 +756,6 @@ std::unordered_set<std::string> StorageIndexPrune::get_available_tables(const Pl
     }
   }
   return tables;
-}
-
-/**
- * Check if item contains aggregate function references
- */
-bool StorageIndexPrune::contains_aggregate_reference(Item *item) {
-  if (!item) return false;
-
-  if (item->type() == Item::SUM_FUNC_ITEM) return true;
-
-  // Item_cond stores its operands in its own List<Item>; Item_func::args is
-  // empty for AND/OR, so walking it as an Item_func reported every compound
-  // condition as aggregate-free and let HAVING predicates flow toward scans.
-  if (item->type() == Item::COND_ITEM) {
-    auto *cond = down_cast<Item_cond *>(item);
-    List_iterator<Item> li(*cond->argument_list());
-    Item *child;
-    while ((child = li++)) {
-      if (contains_aggregate_reference(child)) return true;
-    }
-    return false;
-  }
-
-  if (item->type() == Item::FUNC_ITEM) {
-    auto *func = down_cast<Item_func *>(item);
-    for (uint i = 0; i < func->argument_count(); i++) {
-      if (contains_aggregate_reference(func->arguments()[i])) return true;
-    }
-  }
-
-  if (item->type() == Item::REF_ITEM) {
-    auto *ref = static_cast<Item_ref *>(item);
-    if (ref->ref_item()) {
-      return contains_aggregate_reference(ref->ref_item());
-    }
-  }
-  return false;
 }
 
 void ProjectionPruning::apply(Plan &root) {

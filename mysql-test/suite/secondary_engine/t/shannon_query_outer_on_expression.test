@@ -1,0 +1,45 @@
+# Issue #947. The assertion must fail even under --record on the broken engine.
+# Keep the actual SELECT shape: wrapping in COUNT/GROUP_CONCAT can hide the bug.
+--source suite/secondary_engine/include/ga_wrong_results_setup.inc
+--source include/elide_costs.inc
+--let $ga_mode=3
+while ($ga_mode) {
+  SET optimizer_switch='hypergraph_optimizer=off';
+  SET use_secondary_engine=OFF;
+  if ($ga_mode == 2) {
+    SET use_secondary_engine=FORCED;
+  }
+  if ($ga_mode == 1) {
+    SET use_secondary_engine=FORCED;
+    SET optimizer_switch='hypergraph_optimizer=on';
+  }
+  --let $ga_query=SELECT a.id AS left_id,b.id AS right_id FROM ga_a a IGNORE INDEX(PRIMARY) LEFT JOIN ga_a b IGNORE INDEX(PRIMARY) ON a.id+10=b.id WHERE a.v IS NULL ORDER BY a.id
+  --eval $ga_query
+  --let $assert_query = $ga_query
+  --let $assert_ordered = 1
+  --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+  --let $ga_value=query_get_value("$ga_query", left_id, 1)
+  if ($ga_value != 1) {
+    --echo Unexpected row: $ga_value; expected 1 (mode $ga_mode)
+    --die Issue 947: Rapid result differs from InnoDB
+  }
+  if ($ga_mode == 1) {
+    --replace_regex $elide_costs_and_rows
+    --eval EXPLAIN FORMAT=TREE $ga_query
+  }
+  # A genuine ON residual rejects matches, not the NULL-complemented row.
+  SELECT a.id,b.id FROM ga_a a IGNORE INDEX(PRIMARY)
+    LEFT JOIN ga_b b IGNORE INDEX(PRIMARY) ON a.id=b.id AND b.v<0
+    ORDER BY a.id;
+  --let $assert_query = SELECT a.id,b.id FROM ga_a a IGNORE INDEX(PRIMARY) LEFT JOIN ga_b b IGNORE INDEX(PRIMARY) ON a.id=b.id AND b.v<0 ORDER BY a.id
+  --let $assert_ordered = 1
+  --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+  SELECT a.id,b.id FROM ga_a a IGNORE INDEX(PRIMARY)
+    LEFT JOIN ga_b b IGNORE INDEX(PRIMARY) ON a.id+1=b.id
+    ORDER BY a.id;
+  --let $assert_query = SELECT a.id,b.id FROM ga_a a IGNORE INDEX(PRIMARY) LEFT JOIN ga_b b IGNORE INDEX(PRIMARY) ON a.id+1=b.id ORDER BY a.id
+  --let $assert_ordered = 1
+  --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+  --dec $ga_mode
+}
+--source suite/secondary_engine/include/ga_wrong_results_cleanup.inc

@@ -69,50 +69,104 @@ SET SESSION use_secondary_engine = FORCED;
 
 --echo # Bounds that encode exactly into the column: the packed comparison.
 SELECT COUNT(*), SUM(i) FROM t1 WHERE d = 0.05;
+--let $assert_query = SELECT COUNT(*), SUM(i) FROM t1 WHERE d = 0.05
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT COUNT(*), SUM(i) FROM t1 WHERE d <> 0.05;
+--let $assert_query = SELECT COUNT(*), SUM(i) FROM t1 WHERE d <> 0.05
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT COUNT(*), SUM(i) FROM t1 WHERE d < 24;
+--let $assert_query = SELECT COUNT(*), SUM(i) FROM t1 WHERE d < 24
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT COUNT(*), SUM(i) FROM t1 WHERE d <= 0.07;
+--let $assert_query = SELECT COUNT(*), SUM(i) FROM t1 WHERE d <= 0.07
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT COUNT(*), SUM(i) FROM t1 WHERE d > -9999.99;
+--let $assert_query = SELECT COUNT(*), SUM(i) FROM t1 WHERE d > -9999.99
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT COUNT(*), SUM(i) FROM t1 WHERE d >= 0.00;
+--let $assert_query = SELECT COUNT(*), SUM(i) FROM t1 WHERE d >= 0.00
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT COUNT(*), SUM(i) FROM t1 WHERE d BETWEEN 0.05 AND 0.07;
+--let $assert_query = SELECT COUNT(*), SUM(i) FROM t1 WHERE d BETWEEN 0.05 AND 0.07
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT COUNT(*), SUM(i) FROM t1 WHERE d NOT BETWEEN 0.05 AND 0.07;
+--let $assert_query = SELECT COUNT(*), SUM(i) FROM t1 WHERE d NOT BETWEEN 0.05 AND 0.07
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 --echo # Same value, trailing zero: the packed form is identical.
 SELECT COUNT(*), SUM(i) FROM t1 WHERE d = 0.050;
+--let $assert_query = SELECT COUNT(*), SUM(i) FROM t1 WHERE d = 0.050
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 --echo # Integer bound against a DECIMAL column.
 SELECT COUNT(*), SUM(i) FROM t1 WHERE d = 24;
+--let $assert_query = SELECT COUNT(*), SUM(i) FROM t1 WHERE d = 24
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo # Bounds the column cannot represent. The server folds these into exact
 --echo # ones before pushdown (d < 0.055 becomes d <= 0.05), so they arrive here
 --echo # already exact. BETWEEN is not folded that way and is bug #890, so it is
 --echo # left out.
 SELECT COUNT(*), SUM(i) FROM t1 WHERE d < 0.055;
+--let $assert_query = SELECT COUNT(*), SUM(i) FROM t1 WHERE d < 0.055
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT COUNT(*), SUM(i) FROM t1 WHERE d > 0.055;
+--let $assert_query = SELECT COUNT(*), SUM(i) FROM t1 WHERE d > 0.055
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT COUNT(*), SUM(i) FROM t1 WHERE d < 999999999999999999.99;
+--let $assert_query = SELECT COUNT(*), SUM(i) FROM t1 WHERE d < 999999999999999999.99
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo # NULLs.
 SELECT COUNT(*), SUM(i) FROM t1 WHERE dn IS NULL;
+--let $assert_query = SELECT COUNT(*), SUM(i) FROM t1 WHERE dn IS NULL
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT COUNT(*), SUM(i) FROM t1 WHERE dn IS NOT NULL;
+--let $assert_query = SELECT COUNT(*), SUM(i) FROM t1 WHERE dn IS NOT NULL
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT COUNT(*), SUM(i) FROM t1 WHERE dn < 0.0000;
+--let $assert_query = SELECT COUNT(*), SUM(i) FROM t1 WHERE dn < 0.0000
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT COUNT(*), SUM(i) FROM t1 WHERE dn BETWEEN -1.2345 AND 0.0550;
+--let $assert_query = SELECT COUNT(*), SUM(i) FROM t1 WHERE dn BETWEEN -1.2345 AND 0.0550
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo # Wider than double holds exactly. A predicate on such a column is not
 --echo # pushed into the Rapid scan today -- it runs as a Filter above it -- so
 --echo # this fixes the answers rather than the path, and guards the packed
 --echo # comparison for when that gate is relaxed.
 SELECT COUNT(*), SUM(i) FROM t1 WHERE w > 0.0000000000;
+--let $assert_query = SELECT COUNT(*), SUM(i) FROM t1 WHERE w > 0.0000000000
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT COUNT(*), SUM(i) FROM t1 WHERE w = 12345678901234567890.1234567890;
+--let $assert_query = SELECT COUNT(*), SUM(i) FROM t1 WHERE w = 12345678901234567890.1234567890
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT COUNT(*), SUM(i) FROM t1 WHERE w < -12345678901234567890.1234567889;
+--let $assert_query = SELECT COUNT(*), SUM(i) FROM t1 WHERE w < -12345678901234567890.1234567889
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT COUNT(*), SUM(i) FROM t1 WHERE w BETWEEN 0.0000000000 AND 0.0000000001;
+--let $assert_query = SELECT COUNT(*), SUM(i) FROM t1 WHERE w BETWEEN 0.0000000000 AND 0.0000000001
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo # UNSIGNED and scale 0.
 SELECT COUNT(*), SUM(i) FROM t1 WHERE u >= 0.50;
+--let $assert_query = SELECT COUNT(*), SUM(i) FROM t1 WHERE u >= 0.50
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT COUNT(*), SUM(i) FROM t1 WHERE u < 0.50;
+--let $assert_query = SELECT COUNT(*), SUM(i) FROM t1 WHERE u < 0.50
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT COUNT(*), SUM(i) FROM t1 WHERE s = 0;
+--let $assert_query = SELECT COUNT(*), SUM(i) FROM t1 WHERE s = 0
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT COUNT(*), SUM(i) FROM t1 WHERE s < 0;
+--let $assert_query = SELECT COUNT(*), SUM(i) FROM t1 WHERE s < 0
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT COUNT(*), SUM(i) FROM t1 WHERE s BETWEEN -9999 AND 0;
+--let $assert_query = SELECT COUNT(*), SUM(i) FROM t1 WHERE s BETWEEN -9999 AND 0
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo # IN is not a packed shape; it must still agree.
 SELECT COUNT(*), SUM(i) FROM t1 WHERE d IN (0.05, 0.07, 24.00);
+--let $assert_query = SELECT COUNT(*), SUM(i) FROM t1 WHERE d IN (0.05, 0.07, 24.00)
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo #
 --echo # Arm 2 of 2: InnoDB computes the same rows.

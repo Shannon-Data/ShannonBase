@@ -47,12 +47,16 @@ SET SESSION optimizer_switch='hypergraph_optimizer=off';
 --enable_warnings
 # con2 does NOT see the uncommitted change
 SELECT id, OCTET_LENGTH(b), d, ts, JSON_EXTRACT(j, '$.x'), name FROM t_types WHERE id = 1;
+--let $assert_query = SELECT id, OCTET_LENGTH(b), d, ts, JSON_EXTRACT(j, '$.x'), name FROM t_types WHERE id = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --connection con1
 ROLLBACK;
 SET SESSION USE_SECONDARY_ENGINE=FORCED;
 # after ROLLBACK, change gone
 SELECT id, OCTET_LENGTH(b), d, ts, JSON_EXTRACT(j, '$.x'), name FROM t_types WHERE id = 1;
+--let $assert_query = SELECT id, OCTET_LENGTH(b), d, ts, JSON_EXTRACT(j, '$.x'), name FROM t_types WHERE id = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 # Now test COMMIT path
 --connection con1
@@ -65,6 +69,8 @@ COMMIT;
 SET SESSION USE_SECONDARY_ENGINE=FORCED;
 # after COMMIT, change visible
 SELECT id, OCTET_LENGTH(b), d, ts, JSON_EXTRACT(j, '$.y'), name FROM t_types WHERE id = 2;
+--let $assert_query = SELECT id, OCTET_LENGTH(b), d, ts, JSON_EXTRACT(j, '$.y'), name FROM t_types WHERE id = 2
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo # ----- the same committed state under the hypergraph optimizer -----
 --echo # Visibility is decided by the engine's MVCC, not by the planner, so what
@@ -77,7 +83,11 @@ SELECT id, OCTET_LENGTH(b), d, ts, JSON_EXTRACT(j, '$.y'), name FROM t_types WHE
 SET SESSION optimizer_switch='hypergraph_optimizer=on';
 --enable_warnings
 SELECT id, OCTET_LENGTH(b), d, ts, JSON_EXTRACT(j, '$.x'), name FROM t_types WHERE id = 1;
+--let $assert_query = SELECT id, OCTET_LENGTH(b), d, ts, JSON_EXTRACT(j, '$.x'), name FROM t_types WHERE id = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT id, OCTET_LENGTH(b), d, ts, JSON_EXTRACT(j, '$.y'), name FROM t_types WHERE id = 2;
+--let $assert_query = SELECT id, OCTET_LENGTH(b), d, ts, JSON_EXTRACT(j, '$.y'), name FROM t_types WHERE id = 2
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SET SESSION optimizer_switch = default;
 
 # Cleanup

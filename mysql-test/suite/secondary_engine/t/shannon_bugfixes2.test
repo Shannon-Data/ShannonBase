@@ -78,9 +78,21 @@ eval $col_eq_col_mixed;
 --echo #
 set use_secondary_engine=forced;
 eval $strings_through_join;
+--let $assert_query = $strings_through_join
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 eval $blob_through_join;
+--let $assert_query = $blob_through_join
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 eval $col_eq_col;
+--let $assert_query = $col_eq_col
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 eval $col_eq_col_mixed;
+--let $assert_query = $col_eq_col_mixed
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo #
 --echo # ---- Rapid, hypergraph optimizer ----
@@ -89,9 +101,21 @@ eval $col_eq_col_mixed;
 set optimizer_switch='hypergraph_optimizer=on';
 --enable_warnings
 eval $strings_through_join;
+--let $assert_query = $strings_through_join
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 eval $blob_through_join;
+--let $assert_query = $blob_through_join
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 eval $col_eq_col;
+--let $assert_query = $col_eq_col
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 eval $col_eq_col_mixed;
+--let $assert_query = $col_eq_col_mixed
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 set optimizer_switch='hypergraph_optimizer=off';
 
 set use_secondary_engine=off;

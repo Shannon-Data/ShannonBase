@@ -137,4 +137,20 @@ UNION ALL
 SELECT 'high_spill', COUNT(*) FROM
   ((SELECT * FROM result_high_spill EXCEPT SELECT * FROM result_high_innodb)
     UNION ALL (SELECT * FROM result_high_innodb EXCEPT SELECT * FROM result_high_spill)) AS d;
+--let $assert_reference_table = result_low_innodb
+--let $assert_actual_table = result_low_batch
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_reference_table = result_low_innodb
+--let $assert_actual_table = result_low_row
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_reference_table = result_high_innodb
+--let $assert_actual_table = result_high_batch
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_reference_table = result_high_innodb
+--let $assert_actual_table = result_high_row
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_reference_table = result_high_innodb
+--let $assert_actual_table = result_high_spill
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+
 DROP DATABASE sh_agg_dict_bench;

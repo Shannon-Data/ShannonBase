@@ -14,12 +14,18 @@ DELETE FROM cb WHERE id=2;
 SET debug='-d,rapid_notification_bad_alloc';
 SET use_secondary_engine=FORCED;
 SELECT id,u,v,d,n,s,LENGTH(b) FROM cb ORDER BY id;
+--let $assert_query = SELECT id,u,v,d,n,s,LENGTH(b) FROM cb ORDER BY id
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SET use_secondary_engine=OFF;
 INSERT IGNORE INTO cb VALUES (1,9,999,0,NULL,'ignored','');
 INSERT INTO cb VALUES (1,1,12,1,NULL,'duplicate','') ON DUPLICATE KEY UPDATE v=12;
 REPLACE INTO cb VALUES (3,1,40,4,NULL,'replaced','blob');
 SET use_secondary_engine=FORCED;
 SELECT id,u,v,d,n,s,LENGTH(b) FROM cb ORDER BY id;
+--let $assert_query = SELECT id,u,v,d,n,s,LENGTH(b) FROM cb ORDER BY id
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SET use_secondary_engine=OFF;
 BEGIN;
 UPDATE cb SET v=99 WHERE id=3;
@@ -33,6 +39,8 @@ ROLLBACK TO SAVEPOINT kept;
 COMMIT;
 SET use_secondary_engine=FORCED;
 SELECT COUNT(*),SUM(v) FROM cb;
+--let $assert_query = SELECT COUNT(*),SUM(v) FROM cb
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 # Queries inside multi-statement transactions follow HeatWave eligibility.
 BEGIN;
 --error ER_SECONDARY_ENGINE
@@ -41,6 +49,8 @@ SHOW WARNINGS;
 SET use_secondary_engine=ON;
 UPDATE cb SET v=42 WHERE id=3;
 SELECT SUM(v) FROM cb;
+--let $assert_query = SELECT SUM(v) FROM cb
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 ROLLBACK;
 SET autocommit=0;
 SET use_secondary_engine=FORCED;
@@ -61,7 +71,12 @@ DELETE FROM cp WHERE id=2;
 COMMIT;
 SET use_secondary_engine=FORCED;
 SELECT GROUP_CONCAT(CONCAT(id,':',v) ORDER BY id) FROM cp;
+--let $assert_query = SELECT GROUP_CONCAT(CONCAT(id,':',v) ORDER BY id) FROM cp
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT SUM(cb.v),SUM(cp.v) FROM cb JOIN cp ON cb.id>0 AND cp.id>0;
+--let $assert_query = SELECT SUM(cb.v),SUM(cp.v) FROM cb JOIN cp ON cb.id>0 AND cp.id>0
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SET use_secondary_engine=OFF;
 # Reuse MySQL's compressed transaction decoder.
 SET binlog_transaction_compression=ON;
@@ -71,7 +86,11 @@ FLUSH BINARY LOGS;
 UPDATE cp SET v=11 WHERE id=1;
 SET use_secondary_engine=FORCED;
 SELECT v,LENGTH(b) FROM cb;
+--let $assert_query = SELECT v,LENGTH(b) FROM cb
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT COUNT(*),SUM(v) FROM cp;
+--let $assert_query = SELECT COUNT(*),SUM(v) FROM cp
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SET use_secondary_engine=OFF;
 --error ER_SECONDARY_ENGINE
 ALTER TABLE cp SECONDARY_UNLOAD PARTITION (p0);

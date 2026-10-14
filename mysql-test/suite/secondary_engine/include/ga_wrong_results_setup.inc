@@ -1,0 +1,11 @@
+# Issue #947: deterministic scan inputs shared by the three regression guards.
+SET use_secondary_engine=OFF;
+CREATE TABLE ga_a(id INT PRIMARY KEY, v INT) SECONDARY_ENGINE=rapid;
+CREATE TABLE ga_b(id INT PRIMARY KEY, v INT) SECONDARY_ENGINE=rapid;
+CREATE TABLE ga_s(id INT PRIMARY KEY, s VARCHAR(20)) SECONDARY_ENGINE=rapid;
+INSERT INTO ga_a VALUES(1,NULL),(2,20),(3,30);
+INSERT INTO ga_b VALUES(1,100),(2,NULL);
+INSERT INTO ga_s VALUES(1,'1'),(2,'01'),(3,'1.0'),(4,'2');
+ALTER TABLE ga_a SECONDARY_LOAD;
+ALTER TABLE ga_b SECONDARY_LOAD;
+ALTER TABLE ga_s SECONDARY_LOAD;

@@ -26,8 +26,12 @@ SHOW WARNINGS;
 SET use_secondary_engine=ON;
 SET secondary_engine_cost_threshold=0;
 SELECT SUM(v) FROM ri;
+--let $assert_query = SELECT SUM(v) FROM ri
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 PREPARE ri_stmt FROM 'SELECT SUM(v) FROM ri';
 EXECUTE ri_stmt;
+--let $assert_query = EXECUTE ri_stmt
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 DEALLOCATE PREPARE ri_stmt;
 SET use_secondary_engine=OFF;
 SELECT VARIABLE_VALUE LIKE 'AP active=1 %' AS held FROM performance_schema.global_status WHERE VARIABLE_NAME='rapid_resource_status';
@@ -69,6 +73,8 @@ DEALLOCATE PREPARE ri_kill_stmt;
 connection default;
 SET use_secondary_engine=FORCED;
 SELECT SUM(v) FROM ri;
+--let $assert_query = SELECT SUM(v) FROM ri
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SET use_secondary_engine=OFF;
 SELECT VARIABLE_VALUE LIKE 'AP active=0 %' AS kill_released FROM performance_schema.global_status WHERE VARIABLE_NAME='rapid_resource_status';
 ALTER TABLE ri SECONDARY_UNLOAD;

@@ -79,6 +79,9 @@ where (a is not null or b is not null)
 group by grp
 having count(*) >= 2
 order by grp;
+--let $assert_query = select grp, count(*) as c, sum(case when a is null then 0 else a end) as sum_a, sum(case when b is null then 0 else b end) as sum_b, avg(case when a is null and b is null then 0 else coalesce(a, b, 0) end) as avg_ab, max(coalesce(a, b, 0)) as max_ab, sum(v) as sum_v from eagg where (a is not null or b is not null) group by grp having count(*) >= 2 order by grp
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 select grp,
        count(*) as c,
@@ -89,6 +92,9 @@ select grp,
 from eagg
 group by grp
 order by grp;
+--let $assert_query = select grp, count(*) as c, sum(case when a is null then 1 else 0 end) as null_a, sum(case when b is null then 1 else 0 end) as null_b, min(coalesce(a, b, 0)) as min_ab, max(coalesce(a, b, 0)) as max_ab from eagg group by grp order by grp
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo # ===== Rapid (hypergraph optimizer) =====
 --disable_warnings
@@ -106,6 +112,9 @@ where (a is not null or b is not null)
 group by grp
 having count(*) >= 2
 order by grp;
+--let $assert_query = select grp, count(*) as c, sum(case when a is null then 0 else a end) as sum_a, sum(case when b is null then 0 else b end) as sum_b, avg(case when a is null and b is null then 0 else coalesce(a, b, 0) end) as avg_ab, max(coalesce(a, b, 0)) as max_ab, sum(v) as sum_v from eagg where (a is not null or b is not null) group by grp having count(*) >= 2 order by grp
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 select grp,
        count(*) as c,
@@ -116,6 +125,9 @@ select grp,
 from eagg
 group by grp
 order by grp;
+--let $assert_query = select grp, count(*) as c, sum(case when a is null then 1 else 0 end) as null_a, sum(case when b is null then 1 else 0 end) as null_b, min(coalesce(a, b, 0)) as min_ab, max(coalesce(a, b, 0)) as max_ab from eagg group by grp order by grp
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 set session optimizer_switch = default;
 

@@ -50,28 +50,38 @@ CALL insert_into_tt1();
 --connection connection_1
 --sleep 1
 select count(score) from tt1;
+--let $assert_query = select count(score) from tt1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo #[conn_2]
 --connection connection_2
 update tt1 set gender='M';
 --sleep 1
 select count(*) from tt1 where gender ='M';
+--let $assert_query = select count(*) from tt1 where gender ='M'
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo #[conn_1]
 --connection connection_1
 --sleep 1
 select count(score) from tt1 where gender ='M';
+--let $assert_query = select count(score) from tt1 where gender ='M'
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo #[conn_2]
 --connection connection_2
 delete from tt1;
 --sleep 1
 select * from tt1;
+--let $assert_query = select * from tt1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo #[conn_1]
 --connection connection_1
 --sleep 1
 select * from tt1;
+--let $assert_query = select * from tt1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo #[conn_1]
 --connection connection_1

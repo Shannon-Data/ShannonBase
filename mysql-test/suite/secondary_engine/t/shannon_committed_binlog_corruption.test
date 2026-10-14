@@ -17,6 +17,8 @@ SELECT SUM(v) FROM cb_corrupt;
 SHOW WARNINGS;
 SET use_secondary_engine=ON;
 SELECT SUM(v) FROM cb_corrupt;
+--let $assert_query = SELECT SUM(v) FROM cb_corrupt
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 # Restore the byte so the server can subsequently restart normally.
 --exec python3 -c "from pathlib import Path; p=Path('$cb_dir$cb_file'); f=p.open('r+b'); f.seek(20); b=f.read(1); f.seek(20); f.write(bytes([b[0]^1])); f.close()"
 SET use_secondary_engine=OFF;
@@ -24,6 +26,8 @@ ALTER TABLE cb_corrupt SECONDARY_UNLOAD;
 ALTER TABLE cb_corrupt SECONDARY_LOAD;
 SET use_secondary_engine=FORCED;
 SELECT SUM(v) FROM cb_corrupt;
+--let $assert_query = SELECT SUM(v) FROM cb_corrupt
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SET use_secondary_engine=OFF;
 ALTER TABLE cb_corrupt SECONDARY_UNLOAD;
 DROP TABLE cb_corrupt;

@@ -46,6 +46,8 @@ ALTER TABLE t SECONDARY_UNLOAD;
 ALTER TABLE t SECONDARY_LOAD;
 SET use_secondary_engine=FORCED;
 SELECT COUNT(*),SUM(v) FROM t;
+--let $assert_query = SELECT COUNT(*),SUM(v) FROM t
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SET use_secondary_engine=OFF;
 ALTER TABLE t SECONDARY_UNLOAD;
 DROP DATABASE ri_pool_fail;

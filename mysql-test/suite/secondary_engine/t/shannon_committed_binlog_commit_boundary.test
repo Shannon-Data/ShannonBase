@@ -14,8 +14,18 @@ SET DEBUG_SYNC='before_call_after_commit_observer SIGNAL commit_hook_waiting WAI
 SET DEBUG_SYNC='now WAIT_FOR commit_hook_waiting';
 # Binlog bytes and the primary effect are present, but COMMIT has not returned.
 SELECT SUM(v) FROM cb_boundary;
+--let $boundary_primary = `SELECT SUM(v) FROM cb_boundary`
 SET use_secondary_engine=FORCED;
 SELECT SUM(v) FROM cb_boundary;
+# The primary effect is visible while publication is deliberately paused.
+# These overlapping reads have different expected publication boundaries.
+--let $boundary_rapid = `SELECT SUM(v) FROM cb_boundary`
+if ($boundary_primary != 20) {
+  --die Paused commit observer hid the already visible primary effect
+}
+if ($boundary_rapid != 10) {
+  --die Paused commit observer published Rapid before the callback completed
+}
 SET DEBUG_SYNC='now SIGNAL release_commit_hook';
 --connection writer
 --reap
@@ -23,6 +33,8 @@ SET DEBUG_SYNC='RESET';
 --disconnect writer
 --connection default
 SELECT SUM(v) FROM cb_boundary;
+--let $assert_query = SELECT SUM(v) FROM cb_boundary
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SET use_secondary_engine=OFF;
 ALTER TABLE cb_boundary SECONDARY_UNLOAD;
 DROP TABLE cb_boundary;

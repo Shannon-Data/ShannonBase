@@ -1,0 +1,53 @@
+# Issue The assertion must fail even under --record on the broken engine.
+# Keep the actual SELECT shape: wrapping in COUNT/GROUP_CONCAT can hide the bug.
+--source suite/secondary_engine/include/ga_wrong_results_setup.inc
+--source include/elide_costs.inc
+--let $ga_mode=3
+while ($ga_mode) {
+  SET optimizer_switch='hypergraph_optimizer=off';
+  SET use_secondary_engine=OFF;
+  if ($ga_mode == 2) {
+    SET use_secondary_engine=FORCED;
+  }
+  if ($ga_mode == 1) {
+    SET use_secondary_engine=FORCED;
+    SET optimizer_switch='hypergraph_optimizer=on';
+  }
+  --let $ga_query=SELECT id,s FROM ga_s WHERE s=1 ORDER BY id
+  --eval $ga_query
+  --let $ga_value=query_get_value("$ga_query", id, 3)
+  if ($ga_value != 3) {
+    --echo Unexpected row: $ga_value; expected 3 (mode $ga_mode)
+    --die Issue 947: Rapid result differs from InnoDB
+  }
+  if ($ga_mode == 1) {
+    --replace_regex $elide_costs_and_rows
+    --eval EXPLAIN FORMAT=TREE $ga_query
+  }
+  # Distinct dictionary IDs may represent strings with the same numeric value.
+  # Check operand reversal, decimal/real constants, inequality and the safe
+  # string-equality path (which must keep distinguishing '1' from '01').
+  SELECT id,s FROM ga_s WHERE 1=s ORDER BY id;
+  SELECT id,s FROM ga_s WHERE s=1.0 ORDER BY id;
+  SELECT id,s FROM ga_s WHERE s=1e0 ORDER BY id;
+  SELECT id,s FROM ga_s WHERE s<>1 ORDER BY id;
+  SELECT id,s FROM ga_s WHERE s='01' ORDER BY id;
+  SELECT id,s FROM ga_s WHERE s='1' ORDER BY id;
+  if ($ga_mode == 1) {
+    # Guard that safe dictionary-backed string equality still reaches the scan.
+    --replace_regex $elide_costs_and_rows
+    EXPLAIN FORMAT=TREE SELECT id,s FROM ga_s WHERE s='01' ORDER BY id;
+  }
+  --dec $ga_mode
+}
+# New dictionary entries arriving through change propagation must have the
+# same SQL comparison semantics as entries present at SECONDARY_LOAD.
+SET use_secondary_engine=OFF;
+INSERT INTO ga_s VALUES(5,'1e0'),(6,NULL),(7,' 1 ');
+--let $assert_digest=SELECT CONCAT(COUNT(*),':',GROUP_CONCAT(id ORDER BY id)) FROM ga_s WHERE s=1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $ga_expected=5:1,2,3,5,7
+if ($_armi_innodb != $ga_expected) {
+  --die Unexpected primary result for propagated dictionary values
+}
+--source suite/secondary_engine/include/ga_wrong_results_cleanup.inc

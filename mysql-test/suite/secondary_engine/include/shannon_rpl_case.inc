@@ -50,6 +50,9 @@ if ($replica_enabled)
   --echo # Replica Rapid result
   SET use_secondary_engine=FORCED;
   SELECT id,v FROM rpl_rapid ORDER BY id;
+  --let $assert_query = SELECT id,v FROM rpl_rapid ORDER BY id
+  --let $assert_ordered = 1
+  --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
   --let $actual= `SELECT COUNT(*)=3 AND SUM(v)=98 AND SUM(id)=9 FROM rpl_rapid`
   if (!$actual)
   {
@@ -65,6 +68,9 @@ if ($source_enabled)
   --echo # Source Rapid result
   SET use_secondary_engine=FORCED;
   SELECT id,v FROM rpl_rapid ORDER BY id;
+  --let $assert_query = SELECT id,v FROM rpl_rapid ORDER BY id
+  --let $assert_ordered = 1
+  --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
   --let $actual= `SELECT COUNT(*)=3 AND SUM(v)=98 AND SUM(id)=9 FROM rpl_rapid`
   if (!$actual)
   {

@@ -49,7 +49,7 @@ ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) FROM wnd;
 #
 SELECT COUNT(*) AS rows_returned,
 MIN(s >= 0.0) AS all_non_negative,
-MAX(s < 4.0) AS all_below_partition_size
+MIN(s < 4.0) AS all_below_partition_size
 FROM (SELECT SUM(RAND()) OVER (PARTITION BY p ORDER BY o) AS s FROM wnd) d;
 rows_returned	all_non_negative	all_below_partition_size
 8	1	1

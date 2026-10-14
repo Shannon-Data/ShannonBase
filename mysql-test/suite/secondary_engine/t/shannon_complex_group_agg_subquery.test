@@ -103,6 +103,9 @@ group by grp
 having count(*) >= 2
    and avg(coalesce(a, b, 0)) > 1
 order by grp;
+--let $assert_query = select grp, count(*) as c, sum(case when a is null then 0 else a end) as sum_a, sum(case when b is null then 0 else b end) as sum_b, avg(coalesce(a, b, 0)) as avg_ab, max(coalesce(a, b, 0)) as max_ab, min(coalesce(a, b, 0)) as min_ab from cagg where d in (1,2) group by grp having count(*) >= 2 and avg(coalesce(a, b, 0)) > 1 order by grp
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 select *
 from (
@@ -118,6 +121,9 @@ from (
 ) q
 where q.avg_ab >= 2 and q.c >= 2
 order by grp;
+--let $assert_query = select * from ( select grp, count(*) as c, sum(case when a is null then 1 else 0 end) as null_a, sum(case when b is null then 1 else 0 end) as null_b, avg(coalesce(a, b, 0)) as avg_ab, max(coalesce(a, b, 0)) as max_ab from cagg where d >= 1 group by grp ) q where q.avg_ab >= 2 and q.c >= 2 order by grp
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 select grp,
        count(*) as c,
@@ -129,6 +135,9 @@ group by grp
 having sum(case when coalesce(a,b,0) > 0 then 1 else 0 end) >= 2
    and max(case when a is null and b is null then 1 else 0 end) <= 1
 order by grp;
+--let $assert_query = select grp, count(*) as c, sum(case when coalesce(a,b,0) > 0 then 1 else 0 end) as pos_cnt, max(case when a is null and b is null then 1 else 0 end) as both_null_flag from cagg where c is not null group by grp having sum(case when coalesce(a,b,0) > 0 then 1 else 0 end) >= 2 and max(case when a is null and b is null then 1 else 0 end) <= 1 order by grp
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo # ===== Rapid (hypergraph optimizer) =====
 --disable_warnings
@@ -147,6 +156,9 @@ group by grp
 having count(*) >= 2
    and avg(coalesce(a, b, 0)) > 1
 order by grp;
+--let $assert_query = select grp, count(*) as c, sum(case when a is null then 0 else a end) as sum_a, sum(case when b is null then 0 else b end) as sum_b, avg(coalesce(a, b, 0)) as avg_ab, max(coalesce(a, b, 0)) as max_ab, min(coalesce(a, b, 0)) as min_ab from cagg where d in (1,2) group by grp having count(*) >= 2 and avg(coalesce(a, b, 0)) > 1 order by grp
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 select *
 from (
@@ -162,6 +174,9 @@ from (
 ) q
 where q.avg_ab >= 2 and q.c >= 2
 order by grp;
+--let $assert_query = select * from ( select grp, count(*) as c, sum(case when a is null then 1 else 0 end) as null_a, sum(case when b is null then 1 else 0 end) as null_b, avg(coalesce(a, b, 0)) as avg_ab, max(coalesce(a, b, 0)) as max_ab from cagg where d >= 1 group by grp ) q where q.avg_ab >= 2 and q.c >= 2 order by grp
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 select grp,
        count(*) as c,
@@ -173,6 +188,9 @@ group by grp
 having sum(case when coalesce(a,b,0) > 0 then 1 else 0 end) >= 2
    and max(case when a is null and b is null then 1 else 0 end) <= 1
 order by grp;
+--let $assert_query = select grp, count(*) as c, sum(case when coalesce(a,b,0) > 0 then 1 else 0 end) as pos_cnt, max(case when a is null and b is null then 1 else 0 end) as both_null_flag from cagg where c is not null group by grp having sum(case when coalesce(a,b,0) > 0 then 1 else 0 end) >= 2 and max(case when a is null and b is null then 1 else 0 end) <= 1 order by grp
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 set session optimizer_switch = default;
 

@@ -71,6 +71,9 @@ select id,p,o,v,
 from wnd
 where (v is not null or o is null)
 order by p, id;
+--let $assert_query = select id,p,o,v, rank() over (partition by p order by o) as rnk, dense_rank() over (partition by p order by o) as drnk, sum(v) over (partition by p order by o rows between unbounded preceding and current row) as running, count(v) over (partition by p order by o rows between unbounded preceding and current row) as c from wnd where (v is not null or o is null) order by p, id
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 select id,p,o,v,
        max(case when o is null then 0 else v end) over (partition by p order by id) as max_nonnull,
@@ -78,6 +81,9 @@ select id,p,o,v,
 from wnd
 where id in (1,2,3,4,5,6,7,8,9,10,11)
 order by p, id;
+--let $assert_query = select id,p,o,v, max(case when o is null then 0 else v end) over (partition by p order by id) as max_nonnull, sum(case when o is null then 0 else v end) over (partition by p order by id rows between unbounded preceding and current row) as running_case from wnd where id in (1,2,3,4,5,6,7,8,9,10,11) order by p, id
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo # ===== Rapid (hypergraph optimizer) =====
 --disable_warnings
@@ -91,6 +97,9 @@ select id,p,o,v,
 from wnd
 where (v is not null or o is null)
 order by p, id;
+--let $assert_query = select id,p,o,v, rank() over (partition by p order by o) as rnk, dense_rank() over (partition by p order by o) as drnk, sum(v) over (partition by p order by o rows between unbounded preceding and current row) as running, count(v) over (partition by p order by o rows between unbounded preceding and current row) as c from wnd where (v is not null or o is null) order by p, id
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 select id,p,o,v,
        max(case when o is null then 0 else v end) over (partition by p order by id) as max_nonnull,
@@ -98,6 +107,9 @@ select id,p,o,v,
 from wnd
 where id in (1,2,3,4,5,6,7,8,9,10,11)
 order by p, id;
+--let $assert_query = select id,p,o,v, max(case when o is null then 0 else v end) over (partition by p order by id) as max_nonnull, sum(case when o is null then 0 else v end) over (partition by p order by id rows between unbounded preceding and current row) as running_case from wnd where id in (1,2,3,4,5,6,7,8,9,10,11) order by p, id
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 set session optimizer_switch = default;
 

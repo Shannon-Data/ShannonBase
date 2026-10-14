@@ -15,6 +15,8 @@ ALTER TABLE ri_auto_small SECONDARY_LOAD;
 UPDATE ri_auto_small SET v=v+1;
 SET use_secondary_engine=FORCED;
 SELECT SUM(v) FROM ri_auto_small;
+--let $assert_query = SELECT SUM(v) FROM ri_auto_small
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SET use_secondary_engine=OFF;
 ALTER TABLE ri_auto_small SECONDARY_UNLOAD;
 DROP TABLE ri_auto_small;

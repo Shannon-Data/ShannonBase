@@ -167,86 +167,136 @@ SET SESSION secondary_engine_cost_threshold = 0;
 
 --echo [01] PRIMARY exact lookup
 SELECT id, i, s FROM t FORCE INDEX (PRIMARY) WHERE id = 8;
+--let $assert_query = SELECT id, i, s FROM t FORCE INDEX (PRIMARY) WHERE id = 8
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo [02] signed INT range
 SELECT i FROM t FORCE INDEX (idx_i)
 WHERE i BETWEEN -10 AND 10
 ORDER BY i;
+--let $assert_query = SELECT i FROM t FORCE INDEX (idx_i) WHERE i BETWEEN -10 AND 10 ORDER BY i
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo [03] signed INT lower_bound without exact key
 SELECT i FROM t FORCE INDEX (idx_i)
 WHERE i >= 50
 ORDER BY i
 LIMIT 2;
+--let $assert_query = SELECT i FROM t FORCE INDEX (idx_i) WHERE i >= 50 ORDER BY i LIMIT 2
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo [04] nullable ASC index ordering
 SELECT i FROM t FORCE INDEX (idx_i)
 ORDER BY i;
+--let $assert_query = SELECT i FROM t FORCE INDEX (idx_i) ORDER BY i
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo [05] nullable exact lookup
 SELECT id FROM t FORCE INDEX (idx_i)
 WHERE i IS NULL
 ORDER BY id;
+--let $assert_query = SELECT id FROM t FORCE INDEX (idx_i) WHERE i IS NULL ORDER BY id
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo [06] BIGINT UNSIGNED high-bit ordering
 SELECT u FROM t FORCE INDEX (idx_u)
 WHERE u >= 9223372036854775807
 ORDER BY u;
+--let $assert_query = SELECT u FROM t FORCE INDEX (idx_u) WHERE u >= 9223372036854775807 ORDER BY u
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo [07] negative/positive DECIMAL range
 SELECT d FROM t FORCE INDEX (idx_d)
 WHERE d BETWEEN -10.00 AND 10.00
 ORDER BY d;
+--let $assert_query = SELECT d FROM t FORCE INDEX (idx_d) WHERE d BETWEEN -10.00 AND 10.00 ORDER BY d
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo [08] FLOAT +0/-0 canonical equality
 SELECT id FROM t FORCE INDEX (idx_f)
 WHERE f = 0
 ORDER BY id;
+--let $assert_query = SELECT id FROM t FORCE INDEX (idx_f) WHERE f = 0 ORDER BY id
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo [09] DOUBLE +0/-0 canonical equality
 SELECT id FROM t FORCE INDEX (idx_g)
 WHERE g = 0
 ORDER BY id;
+--let $assert_query = SELECT id FROM t FORCE INDEX (idx_g) WHERE g = 0 ORDER BY id
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo [10] utf8mb4_0900_ai_ci case-insensitive equality
 SELECT id FROM t FORCE INDEX (idx_s)
 WHERE s = 'alpha'
 ORDER BY id;
+--let $assert_query = SELECT id FROM t FORCE INDEX (idx_s) WHERE s = 'alpha' ORDER BY id
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo [11] utf8mb4_0900_ai_ci accent/case-insensitive equality
 SELECT id FROM t FORCE INDEX (idx_s)
 WHERE s = 'cafe'
 ORDER BY id;
+--let $assert_query = SELECT id FROM t FORCE INDEX (idx_s) WHERE s = 'cafe' ORDER BY id
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo [12] utf8mb4 collation range
 SELECT id FROM t FORCE INDEX (idx_s)
 WHERE s >= 'eclair' AND s < 'omega'
 ORDER BY id;
+--let $assert_query = SELECT id FROM t FORCE INDEX (idx_s) WHERE s >= 'eclair' AND s < 'omega' ORDER BY id
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo [13] multipart index: first-part prefix
 SELECT b, c FROM t FORCE INDEX (idx_abc)
 WHERE a = 1
 ORDER BY b, c;
+--let $assert_query = SELECT b, c FROM t FORCE INDEX (idx_abc) WHERE a = 1 ORDER BY b, c
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo [14] multipart index: two-part exact prefix
 SELECT c FROM t FORCE INDEX (idx_abc)
 WHERE a = 1 AND b = 'beta'
 ORDER BY c;
+--let $assert_query = SELECT c FROM t FORCE INDEX (idx_abc) WHERE a = 1 AND b = 'beta' ORDER BY c
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo [15] multipart index: prefix + second-part range
 SELECT b, c FROM t FORCE INDEX (idx_abc)
 WHERE a = 1 AND b >= 'beta' AND b < 'echo'
 ORDER BY b, c;
+--let $assert_query = SELECT b, c FROM t FORCE INDEX (idx_abc) WHERE a = 1 AND b >= 'beta' AND b < 'echo' ORDER BY b, c
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo [16] non-unique ART leaf / duplicate key
 SELECT id FROM t FORCE INDEX (idx_dup)
 WHERE dup = 7
 ORDER BY id;
+--let $assert_query = SELECT id FROM t FORCE INDEX (idx_dup) WHERE dup = 7 ORDER BY id
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo [17] DESC physical key, forward SQL ordering
 SELECT i FROM t FORCE INDEX (idx_i_desc)
 WHERE i IS NOT NULL
 ORDER BY i DESC;
+--let $assert_query = SELECT i FROM t FORCE INDEX (idx_i_desc) WHERE i IS NOT NULL ORDER BY i DESC
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo [18] >512-byte common prefix lower_bound/range
 SELECT RIGHT(long_s, 1) AS suffix
@@ -254,6 +304,9 @@ FROM t FORCE INDEX (idx_long)
 WHERE long_s >= CONCAT(REPEAT('x',520),'c')
   AND long_s <= CONCAT(REPEAT('x',520),'h')
 ORDER BY long_s;
+--let $assert_query = SELECT RIGHT(long_s, 1) AS suffix FROM t FORCE INDEX (idx_long) WHERE long_s >= CONCAT(REPEAT('x',520),'c') AND long_s <= CONCAT(REPEAT('x',520),'h') ORDER BY long_s
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --disable_query_log
 SET USE_SECONDARY_ENGINE = OFF;

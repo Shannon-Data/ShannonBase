@@ -51,14 +51,20 @@ SET SESSION optimizer_switch='hypergraph_optimizer=off';
 --enable_warnings
 # should NOT see uncommitted tx
 SELECT id, HEX(bin), JSON_EXTRACT(j, '$.z'), d, name FROM t_jbd WHERE id = 1;
+--let $assert_query = SELECT id, HEX(bin), JSON_EXTRACT(j, '$.z'), d, name FROM t_jbd WHERE id = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --connection con1
 # test SAVEPOINT semantics
 SAVEPOINT sp_j1;
 UPDATE t_jbd SET d = d + 0.000001 WHERE id = 1;
 SELECT d FROM t_jbd WHERE id = 1;
+--let $assert_query = SELECT d FROM t_jbd WHERE id = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 ROLLBACK TO SAVEPOINT sp_j1;
 SELECT d FROM t_jbd WHERE id = 1;
+--let $assert_query = SELECT d FROM t_jbd WHERE id = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 # fully rollback transaction and check other session still sees original
 ROLLBACK;
@@ -77,6 +83,8 @@ ALTER TABLE t_jbd SECONDARY_LOAD;
 
 --connection con2
 SELECT id, HEX(bin), JSON_EXTRACT(j, '$.z'), d, name FROM t_jbd WHERE id = 1;
+--let $assert_query = SELECT id, HEX(bin), JSON_EXTRACT(j, '$.z'), d, name FROM t_jbd WHERE id = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 # now test commit path and visibility
 --connection con1
@@ -88,6 +96,8 @@ COMMIT;
 --connection con2
 SET SESSION USE_SECONDARY_ENGINE=FORCED;
 SELECT id, HEX(bin), JSON_EXTRACT(j, '$.z'), d, name FROM t_jbd WHERE id = 2;
+--let $assert_query = SELECT id, HEX(bin), JSON_EXTRACT(j, '$.z'), d, name FROM t_jbd WHERE id = 2
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 # Edge case: SAVEPOINT + COMMIT then ROLLBACK TO SAVEPOINT (invalid after commit)
 # This demonstrates the SAVEPOINT lifecycle / propagation edge case; behavior may vary by engine.

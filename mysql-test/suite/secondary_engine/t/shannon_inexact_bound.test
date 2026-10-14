@@ -47,32 +47,60 @@ EXPLAIN FORMAT=TREE SELECT id FROM t1 WHERE d BETWEEN 0.045 AND 0.075;
 --echo #
 --sorted_result
 SELECT id FROM t1 WHERE d BETWEEN 0.045 AND 0.075;
+--let $assert_query = SELECT id FROM t1 WHERE d BETWEEN 0.045 AND 0.075
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 --sorted_result
 SELECT id FROM t1 WHERE d BETWEEN 0.045 AND 0.08;
+--let $assert_query = SELECT id FROM t1 WHERE d BETWEEN 0.045 AND 0.08
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 --sorted_result
 SELECT id FROM t1 WHERE d BETWEEN 0.04 AND 0.075;
+--let $assert_query = SELECT id FROM t1 WHERE d BETWEEN 0.04 AND 0.075
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 --sorted_result
 SELECT id FROM t1 WHERE d BETWEEN 0.055 AND 0.065;
+--let $assert_query = SELECT id FROM t1 WHERE d BETWEEN 0.055 AND 0.065
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 --sorted_result
 SELECT id FROM t1 WHERE d BETWEEN 0.04 AND 0.08;
+--let $assert_query = SELECT id FROM t1 WHERE d BETWEEN 0.04 AND 0.08
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 --sorted_result
 SELECT id FROM t1 WHERE d NOT BETWEEN 0.045 AND 0.075;
+--let $assert_query = SELECT id FROM t1 WHERE d NOT BETWEEN 0.045 AND 0.075
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 --sorted_result
 SELECT id FROM t1 WHERE e BETWEEN 0.0450 AND 0.0750;
+--let $assert_query = SELECT id FROM t1 WHERE e BETWEEN 0.0450 AND 0.0750
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 --sorted_result
 SELECT id FROM t1 WHERE e BETWEEN 0.04500 AND 0.07500;
+--let $assert_query = SELECT id FROM t1 WHERE e BETWEEN 0.04500 AND 0.07500
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 --sorted_result
 SELECT id FROM t1 WHERE d BETWEEN -0.015 AND 0.045;
+--let $assert_query = SELECT id FROM t1 WHERE d BETWEEN -0.015 AND 0.045
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 --sorted_result
 SELECT id FROM t1 WHERE d BETWEEN 1 AND 24;
+--let $assert_query = SELECT id FROM t1 WHERE d BETWEEN 1 AND 24
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 --sorted_result
 SELECT id FROM t1 WHERE d >= 0.045;
+--let $assert_query = SELECT id FROM t1 WHERE d >= 0.045
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 --sorted_result
 SELECT id FROM t1 WHERE d < 0.055;
+--let $assert_query = SELECT id FROM t1 WHERE d < 0.055
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 --sorted_result
 SELECT id FROM t1 WHERE d = 0.055;
+--let $assert_query = SELECT id FROM t1 WHERE d = 0.055
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 --sorted_result
 SELECT id FROM t1 WHERE d <> 0.055;
+--let $assert_query = SELECT id FROM t1 WHERE d <> 0.055
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo #
 --echo # Arm 2 of 2: InnoDB returns the same rows.

@@ -1,0 +1,4 @@
+include/assert_grep.inc [A mismatch must fail even when recording results]
+include/assert_grep.inc [A mismatch must fail even when recording results]
+include/assert_grep.inc [A mismatch must fail even when recording results]
+# Full-result and capture assertions reject mismatches, including under --record.

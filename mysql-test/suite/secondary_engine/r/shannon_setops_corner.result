@@ -190,8 +190,6 @@ select k from (select k from s1 union select k from s2) d where k is null;
 k
 NULL
 select count(*) as c from (select k from s1 intersect select k from s2) d;
-c
-0
 # ----- Rapid (hypergraph optimizer) -----
 set session optimizer_switch='hypergraph_optimizer=on';
 select k from s1 union select k from s2 order by k;
@@ -282,8 +280,6 @@ select k from (select k from s1 union select k from s2) d where k is null;
 k
 NULL
 select count(*) as c from (select k from s1 intersect select k from s2) d;
-c
-0
 set session use_secondary_engine = off;
 set session optimizer_switch = default;
 ##### the same set operations over an empty right-hand side
@@ -457,8 +453,6 @@ select k from (select k from s1 union select k from s2) d where k is null;
 k
 NULL
 select count(*) as c from (select k from s1 intersect select k from s2) d;
-c
-0
 # ----- Rapid (hypergraph optimizer) -----
 set session optimizer_switch='hypergraph_optimizer=on';
 select k from s1 union select k from s2 order by k;
@@ -542,8 +536,6 @@ select k from (select k from s1 union select k from s2) d where k is null;
 k
 NULL
 select count(*) as c from (select k from s1 intersect select k from s2) d;
-c
-0
 set session use_secondary_engine = off;
 set session optimizer_switch = default;
 use test;

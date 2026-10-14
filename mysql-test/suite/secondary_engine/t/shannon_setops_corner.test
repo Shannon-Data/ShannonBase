@@ -15,9 +15,9 @@
 # materialised UNION's internal temp table failing the IMCS-loaded check; it
 # is fixed as of 2026-09-21 and those forms now answer as InnoDB does.
 #
-# Known divergence still captured by the recorded result:
-#   * COUNT(*) over a derived INTERSECT answers 0 where InnoDB answers 3,
-#     under both optimizers -- a silent wrong answer, not a refusal.
+# Derived INTERSECT/EXCEPT materialization is refused until the secondary
+# plan preserves its rows. FORCED must fail explicitly; ON must
+# fall back to InnoDB. Successful set operations are compared with InnoDB.
 # ShannonBase copyright 2023-
 ##############################################################################
 
@@ -42,6 +42,50 @@ alter table s2 secondary_load;
 
 --let $shannon_reads = suite/secondary_engine/include/shannon_setops_reads.inc
 --source suite/secondary_engine/include/shannon_3way.inc
+
+# Pin the derived-set-operation boundary: a supported-looking empty answer is
+# forbidden. Both optimizers must refuse FORCED and return the primary result
+# in ON mode. The full-result assertion also checks that fallback result.
+--disable_query_log
+--disable_result_log
+--disable_warnings
+--let $setop_mode = 2
+while ($setop_mode) {
+  if ($setop_mode == 2) {
+    SET optimizer_switch='hypergraph_optimizer=off';
+  }
+  if ($setop_mode == 1) {
+    SET optimizer_switch='hypergraph_optimizer=on';
+  }
+  SET use_secondary_engine=FORCED;
+  --error ER_SECONDARY_ENGINE
+  SELECT COUNT(*) FROM (SELECT k FROM s1 INTERSECT SELECT k FROM s2) d;
+  --error ER_SECONDARY_ENGINE
+  SELECT COUNT(*) FROM (SELECT k FROM s1 EXCEPT SELECT k FROM s2) d;
+  --error ER_SECONDARY_ENGINE
+  SELECT COUNT(*) FROM (SELECT k FROM s1 INTERSECT SELECT k FROM s2 UNION SELECT k FROM s1) d;
+  SET use_secondary_engine=ON;
+  --let $assert_query = SELECT COUNT(*) FROM (SELECT k FROM s1 INTERSECT SELECT k FROM s2) d
+  --let $assert_queries_off = 1
+  --let $assert_results_off = 1
+  --let $assert_warnings_off = 1
+  --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+  --let $assert_query = SELECT COUNT(*) FROM (SELECT k FROM s1 EXCEPT SELECT k FROM s2) d
+  --let $assert_queries_off = 1
+  --let $assert_results_off = 1
+  --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+  --let $assert_query = SELECT COUNT(*) FROM (SELECT k FROM s1 INTERSECT SELECT k FROM s2 UNION SELECT k FROM s1) d
+  --let $assert_queries_off = 1
+  --let $assert_results_off = 1
+  --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+  --dec $setop_mode
+}
+--let $assert_warnings_off =
+SET use_secondary_engine=OFF;
+SET optimizer_switch=default;
+--enable_warnings
+--enable_result_log
+--enable_query_log
 
 --echo ##### the same set operations over an empty right-hand side
 delete from s2;

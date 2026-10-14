@@ -8,6 +8,10 @@ INSERT INTO review_timeout VALUES(1,10);
 ALTER TABLE review_timeout SECONDARY_LOAD;
 SET use_secondary_engine=FORCED;
 SELECT v FROM review_timeout;
+--let $assert_query = SELECT v FROM review_timeout
+--let $assert_queries_off = 1
+--let $assert_results_off = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SET use_secondary_engine=OFF;
 SET GLOBAL debug='+d,secondary_engine_rapid_propagation_stall';
 UPDATE review_timeout SET v=11;
@@ -26,6 +30,8 @@ SET GLOBAL debug='-d,secondary_engine_rapid_propagation_stall';
 --enable_query_log
 SELECT @scan_elapsed < 2000000 AS scan_bounded,@count_elapsed < 2000000 AS count_bounded;
 SELECT v FROM review_timeout;
+--let $assert_query = SELECT v FROM review_timeout
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 --disable_query_log
 SET use_secondary_engine=OFF;
 ALTER TABLE review_timeout SECONDARY_UNLOAD;

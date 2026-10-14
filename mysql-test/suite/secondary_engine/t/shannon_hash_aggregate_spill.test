@@ -85,4 +85,14 @@ SELECT COUNT(*) AS extra FROM (SELECT * FROM got_str EXCEPT SELECT * FROM ref_st
 
 SET SESSION optimizer_switch = default;
 SET SESSION secondary_engine_cost_threshold = default;
+--let $assert_reference_table = ref_plain
+--let $assert_actual_table = got_plain
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_reference_table = ref_expr
+--let $assert_actual_table = got_expr
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_reference_table = ref_str
+--let $assert_actual_table = got_str
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+
 DROP DATABASE sh_agg_spill;

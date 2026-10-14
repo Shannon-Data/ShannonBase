@@ -1618,6 +1618,22 @@ void NotifyAfterSelect(THD *thd, SelectExecutedIn executed_in) {
 const char *table_offload_blocker(const LEX *lex) {
   if (lex == nullptr) return nullptr;
 
+  // Derived INTERSECT/EXCEPT currently produces an empty secondary result,
+  // even when the native set operation has matching rows. Keep the primary
+  // plan until that materialization contract is supported; FORCED must report
+  // the refusal. Top-level set operations and pure derived UNION stay eligible.
+  for (const Query_block *block = lex->all_query_blocks_list; block != nullptr; block = block->next_select_in_list()) {
+    for (const Table_ref *table = block->get_table_list(); table != nullptr; table = table->next_local) {
+      if (!table->is_derived()) continue;
+      const Query_expression *derived = table->derived_query_expression();
+      if (derived == nullptr) continue;
+      for (const Query_term *term : derived->query_terms<>()) {
+        if (term->term_type() == QT_INTERSECT || term->term_type() == QT_EXCEPT)
+          return "derived INTERSECT/EXCEPT materialization is not supported in Rapid";
+      }
+    }
+  }
+
   for (const Table_ref *t = lex->query_tables; t != nullptr; t = t->next_global) {
     if (t->is_placeholder()) continue;
 

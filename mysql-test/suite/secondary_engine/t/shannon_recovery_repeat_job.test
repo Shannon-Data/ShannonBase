@@ -18,6 +18,9 @@ while ($passes) {
  }
  SET use_secondary_engine=FORCED;
  SELECT id,v FROM t ORDER BY id;
+ --let $assert_query = SELECT id,v FROM t ORDER BY id
+ --let $assert_ordered = 1
+ --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
  --let $actual = `SELECT GROUP_CONCAT(CONCAT(id,':',v) ORDER BY id) FROM t`
  if ($actual != 1:11,2:20,3:30,4:40) {
   --die Repeated recovery replayed duplicate rows or lost committed changes

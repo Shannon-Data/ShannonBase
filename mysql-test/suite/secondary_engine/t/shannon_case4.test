@@ -66,6 +66,11 @@ select
   text_col,
   tinytext_col
 from datatype_test order by id;
+--let $assert_query = select id, big_int_col, bool_col, decimal_col, double_col , float_col , int_col , integer_col , medium_int_col , small_int_col , tiny_int_col , date_col DATE, datetime_col , time_col , timestamp_col, year_col , char_col , varchar_col, text_col, tinytext_col from datatype_test order by id
+--let $assert_ordered = 1
+--let $assert_warnings_off = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_warnings_off =
 
 --connection connection_2
 --echo [conn2]

@@ -1060,6 +1060,12 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
           } else if (IsRepresentedByHashKey(condition, node->join_conditions)) {
             // Enforced by the hash key itself; dropping it changes nothing.
           } else if (condition != nullptr && (used & ~join_tables) == 0) {
+            // An inner NLJ filter not represented by the hash key cannot be
+            // moved above a non-inner join. Keep the original match protocol.
+            if (nlj.join_type != JoinType::INNER) {
+              make_native_plan(state, path);
+              return false;
+            }
             post_join_filters.push_back(condition);
           } else {
             // References tables this join does not provide; no correct place to put
@@ -1740,6 +1746,12 @@ void Optimizer::extract_join_conditions(const RelationalExpression *expr, std::v
 void Optimizer::extract_post_join_filters(const JoinPredicate *pred, table_map covered_tables,
                                           std::vector<Item *> &out_filters) {
   if (!pred || !pred->expr) return;
+  // ON residuals already belong to the hash join's extra conditions. Moving
+  // them above OUTER/SEMI/ANTI changes match/existence semantics: in particular
+  // it rejects the NULL-complemented row that an outer join must emit.
+  if (pred->expr->type != RelationalExpression::INNER_JOIN &&
+      pred->expr->type != RelationalExpression::STRAIGHT_INNER_JOIN)
+    return;
   walk_relational_expression(pred->expr, [&](const RelationalExpression *expr) {
     for (Item *item : expr->join_conditions) {
       if (!item) continue;
@@ -2247,6 +2259,15 @@ std::unique_ptr<Imcs::Predicate> Optimizer::convert_comparison_to_predicate(cons
   Field *field = field_item->field;
   uint32 col_idx = field->field_index();
   enum_field_types field_type = field->type();
+  if (field_type == MYSQL_TYPE_STRING || field_type == MYSQL_TYPE_VARCHAR || field_type == MYSQL_TYPE_VAR_STRING) {
+    // Assignment coercion is not comparison coercion: VARCHAR = 1 compares
+    // numerically in MySQL, so '01' and '1.0' also match. Storage predicates
+    // compare strings using the column collation; require that exact domain
+    // before converting the constant or removing the original Item filter.
+    const auto *comparison = down_cast<const Item_bool_func2 *>(func);
+    if (comparison->compare_type() != STRING_RESULT || comparison->compare_collation() != field->charset())
+      return nullptr;
+  }
   const ExtractedBound bound = extract_bound(thd, value_item, field_type, field);
   if (bound.lost) return nullptr;
   // `col OP NULL` is UNKNOWN for every row, and the vectorized paths take their
