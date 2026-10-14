@@ -443,7 +443,10 @@ static void table_worker_func(table_worker_context *ctx) {
       if (const char *error = resource_scope.enter(thd, ShannonBase::ResMgmt::WorkClass::SYNC, true, [ctx] {
             return ctx->should_stop.load(std::memory_order_acquire) || (ctx->buffer && ctx->buffer->broken.load());
           })) {
-        const bool cancelled = ctx->should_stop.exchange(true);
+        // A quarantined buffer cancels admission too. Its existing failure
+        // reason must not be reported again as a new resource-admission error.
+        const bool cancelled =
+            ctx->should_stop.exchange(true) || (ctx->buffer && ctx->buffer->broken.load(std::memory_order_acquire));
         if (!cancelled && !ResMgmt::work_governor().stopping()) {
           MarkPropagationBufferBroken(ctx->buffer);
           sql_print_warning("Rapid apply resource admission failed: %s", error);

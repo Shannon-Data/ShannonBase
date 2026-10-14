@@ -14,11 +14,15 @@ SELECT LENGTH(b) FROM cb_big;
 SHOW WARNINGS;
 SET use_secondary_engine=ON;
 SELECT LENGTH(b) FROM cb_big;
+--let $assert_query = SELECT LENGTH(b) FROM cb_big
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SET use_secondary_engine=OFF;
 ALTER TABLE cb_big SECONDARY_UNLOAD;
 ALTER TABLE cb_big SECONDARY_LOAD;
 SET use_secondary_engine=FORCED;
 SELECT LENGTH(b) FROM cb_big;
+--let $assert_query = SELECT LENGTH(b) FROM cb_big
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SET use_secondary_engine=OFF;
 ALTER TABLE cb_big SECONDARY_UNLOAD;
 DROP TABLE cb_big;

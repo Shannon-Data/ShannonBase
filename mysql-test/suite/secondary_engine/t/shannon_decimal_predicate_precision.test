@@ -75,8 +75,18 @@ SET use_secondary_engine=FORCED;
 --disable_warnings
 SET SESSION optimizer_switch='hypergraph_optimizer=on';
 eval $q0;
+--let $assert_query = $q0
+--let $assert_ordered = 1
+--let $assert_warnings_off = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_warnings_off =
 SET SESSION optimizer_switch='hypergraph_optimizer=off';
 eval $q0;
+--let $assert_query = $q0
+--let $assert_ordered = 1
+--let $assert_warnings_off = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_warnings_off =
 --enable_warnings
 SET use_secondary_engine=OFF;
 eval $q0;
@@ -85,8 +95,18 @@ SET use_secondary_engine=FORCED;
 --disable_warnings
 SET SESSION optimizer_switch='hypergraph_optimizer=on';
 eval $q1;
+--let $assert_query = $q1
+--let $assert_ordered = 1
+--let $assert_warnings_off = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_warnings_off =
 SET SESSION optimizer_switch='hypergraph_optimizer=off';
 eval $q1;
+--let $assert_query = $q1
+--let $assert_ordered = 1
+--let $assert_warnings_off = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_warnings_off =
 --enable_warnings
 SET use_secondary_engine=OFF;
 eval $q1;
@@ -95,8 +115,18 @@ SET use_secondary_engine=FORCED;
 --disable_warnings
 SET SESSION optimizer_switch='hypergraph_optimizer=on';
 eval $q2;
+--let $assert_query = $q2
+--let $assert_ordered = 1
+--let $assert_warnings_off = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_warnings_off =
 SET SESSION optimizer_switch='hypergraph_optimizer=off';
 eval $q2;
+--let $assert_query = $q2
+--let $assert_ordered = 1
+--let $assert_warnings_off = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_warnings_off =
 --enable_warnings
 SET use_secondary_engine=OFF;
 eval $q2;
@@ -105,8 +135,18 @@ SET use_secondary_engine=FORCED;
 --disable_warnings
 SET SESSION optimizer_switch='hypergraph_optimizer=on';
 eval $q3;
+--let $assert_query = $q3
+--let $assert_ordered = 1
+--let $assert_warnings_off = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_warnings_off =
 SET SESSION optimizer_switch='hypergraph_optimizer=off';
 eval $q3;
+--let $assert_query = $q3
+--let $assert_ordered = 1
+--let $assert_warnings_off = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_warnings_off =
 --enable_warnings
 SET use_secondary_engine=OFF;
 eval $q3;
@@ -115,8 +155,18 @@ SET use_secondary_engine=FORCED;
 --disable_warnings
 SET SESSION optimizer_switch='hypergraph_optimizer=on';
 eval $q4;
+--let $assert_query = $q4
+--let $assert_ordered = 1
+--let $assert_warnings_off = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_warnings_off =
 SET SESSION optimizer_switch='hypergraph_optimizer=off';
 eval $q4;
+--let $assert_query = $q4
+--let $assert_ordered = 1
+--let $assert_warnings_off = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_warnings_off =
 --enable_warnings
 SET use_secondary_engine=OFF;
 eval $q4;
@@ -125,8 +175,18 @@ SET use_secondary_engine=FORCED;
 --disable_warnings
 SET SESSION optimizer_switch='hypergraph_optimizer=on';
 eval $q5;
+--let $assert_query = $q5
+--let $assert_ordered = 1
+--let $assert_warnings_off = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_warnings_off =
 SET SESSION optimizer_switch='hypergraph_optimizer=off';
 eval $q5;
+--let $assert_query = $q5
+--let $assert_ordered = 1
+--let $assert_warnings_off = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_warnings_off =
 --enable_warnings
 SET use_secondary_engine=OFF;
 eval $q5;
@@ -135,8 +195,18 @@ SET use_secondary_engine=FORCED;
 --disable_warnings
 SET SESSION optimizer_switch='hypergraph_optimizer=on';
 eval $q6;
+--let $assert_query = $q6
+--let $assert_ordered = 1
+--let $assert_warnings_off = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_warnings_off =
 SET SESSION optimizer_switch='hypergraph_optimizer=off';
 eval $q6;
+--let $assert_query = $q6
+--let $assert_ordered = 1
+--let $assert_warnings_off = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_warnings_off =
 --enable_warnings
 SET use_secondary_engine=OFF;
 eval $q6;
@@ -145,8 +215,18 @@ SET use_secondary_engine=FORCED;
 --disable_warnings
 SET SESSION optimizer_switch='hypergraph_optimizer=on';
 eval $q7;
+--let $assert_query = $q7
+--let $assert_ordered = 1
+--let $assert_warnings_off = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_warnings_off =
 SET SESSION optimizer_switch='hypergraph_optimizer=off';
 eval $q7;
+--let $assert_query = $q7
+--let $assert_ordered = 1
+--let $assert_warnings_off = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_warnings_off =
 --enable_warnings
 SET use_secondary_engine=OFF;
 eval $q7;
@@ -155,8 +235,18 @@ SET use_secondary_engine=FORCED;
 --disable_warnings
 SET SESSION optimizer_switch='hypergraph_optimizer=on';
 eval $q8;
+--let $assert_query = $q8
+--let $assert_ordered = 1
+--let $assert_warnings_off = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_warnings_off =
 SET SESSION optimizer_switch='hypergraph_optimizer=off';
 eval $q8;
+--let $assert_query = $q8
+--let $assert_ordered = 1
+--let $assert_warnings_off = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_warnings_off =
 --enable_warnings
 SET use_secondary_engine=OFF;
 eval $q8;
@@ -165,8 +255,18 @@ SET use_secondary_engine=FORCED;
 --disable_warnings
 SET SESSION optimizer_switch='hypergraph_optimizer=on';
 eval $q9;
+--let $assert_query = $q9
+--let $assert_ordered = 1
+--let $assert_warnings_off = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_warnings_off =
 SET SESSION optimizer_switch='hypergraph_optimizer=off';
 eval $q9;
+--let $assert_query = $q9
+--let $assert_ordered = 1
+--let $assert_warnings_off = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_warnings_off =
 --enable_warnings
 SET use_secondary_engine=OFF;
 eval $q9;
@@ -175,8 +275,18 @@ SET use_secondary_engine=FORCED;
 --disable_warnings
 SET SESSION optimizer_switch='hypergraph_optimizer=on';
 eval $q10;
+--let $assert_query = $q10
+--let $assert_ordered = 1
+--let $assert_warnings_off = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_warnings_off =
 SET SESSION optimizer_switch='hypergraph_optimizer=off';
 eval $q10;
+--let $assert_query = $q10
+--let $assert_ordered = 1
+--let $assert_warnings_off = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_warnings_off =
 --enable_warnings
 SET use_secondary_engine=OFF;
 eval $q10;
@@ -185,8 +295,18 @@ SET use_secondary_engine=FORCED;
 --disable_warnings
 SET SESSION optimizer_switch='hypergraph_optimizer=on';
 eval $q11;
+--let $assert_query = $q11
+--let $assert_ordered = 1
+--let $assert_warnings_off = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_warnings_off =
 SET SESSION optimizer_switch='hypergraph_optimizer=off';
 eval $q11;
+--let $assert_query = $q11
+--let $assert_ordered = 1
+--let $assert_warnings_off = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_warnings_off =
 --enable_warnings
 SET use_secondary_engine=OFF;
 eval $q11;
@@ -195,8 +315,18 @@ SET use_secondary_engine=FORCED;
 --disable_warnings
 SET SESSION optimizer_switch='hypergraph_optimizer=on';
 eval $q12;
+--let $assert_query = $q12
+--let $assert_ordered = 1
+--let $assert_warnings_off = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_warnings_off =
 SET SESSION optimizer_switch='hypergraph_optimizer=off';
 eval $q12;
+--let $assert_query = $q12
+--let $assert_ordered = 1
+--let $assert_warnings_off = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_warnings_off =
 --enable_warnings
 SET use_secondary_engine=OFF;
 eval $q12;
@@ -205,8 +335,18 @@ SET use_secondary_engine=FORCED;
 --disable_warnings
 SET SESSION optimizer_switch='hypergraph_optimizer=on';
 eval $q13;
+--let $assert_query = $q13
+--let $assert_ordered = 1
+--let $assert_warnings_off = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_warnings_off =
 SET SESSION optimizer_switch='hypergraph_optimizer=off';
 eval $q13;
+--let $assert_query = $q13
+--let $assert_ordered = 1
+--let $assert_warnings_off = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_warnings_off =
 --enable_warnings
 SET use_secondary_engine=OFF;
 eval $q13;
@@ -215,8 +355,18 @@ SET use_secondary_engine=FORCED;
 --disable_warnings
 SET SESSION optimizer_switch='hypergraph_optimizer=on';
 eval $q14;
+--let $assert_query = $q14
+--let $assert_ordered = 1
+--let $assert_warnings_off = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_warnings_off =
 SET SESSION optimizer_switch='hypergraph_optimizer=off';
 eval $q14;
+--let $assert_query = $q14
+--let $assert_ordered = 1
+--let $assert_warnings_off = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_warnings_off =
 --enable_warnings
 SET use_secondary_engine=OFF;
 eval $q14;

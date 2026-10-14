@@ -67,6 +67,8 @@ ALTER TABLE t_sp SECONDARY_UNLOAD;
 ALTER TABLE t_sp SECONDARY_LOAD;
 SET SESSION USE_SECONDARY_ENGINE=FORCED;
 SELECT id, v FROM t_sp WHERE id = 1;
+--let $assert_query = SELECT id, v FROM t_sp WHERE id = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 # Now test commit after savepoint
 --connection con1
@@ -90,6 +92,8 @@ SET SESSION USE_SECONDARY_ENGINE=FORCED;
 SET SESSION optimizer_switch='hypergraph_optimizer=off';
 --enable_warnings
 SELECT id, v FROM t_sp WHERE id = 2;
+--let $assert_query = SELECT id, v FROM t_sp WHERE id = 2
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo # ----- the same committed state under the hypergraph optimizer -----
 --echo # Visibility is decided by the engine's MVCC, not by the planner. What
@@ -101,7 +105,11 @@ SELECT id, v FROM t_sp WHERE id = 2;
 SET SESSION optimizer_switch='hypergraph_optimizer=on';
 --enable_warnings
 SELECT id, v FROM t_sp WHERE id = 1;
+--let $assert_query = SELECT id, v FROM t_sp WHERE id = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT id, v FROM t_sp WHERE id = 2;
+--let $assert_query = SELECT id, v FROM t_sp WHERE id = 2
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SET SESSION optimizer_switch = default;
 
 --disconnect con1

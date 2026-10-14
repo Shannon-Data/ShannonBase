@@ -5,9 +5,11 @@
 #   2. Rapid, legacy optimizer
 #   3. Rapid, hypergraph optimizer
 #
-# The three blocks execute exactly the same statements, so the three chunks of
-# the .result must be identical apart from the section headers. A diff between
-# them is a Rapid bug, not a plan-shape difference.
+# This include switches modes; it does not compare results by itself. Read
+# blocks must call assert_rapid_matches_innodb.inc after successful reads so
+# a .result recorded from a wrong Rapid answer cannot make the test pass.
+# Compare deterministic results only; expected refusals and nondeterministic
+# expressions require their own assertions.
 #
 # Callers set:
 #   $shannon_reads  -- path of the file holding the read statements

@@ -46,6 +46,22 @@
 # caller had, and clears $parity_where so the next caller is not surprised by
 # a stale one.
 
+# Full-result mode preserves the original query and checks the current Rapid
+# execution arm against InnoDB. Unlike digest mode it accepts multiple columns
+# and rows without wrapping the SELECT in an aggregate or a derived table:
+#   --let $assert_query = SELECT id,v FROM t ORDER BY id
+#   --let $assert_ordered = 1
+#   --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+# Leave $assert_ordered unset for an unordered multiset comparison. The caller
+# must use a deterministic query and run this at every Rapid arm being tested.
+# $assert_queries_off/$assert_results_off=1 preserve disabled logging.
+# CTAS mode compares precomputed tables with EXCEPT ALL in both directions:
+#   --let $assert_reference_table = innodb_capture
+#   --let $assert_actual_table = rapid_capture
+#   --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+
+if ($assert_query == '') {
+if ($assert_reference_table == '') {
 --let $_armi_left = 1
 if ($parity_where != '') {
   --let $_armi_left = 2
@@ -134,3 +150,11 @@ while ($_armi_left) {
 }
 
 --let $parity_where =
+}
+}
+if ($assert_query != '') {
+  --source suite/secondary_engine/include/assert_rapid_result_matches_innodb.inc
+}
+if ($assert_reference_table != '') {
+  --source suite/secondary_engine/include/assert_rapid_materialized_matches_innodb.inc
+}

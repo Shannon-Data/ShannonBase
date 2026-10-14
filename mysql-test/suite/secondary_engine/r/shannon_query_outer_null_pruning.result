@@ -1,0 +1,82 @@
+SET use_secondary_engine=OFF;
+CREATE TABLE ga_a(id INT PRIMARY KEY, v INT) SECONDARY_ENGINE=rapid;
+CREATE TABLE ga_b(id INT PRIMARY KEY, v INT) SECONDARY_ENGINE=rapid;
+CREATE TABLE ga_s(id INT PRIMARY KEY, s VARCHAR(20)) SECONDARY_ENGINE=rapid;
+INSERT INTO ga_a VALUES(1,NULL),(2,20),(3,30);
+INSERT INTO ga_b VALUES(1,100),(2,NULL);
+INSERT INTO ga_s VALUES(1,'1'),(2,'01'),(3,'1.0'),(4,'2');
+ALTER TABLE ga_a SECONDARY_LOAD;
+ALTER TABLE ga_b SECONDARY_LOAD;
+ALTER TABLE ga_s SECONDARY_LOAD;
+SET optimizer_switch='hypergraph_optimizer=off';
+SET use_secondary_engine=OFF;
+SELECT a.id AS left_id,b.v FROM ga_a a IGNORE INDEX(PRIMARY) LEFT JOIN ga_b b IGNORE INDEX(PRIMARY) ON a.id=b.id WHERE b.v IS NULL ORDER BY a.id;
+left_id	v
+2	NULL
+3	NULL
+SELECT a.id,b.v FROM ga_b b IGNORE INDEX(PRIMARY)
+RIGHT JOIN ga_a a IGNORE INDEX(PRIMARY) ON a.id=b.id
+WHERE b.v IS NULL ORDER BY a.id;
+id	v
+2	NULL
+3	NULL
+SELECT a.id FROM ga_a a IGNORE INDEX(PRIMARY)
+LEFT JOIN ga_b b IGNORE INDEX(PRIMARY) ON a.id=b.id
+WHERE b.id IS NULL ORDER BY a.id;
+id
+3
+SET optimizer_switch='hypergraph_optimizer=off';
+SET use_secondary_engine=OFF;
+SET use_secondary_engine=FORCED;
+SELECT a.id AS left_id,b.v FROM ga_a a IGNORE INDEX(PRIMARY) LEFT JOIN ga_b b IGNORE INDEX(PRIMARY) ON a.id=b.id WHERE b.v IS NULL ORDER BY a.id;
+left_id	v
+2	NULL
+3	NULL
+SELECT a.id,b.v FROM ga_b b IGNORE INDEX(PRIMARY)
+RIGHT JOIN ga_a a IGNORE INDEX(PRIMARY) ON a.id=b.id
+WHERE b.v IS NULL ORDER BY a.id;
+id	v
+2	NULL
+3	NULL
+SELECT a.id FROM ga_a a IGNORE INDEX(PRIMARY)
+LEFT JOIN ga_b b IGNORE INDEX(PRIMARY) ON a.id=b.id
+WHERE b.id IS NULL ORDER BY a.id;
+id
+3
+SET optimizer_switch='hypergraph_optimizer=off';
+SET use_secondary_engine=OFF;
+SET use_secondary_engine=FORCED;
+SET optimizer_switch='hypergraph_optimizer=on';
+Warnings:
+Warning	1287	The hypergraph optimizer is highly experimental and is meant for testing only. Do not enable it unless you are a MySQL developer.
+SELECT a.id AS left_id,b.v FROM ga_a a IGNORE INDEX(PRIMARY) LEFT JOIN ga_b b IGNORE INDEX(PRIMARY) ON a.id=b.id WHERE b.v IS NULL ORDER BY a.id;
+left_id	v
+2	NULL
+3	NULL
+EXPLAIN FORMAT=TREE SELECT a.id AS left_id,b.v FROM ga_a a IGNORE INDEX(PRIMARY) LEFT JOIN ga_b b IGNORE INDEX(PRIMARY) ON a.id=b.id WHERE b.v IS NULL ORDER BY a.id;
+EXPLAIN
+-> Sort: a.id  (...)
+    -> Filter: (b.v is null)
+        -> Vectorized left hash join (a.id = b.id)  (...)
+            -> Vectorized table scan on a in secondary engine Rapid  (...)
+            -> Hash
+                -> Vectorized table scan on b in secondary engine Rapid  (...)
+
+Warnings:
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+SELECT a.id,b.v FROM ga_b b IGNORE INDEX(PRIMARY)
+RIGHT JOIN ga_a a IGNORE INDEX(PRIMARY) ON a.id=b.id
+WHERE b.v IS NULL ORDER BY a.id;
+id	v
+2	NULL
+3	NULL
+SELECT a.id FROM ga_a a IGNORE INDEX(PRIMARY)
+LEFT JOIN ga_b b IGNORE INDEX(PRIMARY) ON a.id=b.id
+WHERE b.id IS NULL ORDER BY a.id;
+id
+3
+SET use_secondary_engine=OFF;
+ALTER TABLE ga_a SECONDARY_UNLOAD;
+ALTER TABLE ga_b SECONDARY_UNLOAD;
+ALTER TABLE ga_s SECONDARY_UNLOAD;
+DROP TABLE ga_a,ga_b,ga_s;

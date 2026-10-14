@@ -15,11 +15,8 @@
 # pre-ALTER column layout: `select *` would then return the wrong number of
 # columns, or the right number with values taken from the wrong slots.
 #
-# KNOWN DIVERGENCES as of 2026-09-06, recorded to pin today's behaviour:
-#   * stage 2: the UPDATE of the newly added column does not reach Rapid, which
-#     still reports the column default;
-#   * stage 5: under the hypergraph optimizer GROUP BY k ORDER BY k sorts the
-#     NULL group third instead of first.
+# Every read is also compared with InnoDB at runtime, including propagated
+# values in new columns and the position of the NULL group after each DDL.
 # ShannonBase copyright 2023-
 ##############################################################################
 

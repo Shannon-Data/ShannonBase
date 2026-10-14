@@ -75,23 +75,41 @@ EXPLAIN FORMAT=TREE SELECT dt, SUM(i) FROM t1 GROUP BY dt;
 SET SESSION use_secondary_engine = FORCED;
 --sorted_result
 SELECT d, COUNT(*), SUM(i) FROM t1 GROUP BY d;
+--let $assert_query = SELECT d, COUNT(*), SUM(i) FROM t1 GROUP BY d
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 --sorted_result
 SELECT dn, COUNT(*), SUM(i) FROM t1 GROUP BY dn;
+--let $assert_query = SELECT dn, COUNT(*), SUM(i) FROM t1 GROUP BY dn
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 --sorted_result
 SELECT dt, COUNT(*), SUM(i) FROM t1 GROUP BY dt;
+--let $assert_query = SELECT dt, COUNT(*), SUM(i) FROM t1 GROUP BY dt
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 --sorted_result
 SELECT ts, COUNT(*) FROM t1 GROUP BY ts;
+--let $assert_query = SELECT ts, COUNT(*) FROM t1 GROUP BY ts
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 --sorted_result
 SELECT tm, COUNT(*) FROM t1 GROUP BY tm;
+--let $assert_query = SELECT tm, COUNT(*) FROM t1 GROUP BY tm
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 --sorted_result
 SELECT d, dt, COUNT(*) FROM t1 GROUP BY d, dt;
+--let $assert_query = SELECT d, dt, COUNT(*) FROM t1 GROUP BY d, dt
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 --sorted_result
 SELECT dt, i, COUNT(*) FROM t1 GROUP BY dt, i;
+--let $assert_query = SELECT dt, i, COUNT(*) FROM t1 GROUP BY dt, i
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 --sorted_result
 SELECT v, COUNT(*) FROM t1 GROUP BY v;
+--let $assert_query = SELECT v, COUNT(*) FROM t1 GROUP BY v
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 --echo # A single dictionary string key now uses batch input.
 --sorted_result
 SELECT COUNT(*), MIN(id), SUM(i) FROM t1 GROUP BY c;
+--let $assert_query = SELECT COUNT(*), MIN(id), SUM(i) FROM t1 GROUP BY c
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo #
 --echo # The same keys through the *row* encoder. A string column in the batch
@@ -102,10 +120,16 @@ SELECT COUNT(*), MIN(id), SUM(i) FROM t1 GROUP BY c;
 --echo #
 --sorted_result
 SELECT c, d, COUNT(*), SUM(i) FROM t1 GROUP BY c, d;
+--let $assert_query = SELECT c, d, COUNT(*), SUM(i) FROM t1 GROUP BY c, d
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 --sorted_result
 SELECT c, dt, COUNT(*), SUM(i) FROM t1 GROUP BY c, dt;
+--let $assert_query = SELECT c, dt, COUNT(*), SUM(i) FROM t1 GROUP BY c, dt
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 --sorted_result
 SELECT c, ts, tm, COUNT(*) FROM t1 GROUP BY c, ts, tm;
+--let $assert_query = SELECT c, ts, tm, COUNT(*) FROM t1 GROUP BY c, ts, tm
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo #
 --echo # Arm 2 of 2: InnoDB computes the same groups.

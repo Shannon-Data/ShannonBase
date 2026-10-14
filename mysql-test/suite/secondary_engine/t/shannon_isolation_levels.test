@@ -31,22 +31,37 @@ set session transaction isolation level read committed;
 set session use_secondary_engine = on;
 set session secondary_engine_cost_threshold = 0;
 select * from isoT order by id;
+--let $assert_query = select * from isoT order by id
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo # ===== REPEATABLE READ =====
 set session transaction isolation level repeatable read;
 select * from isoT order by id;
+--let $assert_query = select * from isoT order by id
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo # ===== READ UNCOMMITTED (should fall back, not offload) =====
 set session transaction isolation level read uncommitted;
 select * from isoT order by id;
+--let $assert_query = select * from isoT order by id
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo # ===== SERIALIZABLE (should fall back, not offload) =====
 set session transaction isolation level serializable;
 select * from isoT order by id;
+--let $assert_query = select * from isoT order by id
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo # ===== back to REPEATABLE READ =====
 set session transaction isolation level repeatable read;
 select * from isoT order by id;
+--let $assert_query = select * from isoT order by id
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo # ########## Rapid: hypergraph optimizer ##########
 --disable_warnings
@@ -57,22 +72,37 @@ set session transaction isolation level read committed;
 set session use_secondary_engine = on;
 set session secondary_engine_cost_threshold = 0;
 select * from isoT order by id;
+--let $assert_query = select * from isoT order by id
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo # ===== REPEATABLE READ =====
 set session transaction isolation level repeatable read;
 select * from isoT order by id;
+--let $assert_query = select * from isoT order by id
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo # ===== READ UNCOMMITTED (should fall back, not offload) =====
 set session transaction isolation level read uncommitted;
 select * from isoT order by id;
+--let $assert_query = select * from isoT order by id
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo # ===== SERIALIZABLE (should fall back, not offload) =====
 set session transaction isolation level serializable;
 select * from isoT order by id;
+--let $assert_query = select * from isoT order by id
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo # ===== back to REPEATABLE READ =====
 set session transaction isolation level repeatable read;
 select * from isoT order by id;
+--let $assert_query = select * from isoT order by id
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 set session optimizer_switch = default;
 

@@ -73,7 +73,11 @@ SELECT grp, COUNT(*), SUM(v), MIN(v), MAX(v) FROM g_many GROUP BY grp LIMIT 12;
 --echo # --- Rapid, legacy optimizer, forced heap->disk temp-table spill ---
 SET USE_SECONDARY_ENGINE = FORCED;
 --eval $q_all
+--let $assert_query = $q_all
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 --eval $q_filter
+--let $assert_query = $q_filter
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 --sorted_result
 SELECT grp, COUNT(*), SUM(v), MIN(v), MAX(v) FROM g_many GROUP BY grp LIMIT 12;
 

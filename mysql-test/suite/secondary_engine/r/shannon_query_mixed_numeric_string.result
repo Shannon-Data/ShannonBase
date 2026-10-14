@@ -1,0 +1,130 @@
+SET use_secondary_engine=OFF;
+CREATE TABLE ga_a(id INT PRIMARY KEY, v INT) SECONDARY_ENGINE=rapid;
+CREATE TABLE ga_b(id INT PRIMARY KEY, v INT) SECONDARY_ENGINE=rapid;
+CREATE TABLE ga_s(id INT PRIMARY KEY, s VARCHAR(20)) SECONDARY_ENGINE=rapid;
+INSERT INTO ga_a VALUES(1,NULL),(2,20),(3,30);
+INSERT INTO ga_b VALUES(1,100),(2,NULL);
+INSERT INTO ga_s VALUES(1,'1'),(2,'01'),(3,'1.0'),(4,'2');
+ALTER TABLE ga_a SECONDARY_LOAD;
+ALTER TABLE ga_b SECONDARY_LOAD;
+ALTER TABLE ga_s SECONDARY_LOAD;
+SET optimizer_switch='hypergraph_optimizer=off';
+SET use_secondary_engine=OFF;
+SELECT id,s FROM ga_s WHERE s=1 ORDER BY id;
+id	s
+1	1
+2	01
+3	1.0
+SELECT id,s FROM ga_s WHERE 1=s ORDER BY id;
+id	s
+1	1
+2	01
+3	1.0
+SELECT id,s FROM ga_s WHERE s=1.0 ORDER BY id;
+id	s
+1	1
+2	01
+3	1.0
+SELECT id,s FROM ga_s WHERE s=1e0 ORDER BY id;
+id	s
+1	1
+2	01
+3	1.0
+SELECT id,s FROM ga_s WHERE s<>1 ORDER BY id;
+id	s
+4	2
+SELECT id,s FROM ga_s WHERE s='01' ORDER BY id;
+id	s
+2	01
+SELECT id,s FROM ga_s WHERE s='1' ORDER BY id;
+id	s
+1	1
+SET optimizer_switch='hypergraph_optimizer=off';
+SET use_secondary_engine=OFF;
+SET use_secondary_engine=FORCED;
+SELECT id,s FROM ga_s WHERE s=1 ORDER BY id;
+id	s
+1	1
+2	01
+3	1.0
+SELECT id,s FROM ga_s WHERE 1=s ORDER BY id;
+id	s
+1	1
+2	01
+3	1.0
+SELECT id,s FROM ga_s WHERE s=1.0 ORDER BY id;
+id	s
+1	1
+2	01
+3	1.0
+SELECT id,s FROM ga_s WHERE s=1e0 ORDER BY id;
+id	s
+1	1
+2	01
+3	1.0
+SELECT id,s FROM ga_s WHERE s<>1 ORDER BY id;
+id	s
+4	2
+SELECT id,s FROM ga_s WHERE s='01' ORDER BY id;
+id	s
+2	01
+SELECT id,s FROM ga_s WHERE s='1' ORDER BY id;
+id	s
+1	1
+SET optimizer_switch='hypergraph_optimizer=off';
+SET use_secondary_engine=OFF;
+SET use_secondary_engine=FORCED;
+SET optimizer_switch='hypergraph_optimizer=on';
+Warnings:
+Warning	1287	The hypergraph optimizer is highly experimental and is meant for testing only. Do not enable it unless you are a MySQL developer.
+SELECT id,s FROM ga_s WHERE s=1 ORDER BY id;
+id	s
+1	1
+2	01
+3	1.0
+EXPLAIN FORMAT=TREE SELECT id,s FROM ga_s WHERE s=1 ORDER BY id;
+EXPLAIN
+-> Sort: ga_s.id  (...)
+    -> Filter: (ga_s.s = 1)  (...)
+        -> Vectorized table scan on ga_s in secondary engine Rapid  (...)
+
+Warnings:
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+SELECT id,s FROM ga_s WHERE 1=s ORDER BY id;
+id	s
+1	1
+2	01
+3	1.0
+SELECT id,s FROM ga_s WHERE s=1.0 ORDER BY id;
+id	s
+1	1
+2	01
+3	1.0
+SELECT id,s FROM ga_s WHERE s=1e0 ORDER BY id;
+id	s
+1	1
+2	01
+3	1.0
+SELECT id,s FROM ga_s WHERE s<>1 ORDER BY id;
+id	s
+4	2
+SELECT id,s FROM ga_s WHERE s='01' ORDER BY id;
+id	s
+2	01
+SELECT id,s FROM ga_s WHERE s='1' ORDER BY id;
+id	s
+1	1
+EXPLAIN FORMAT=TREE SELECT id,s FROM ga_s WHERE s='01' ORDER BY id;
+EXPLAIN
+-> Sort: ga_s.id  (...)
+    -> Vectorized table scan on ga_s in secondary engine Rapid [filter: ga_s.s = 01]  (...)
+
+Warnings:
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+SET use_secondary_engine=OFF;
+INSERT INTO ga_s VALUES(5,'1e0'),(6,NULL),(7,' 1 ');
+SET use_secondary_engine=OFF;
+ALTER TABLE ga_a SECONDARY_UNLOAD;
+ALTER TABLE ga_b SECONDARY_UNLOAD;
+ALTER TABLE ga_s SECONDARY_UNLOAD;
+DROP TABLE ga_a,ga_b,ga_s;

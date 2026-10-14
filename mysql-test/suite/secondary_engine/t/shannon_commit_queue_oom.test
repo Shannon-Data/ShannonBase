@@ -12,11 +12,15 @@ SET GLOBAL debug='+d,rapid_finalize_commits_stall';
 BEGIN;
 UPDATE t SET v=110 WHERE id=1;
 SELECT SUM(v) FROM t;
+--let $assert_query = SELECT SUM(v) FROM t
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 # Queue allocation failure must retain the published terminal outcome.
 SET debug='+d,rapid_commit_queue_bad_alloc';
 COMMIT;
 SET debug='-d,rapid_commit_queue_bad_alloc';
 SELECT SUM(v) FROM t;
+--let $assert_query = SELECT SUM(v) FROM t
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 # The fallback must actually finalize the retained IMCU, not merely return
 # correct SQL through source ReadView. Inject a failure into that finalization.
 SET GLOBAL debug='+d,rapid_finalize_imcu_failure';
@@ -34,5 +38,7 @@ ALTER TABLE t SECONDARY_UNLOAD;
 ALTER TABLE t SECONDARY_LOAD;
 SET use_secondary_engine=FORCED;
 SELECT SUM(v) FROM t;
+--let $assert_query = SELECT SUM(v) FROM t
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SET use_secondary_engine=OFF;
 DROP DATABASE sh_commit_queue;

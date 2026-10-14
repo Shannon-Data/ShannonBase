@@ -25,5 +25,7 @@ SET debug='+d,rapid_operator_budget_floor';
 SELECT pkey,SUM(bval),SUM(pval),COUNT(*) FROM p JOIN b ON pkey=bkey GROUP BY pkey;
 SET debug='-d,rapid_operator_budget_floor';
 SELECT COUNT(*) FROM b;
+--let $assert_query = SELECT COUNT(*) FROM b
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SET use_secondary_engine=OFF;
 DROP DATABASE sh_spill_workspace;

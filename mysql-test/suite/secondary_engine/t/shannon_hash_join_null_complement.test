@@ -65,6 +65,9 @@ SET SESSION use_secondary_engine=FORCED;
 SELECT b.bkey, COUNT(*) AS n, SUM(p.pval) AS s
   FROM probe_t p LEFT JOIN build_t b ON p.pkey = b.bkey
  GROUP BY b.bkey ORDER BY b.bkey;
+--let $assert_query = SELECT b.bkey, COUNT(*) AS n, SUM(p.pval) AS s FROM probe_t p LEFT JOIN build_t b ON p.pkey = b.bkey GROUP BY b.bkey ORDER BY b.bkey
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SET SESSION use_secondary_engine=off;
 SELECT b.bkey, COUNT(*) AS n, SUM(p.pval) AS s
   FROM probe_t p LEFT JOIN build_t b ON p.pkey = b.bkey
@@ -80,6 +83,9 @@ SELECT b.bkey, COUNT(*) AS n, SUM(p.pval) AS s
 SET SESSION use_secondary_engine=FORCED;
 SELECT p.pid, p.pkey FROM probe_t p LEFT JOIN build_t b ON p.pkey = b.bkey
  WHERE b.bkey IS NULL ORDER BY p.pid;
+--let $assert_query = SELECT p.pid, p.pkey FROM probe_t p LEFT JOIN build_t b ON p.pkey = b.bkey WHERE b.bkey IS NULL ORDER BY p.pid
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SET SESSION use_secondary_engine=off;
 SELECT p.pid, p.pkey FROM probe_t p LEFT JOIN build_t b ON p.pkey = b.bkey
  WHERE b.bkey IS NULL ORDER BY p.pid;
@@ -100,6 +106,8 @@ SET SESSION use_secondary_engine=FORCED;
 SELECT COUNT(*) AS unmatched_above_avg FROM probe_t p
  WHERE p.pval > (SELECT AVG(pval) FROM probe_t)
    AND NOT EXISTS (SELECT 1 FROM build_t b WHERE b.bkey = p.pkey);
+--let $assert_query = SELECT COUNT(*) AS unmatched_above_avg FROM probe_t p WHERE p.pval > (SELECT AVG(pval) FROM probe_t) AND NOT EXISTS (SELECT 1 FROM build_t b WHERE b.bkey = p.pkey)
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SET SESSION use_secondary_engine=off;
 SELECT COUNT(*) AS unmatched_above_avg FROM probe_t p
  WHERE p.pval > (SELECT AVG(pval) FROM probe_t)
@@ -113,6 +121,9 @@ SET SESSION use_secondary_engine=FORCED;
 SELECT p.pkey % 3 AS bucket, COUNT(*) AS n FROM probe_t p
  WHERE NOT EXISTS (SELECT 1 FROM build_t b WHERE b.bkey = p.pkey)
  GROUP BY bucket ORDER BY bucket;
+--let $assert_query = SELECT p.pkey % 3 AS bucket, COUNT(*) AS n FROM probe_t p WHERE NOT EXISTS (SELECT 1 FROM build_t b WHERE b.bkey = p.pkey) GROUP BY bucket ORDER BY bucket
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SET SESSION use_secondary_engine=off;
 SELECT p.pkey % 3 AS bucket, COUNT(*) AS n FROM probe_t p
  WHERE NOT EXISTS (SELECT 1 FROM build_t b WHERE b.bkey = p.pkey)
@@ -129,6 +140,9 @@ SELECT p.pkey % 3 AS bucket, COUNT(*) AS n FROM probe_t p
 SET SESSION use_secondary_engine=FORCED;
 SELECT p.pid, b.bkey, b.bval FROM probe_t p LEFT JOIN build_t b ON p.pkey = b.bkey
  ORDER BY p.pid;
+--let $assert_query = SELECT p.pid, b.bkey, b.bval FROM probe_t p LEFT JOIN build_t b ON p.pkey = b.bkey ORDER BY p.pid
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SET SESSION use_secondary_engine=off;
 SELECT p.pid, b.bkey, b.bval FROM probe_t p LEFT JOIN build_t b ON p.pkey = b.bkey
  ORDER BY p.pid;

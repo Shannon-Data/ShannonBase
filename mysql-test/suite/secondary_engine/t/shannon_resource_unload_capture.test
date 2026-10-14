@@ -23,6 +23,8 @@ ALTER TABLE ri_b SECONDARY_UNLOAD;
 SET DEBUG_SYNC='now SIGNAL rapid_apply_mutation_continue';
 SET use_secondary_engine=FORCED;
 SELECT SUM(v) FROM ri_a;
+--let $assert_query = SELECT SUM(v) FROM ri_a
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SET use_secondary_engine=OFF;
 ALTER TABLE ri_a SECONDARY_UNLOAD;
 DROP TABLE ri_a,ri_b;

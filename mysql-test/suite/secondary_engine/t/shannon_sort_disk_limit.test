@@ -17,5 +17,8 @@ SET debug='+d,rapid_sort_tiny_budget';
 SELECT id FROM t ORDER BY s;
 SET debug='-d,rapid_sort_tiny_budget';
 SELECT id FROM t ORDER BY s LIMIT 3;
+--let $assert_query = SELECT id FROM t ORDER BY s LIMIT 3
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SET use_secondary_engine=OFF;
 DROP DATABASE sh_sort_disk_limit;

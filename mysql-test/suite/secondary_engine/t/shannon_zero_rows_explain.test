@@ -46,8 +46,14 @@ EXPLAIN FORMAT=TREE SELECT id FROM t1 WHERE id IN (SELECT id FROM t1 WHERE FALSE
 --echo # The plans still execute, and the aggregated shape emits its one row.
 --echo #
 SELECT id FROM t1 WHERE FALSE;
+--let $assert_query = SELECT id FROM t1 WHERE FALSE
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT COUNT(*) FROM t1 WHERE FALSE;
+--let $assert_query = SELECT COUNT(*) FROM t1 WHERE FALSE
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT SUM(d) FROM t1 WHERE 1 = 0;
+--let $assert_query = SELECT SUM(d) FROM t1 WHERE 1 = 0
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo #
 --echo # InnoDB agrees.

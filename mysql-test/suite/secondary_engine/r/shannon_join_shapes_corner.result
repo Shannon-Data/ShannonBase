@@ -269,8 +269,11 @@ id	id	k
 2	3	2
 select a.id, b.id from c1 a left join c1 b on a.k = b.k and a.id <> b.id order by a.id, b.id;
 id	id
+1	NULL
 2	3
 3	2
+4	NULL
+5	NULL
 # correlated EXISTS / NOT EXISTS
 select id from c1 where exists (select 1 from c2 where c2.k = c1.k) order by id;
 id
@@ -512,8 +515,11 @@ id	id	k
 2	3	2
 select a.id, b.id from c1 a left join c1 b on a.k = b.k and a.id <> b.id order by a.id, b.id;
 id	id
+1	NULL
 2	3
 3	2
+4	NULL
+5	NULL
 # correlated EXISTS / NOT EXISTS
 select id from c1 where exists (select 1 from c2 where c2.k = c1.k) order by id;
 id

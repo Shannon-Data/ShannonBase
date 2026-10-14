@@ -12,13 +12,9 @@
 # CROSS JOIN had no coverage in this suite, and self joins, EXISTS and LATERAL
 # had almost none.
 #
-# KNOWN DIVERGENCE as of 2026-09-06: under the hypergraph optimizer the
-# self LEFT JOIN
-#     c1 a left join c1 b on a.k = b.k and a.id <> b.id
-# returns only the matching pairs; the three null-complemented rows are
-# dropped, i.e. the LEFT JOIN degenerates into an INNER JOIN. The legacy
-# optimizer answers it correctly. The wrong rows are recorded below to pin the
-# behaviour; a fix makes this test fail until it is re-recorded.
+# The self LEFT JOIN must preserve unmatched rows, including the NULL key.
+# Compare it explicitly with InnoDB under both Rapid optimizers so recorded
+# results cannot silently accept a regression in NULL-complemented rows.
 # ShannonBase copyright 2023-
 ##############################################################################
 

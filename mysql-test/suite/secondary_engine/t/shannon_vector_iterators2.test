@@ -119,6 +119,8 @@ SET SESSION optimizer_switch='hypergraph_optimizer=on';
 SELECT COUNT(*)
 FROM t_wide a JOIN t_wide b ON a.grp_low = b.grp_low
 WHERE a.id < 500;
+--let $assert_query = SELECT COUNT(*) FROM t_wide a JOIN t_wide b ON a.grp_low = b.grp_low WHERE a.id < 500
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo # GROUP BY self-join — exercises ProcessGroupVectorized boundary detection
 SELECT a.grp_low, COUNT(*)
@@ -127,6 +129,9 @@ WHERE a.id < 500
 GROUP BY a.grp_low
 ORDER BY a.grp_low
 LIMIT 5;
+--let $assert_query = SELECT a.grp_low, COUNT(*) FROM t_wide a JOIN t_wide b ON a.grp_low = b.grp_low WHERE a.id < 500 GROUP BY a.grp_low ORDER BY a.grp_low LIMIT 5
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo # GROUP BY self-join with SUM / AVG
 SELECT a.grp_high,
@@ -138,6 +143,10 @@ FROM t_wide a JOIN t_wide b ON a.grp_high = b.grp_high
 WHERE a.id < 500
 GROUP BY a.grp_high
 ORDER BY a.grp_high;
+# Ignore only floating-point summation noise in this comparison.
+--let $assert_query = SELECT a.grp_high, COUNT(*), SUM(a.val_int), ROUND(SUM(a.val_dbl),6), ROUND(AVG(a.val_dbl),6) FROM t_wide a JOIN t_wide b ON a.grp_high = b.grp_high WHERE a.id < 500 GROUP BY a.grp_high ORDER BY a.grp_high
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo # Self-join with two GROUP BY columns
 SELECT a.grp_low, a.grp_high, COUNT(*)
@@ -146,32 +155,45 @@ WHERE a.id < 500
 GROUP BY a.grp_low, a.grp_high
 ORDER BY a.grp_low, a.grp_high
 LIMIT 5;
+--let $assert_query = SELECT a.grp_low, a.grp_high, COUNT(*) FROM t_wide a JOIN t_wide b ON a.grp_low = b.grp_low WHERE a.id < 500 GROUP BY a.grp_low, a.grp_high ORDER BY a.grp_low, a.grp_high LIMIT 5
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo # GROUP BY self-join without ORDER BY must not lose groups
 SELECT COUNT(*) AS groups_found, SUM(group_rows) AS joined_rows
 FROM (SELECT a.grp_low, COUNT(*) AS group_rows
       FROM t_wide a JOIN t_wide b ON a.grp_low = b.grp_low
       WHERE a.id < 500 GROUP BY a.grp_low) g;
+--let $assert_query = SELECT COUNT(*) AS groups_found, SUM(group_rows) AS joined_rows FROM (SELECT a.grp_low, COUNT(*) AS group_rows FROM t_wide a JOIN t_wide b ON a.grp_low = b.grp_low WHERE a.id < 500 GROUP BY a.grp_low) g
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo # Reversing join inputs must preserve grouped results
 SELECT COUNT(*) AS groups_found, SUM(group_rows) AS joined_rows
 FROM (SELECT b.grp_low, COUNT(*) AS group_rows
       FROM t_wide b JOIN t_wide a ON b.grp_low = a.grp_low
       WHERE a.id < 500 GROUP BY b.grp_low) g;
+--let $assert_query = SELECT COUNT(*) AS groups_found, SUM(group_rows) AS joined_rows FROM (SELECT b.grp_low, COUNT(*) AS group_rows FROM t_wide b JOIN t_wide a ON b.grp_low = a.grp_low WHERE a.id < 500 GROUP BY b.grp_low) g
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo # Subquery — scalar in WHERE
 SELECT COUNT(*)
 FROM t_wide
 WHERE grp_low = (SELECT grp_low FROM t_wide WHERE id = 10);
+--let $assert_query = SELECT COUNT(*) FROM t_wide WHERE grp_low = (SELECT grp_low FROM t_wide WHERE id = 10)
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo # Subquery — IN clause
 SELECT COUNT(*)
 FROM t_wide
 WHERE grp_low IN (SELECT grp_low FROM t_wide WHERE id < 20);
+--let $assert_query = SELECT COUNT(*) FROM t_wide WHERE grp_low IN (SELECT grp_low FROM t_wide WHERE id < 20)
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo # Subquery as derived table
 SELECT COUNT(*), SUM(x.c)
 FROM (SELECT grp_low, COUNT(*) AS c FROM t_wide WHERE id < 500 GROUP BY grp_low) x;
+--let $assert_query = SELECT COUNT(*), SUM(x.c) FROM (SELECT grp_low, COUNT(*) AS c FROM t_wide WHERE id < 500 GROUP BY grp_low) x
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 # ═══════════════════════════════════════════════════════════════
 #  Rapid engine (vectorized path) — traditional optimizer
@@ -184,6 +206,8 @@ SET SESSION optimizer_switch='hypergraph_optimizer=off';
 SELECT COUNT(*)
 FROM t_wide a JOIN t_wide b ON a.grp_low = b.grp_low
 WHERE a.id < 500;
+--let $assert_query = SELECT COUNT(*) FROM t_wide a JOIN t_wide b ON a.grp_low = b.grp_low WHERE a.id < 500
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo # GROUP BY self-join — exercises ProcessGroupVectorized boundary detection
 SELECT a.grp_low, COUNT(*)
@@ -192,6 +216,9 @@ WHERE a.id < 500
 GROUP BY a.grp_low
 ORDER BY a.grp_low
 LIMIT 5;
+--let $assert_query = SELECT a.grp_low, COUNT(*) FROM t_wide a JOIN t_wide b ON a.grp_low = b.grp_low WHERE a.id < 500 GROUP BY a.grp_low ORDER BY a.grp_low LIMIT 5
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo # GROUP BY self-join with SUM / AVG
 SELECT a.grp_high,
@@ -203,6 +230,10 @@ FROM t_wide a JOIN t_wide b ON a.grp_high = b.grp_high
 WHERE a.id < 500
 GROUP BY a.grp_high
 ORDER BY a.grp_high;
+# Ignore only floating-point summation noise in this comparison.
+--let $assert_query = SELECT a.grp_high, COUNT(*), SUM(a.val_int), ROUND(SUM(a.val_dbl),6), ROUND(AVG(a.val_dbl),6) FROM t_wide a JOIN t_wide b ON a.grp_high = b.grp_high WHERE a.id < 500 GROUP BY a.grp_high ORDER BY a.grp_high
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo # Self-join with two GROUP BY columns
 SELECT a.grp_low, a.grp_high, COUNT(*)
@@ -211,32 +242,45 @@ WHERE a.id < 500
 GROUP BY a.grp_low, a.grp_high
 ORDER BY a.grp_low, a.grp_high
 LIMIT 5;
+--let $assert_query = SELECT a.grp_low, a.grp_high, COUNT(*) FROM t_wide a JOIN t_wide b ON a.grp_low = b.grp_low WHERE a.id < 500 GROUP BY a.grp_low, a.grp_high ORDER BY a.grp_low, a.grp_high LIMIT 5
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo # GROUP BY self-join without ORDER BY must not lose groups
 SELECT COUNT(*) AS groups_found, SUM(group_rows) AS joined_rows
 FROM (SELECT a.grp_low, COUNT(*) AS group_rows
       FROM t_wide a JOIN t_wide b ON a.grp_low = b.grp_low
       WHERE a.id < 500 GROUP BY a.grp_low) g;
+--let $assert_query = SELECT COUNT(*) AS groups_found, SUM(group_rows) AS joined_rows FROM (SELECT a.grp_low, COUNT(*) AS group_rows FROM t_wide a JOIN t_wide b ON a.grp_low = b.grp_low WHERE a.id < 500 GROUP BY a.grp_low) g
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo # Reversing join inputs must preserve grouped results
 SELECT COUNT(*) AS groups_found, SUM(group_rows) AS joined_rows
 FROM (SELECT b.grp_low, COUNT(*) AS group_rows
       FROM t_wide b JOIN t_wide a ON b.grp_low = a.grp_low
       WHERE a.id < 500 GROUP BY b.grp_low) g;
+--let $assert_query = SELECT COUNT(*) AS groups_found, SUM(group_rows) AS joined_rows FROM (SELECT b.grp_low, COUNT(*) AS group_rows FROM t_wide b JOIN t_wide a ON b.grp_low = a.grp_low WHERE a.id < 500 GROUP BY b.grp_low) g
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo # Subquery — scalar in WHERE
 SELECT COUNT(*)
 FROM t_wide
 WHERE grp_low = (SELECT grp_low FROM t_wide WHERE id = 10);
+--let $assert_query = SELECT COUNT(*) FROM t_wide WHERE grp_low = (SELECT grp_low FROM t_wide WHERE id = 10)
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo # Subquery — IN clause
 SELECT COUNT(*)
 FROM t_wide
 WHERE grp_low IN (SELECT grp_low FROM t_wide WHERE id < 20);
+--let $assert_query = SELECT COUNT(*) FROM t_wide WHERE grp_low IN (SELECT grp_low FROM t_wide WHERE id < 20)
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo # Subquery as derived table
 SELECT COUNT(*), SUM(x.c)
 FROM (SELECT grp_low, COUNT(*) AS c FROM t_wide WHERE id < 500 GROUP BY grp_low) x;
+--let $assert_query = SELECT COUNT(*), SUM(x.c) FROM (SELECT grp_low, COUNT(*) AS c FROM t_wide WHERE id < 500 GROUP BY grp_low) x
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 # ═══════════════════════════════════════════════════════════════
 #  rapid_use_dynamic_offload=on — FORCED must still execute in RAPID
@@ -269,6 +313,10 @@ FROM t_wide a JOIN t_wide b ON a.grp_high = b.grp_high
 WHERE a.id < 500
 GROUP BY a.grp_high
 ORDER BY a.grp_high;
+# Ignore only floating-point summation noise in this comparison.
+--let $assert_query = SELECT a.grp_high, COUNT(*), SUM(a.val_int), ROUND(SUM(a.val_dbl),6), ROUND(AVG(a.val_dbl),6) FROM t_wide a JOIN t_wide b ON a.grp_high = b.grp_high WHERE a.id < 500 GROUP BY a.grp_high ORDER BY a.grp_high
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo # --- Rapid legacy (dynamic offload on) ---
 SET SESSION optimizer_switch='hypergraph_optimizer=off';
@@ -282,6 +330,10 @@ FROM t_wide a JOIN t_wide b ON a.grp_high = b.grp_high
 WHERE a.id < 500
 GROUP BY a.grp_high
 ORDER BY a.grp_high;
+# Ignore only floating-point summation noise in this comparison.
+--let $assert_query = SELECT a.grp_high, COUNT(*), SUM(a.val_int), ROUND(SUM(a.val_dbl),6), ROUND(AVG(a.val_dbl),6) FROM t_wide a JOIN t_wide b ON a.grp_high = b.grp_high WHERE a.id < 500 GROUP BY a.grp_high ORDER BY a.grp_high
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 # ── Clean up ──
 DROP TABLE t_wide;

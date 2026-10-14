@@ -112,6 +112,9 @@ SET SESSION secondary_engine_cost_threshold = 0;
 FLUSH STATUS;
 SELECT id, k FROM t FORCE INDEX (idx_k)
 ORDER BY k DESC;
+--let $assert_query = SELECT id, k FROM t FORCE INDEX (idx_k) ORDER BY k DESC
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SET USE_SECONDARY_ENGINE = OFF;
 SELECT (VARIABLE_VALUE + 0) > 0 AS used_index_prev
 FROM performance_schema.session_status
@@ -122,6 +125,9 @@ SET USE_SECONDARY_ENGINE = FORCED;
 FLUSH STATUS;
 SELECT id, k FROM t FORCE INDEX (idx_k_desc)
 ORDER BY k ASC;
+--let $assert_query = SELECT id, k FROM t FORCE INDEX (idx_k_desc) ORDER BY k ASC
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SET USE_SECONDARY_ENGINE = OFF;
 SELECT (VARIABLE_VALUE + 0) > 0 AS used_index_prev
 FROM performance_schema.session_status
@@ -132,6 +138,9 @@ SET USE_SECONDARY_ENGINE = FORCED;
 FLUSH STATUS;
 SELECT id, k FROM t FORCE INDEX (idx_k_desc)
 ORDER BY k DESC;
+--let $assert_query = SELECT id, k FROM t FORCE INDEX (idx_k_desc) ORDER BY k DESC
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SET USE_SECONDARY_ENGINE = OFF;
 SELECT (VARIABLE_VALUE + 0) > 0 AS used_index_next
 FROM performance_schema.session_status
@@ -143,6 +152,9 @@ FLUSH STATUS;
 SELECT id, k FROM t FORCE INDEX (idx_k)
 WHERE k BETWEEN 20 AND 70
 ORDER BY k DESC;
+--let $assert_query = SELECT id, k FROM t FORCE INDEX (idx_k) WHERE k BETWEEN 20 AND 70 ORDER BY k DESC
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SET USE_SECONDARY_ENGINE = OFF;
 SELECT (VARIABLE_VALUE + 0) > 0 AS used_index_prev
 FROM performance_schema.session_status
@@ -154,6 +166,9 @@ FLUSH STATUS;
 SELECT id, k FROM t FORCE INDEX (idx_k)
 WHERE k > 20 AND k < 68
 ORDER BY k DESC;
+--let $assert_query = SELECT id, k FROM t FORCE INDEX (idx_k) WHERE k > 20 AND k < 68 ORDER BY k DESC
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SET USE_SECONDARY_ENGINE = OFF;
 SELECT (VARIABLE_VALUE + 0) > 0 AS used_index_prev
 FROM performance_schema.session_status
@@ -165,6 +180,9 @@ FLUSH STATUS;
 SELECT id, a, b, c FROM t FORCE INDEX (idx_abc)
 WHERE a = 1
 ORDER BY b DESC, c DESC;
+--let $assert_query = SELECT id, a, b, c FROM t FORCE INDEX (idx_abc) WHERE a = 1 ORDER BY b DESC, c DESC
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SET USE_SECONDARY_ENGINE = OFF;
 SELECT (VARIABLE_VALUE + 0) > 0 AS used_index_prev
 FROM performance_schema.session_status
@@ -176,6 +194,9 @@ FLUSH STATUS;
 SELECT id, a, b, c FROM t FORCE INDEX (idx_abc)
 WHERE a = 1 AND b = 2
 ORDER BY c DESC;
+--let $assert_query = SELECT id, a, b, c FROM t FORCE INDEX (idx_abc) WHERE a = 1 AND b = 2 ORDER BY c DESC
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SET USE_SECONDARY_ENGINE = OFF;
 SELECT (VARIABLE_VALUE + 0) > 0 AS used_index_prev
 FROM performance_schema.session_status
@@ -187,6 +208,9 @@ FLUSH STATUS;
 SELECT id, a, b, c FROM t FORCE INDEX (idx_abc)
 WHERE a = 1 AND b BETWEEN 2 AND 3
 ORDER BY b DESC, c DESC;
+--let $assert_query = SELECT id, a, b, c FROM t FORCE INDEX (idx_abc) WHERE a = 1 AND b BETWEEN 2 AND 3 ORDER BY b DESC, c DESC
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SET USE_SECONDARY_ENGINE = OFF;
 SELECT (VARIABLE_VALUE + 0) > 0 AS used_index_prev
 FROM performance_schema.session_status
@@ -197,6 +221,9 @@ SET USE_SECONDARY_ENGINE = FORCED;
 FLUSH STATUS;
 SELECT dup, id FROM t FORCE INDEX (idx_dup)
 ORDER BY dup DESC;
+--let $assert_query = SELECT dup, id FROM t FORCE INDEX (idx_dup) ORDER BY dup DESC
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SET USE_SECONDARY_ENGINE = OFF;
 SELECT (VARIABLE_VALUE + 0) > 0 AS used_index_prev
 FROM performance_schema.session_status
@@ -253,6 +280,9 @@ SET USE_SECONDARY_ENGINE = FORCED;
 SELECT dup, id FROM t FORCE INDEX (idx_dup)
 WHERE dup BETWEEN 6 AND 8
 ORDER BY dup DESC;
+--let $assert_query = SELECT dup, id FROM t FORCE INDEX (idx_dup) WHERE dup BETWEEN 6 AND 8 ORDER BY dup DESC
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 --disable_query_log
 SET USE_SECONDARY_ENGINE = OFF;
 --enable_query_log

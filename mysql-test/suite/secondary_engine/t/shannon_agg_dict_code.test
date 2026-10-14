@@ -82,4 +82,29 @@ SELECT COUNT(*) AS missing FROM (SELECT * FROM ref_latin EXCEPT SELECT * FROM go
 SELECT COUNT(*) AS extra FROM (SELECT * FROM got_latin_row EXCEPT SELECT * FROM ref_latin) x;
 SET SESSION optimizer_switch=default;
 SET SESSION secondary_engine_cost_threshold=default;
+--let $assert_reference_table = ref_ai
+--let $assert_actual_table = got_ai
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_reference_table = ref_ai
+--let $assert_actual_table = got_ai_row
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_reference_table = ref_pad
+--let $assert_actual_table = got_pad
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_reference_table = ref_pad
+--let $assert_actual_table = got_pad_row
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_reference_table = ref_bin
+--let $assert_actual_table = got_bin
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_reference_table = ref_bin
+--let $assert_actual_table = got_bin_row
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_reference_table = ref_latin
+--let $assert_actual_table = got_latin
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_reference_table = ref_latin
+--let $assert_actual_table = got_latin_row
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+
 DROP DATABASE sh_agg_dict;

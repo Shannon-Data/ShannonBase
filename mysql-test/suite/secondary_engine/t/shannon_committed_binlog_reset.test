@@ -8,6 +8,8 @@ ALTER TABLE cb_reset SECONDARY_LOAD;
 UPDATE cb_reset SET v=11 WHERE id=1;
 SET use_secondary_engine=FORCED;
 SELECT SUM(v) FROM cb_reset;
+--let $assert_query = SELECT SUM(v) FROM cb_reset
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SET use_secondary_engine=OFF;
 RESET BINARY LOGS AND GTIDS;
 UPDATE cb_reset SET v=12 WHERE id=1;
@@ -17,11 +19,15 @@ SELECT SUM(v) FROM cb_reset;
 SHOW WARNINGS;
 SET use_secondary_engine=ON;
 SELECT SUM(v) FROM cb_reset;
+--let $assert_query = SELECT SUM(v) FROM cb_reset
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SET use_secondary_engine=OFF;
 ALTER TABLE cb_reset SECONDARY_UNLOAD;
 ALTER TABLE cb_reset SECONDARY_LOAD;
 SET use_secondary_engine=FORCED;
 SELECT SUM(v) FROM cb_reset;
+--let $assert_query = SELECT SUM(v) FROM cb_reset
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SET use_secondary_engine=OFF;
 ALTER TABLE cb_reset SECONDARY_UNLOAD;
 DROP TABLE cb_reset;

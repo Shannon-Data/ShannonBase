@@ -29,6 +29,9 @@ SET DEBUG_SYNC='now SIGNAL rapid_apply_mutation_continue';
 --enable_query_log
 SET use_secondary_engine=FORCED;
 SELECT id,v,LENGTH(payload) FROM t ORDER BY id;
+--let $assert_query = SELECT id,v,LENGTH(payload) FROM t ORDER BY id
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 --connection default
 # Apply first, then publish a batched terminal outcome. A subsequent query
 # must preserve the primary creator visibility without a per-commit wakeup.
@@ -36,19 +39,31 @@ BEGIN;
 UPDATE t SET v=12 WHERE id=1;
 --connection observer
 SELECT id,v,LENGTH(payload) FROM t ORDER BY id;
+--let $assert_query = SELECT id,v,LENGTH(payload) FROM t ORDER BY id
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 --connection default
 COMMIT;
 --connection observer
 SELECT id,v,LENGTH(payload) FROM t ORDER BY id;
+--let $assert_query = SELECT id,v,LENGTH(payload) FROM t ORDER BY id
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 --connection default
 BEGIN;
 UPDATE t SET v=99,payload=REPEAT('d',4000) WHERE id=2;
 --connection observer
 SELECT id,v,LENGTH(payload) FROM t ORDER BY id;
+--let $assert_query = SELECT id,v,LENGTH(payload) FROM t ORDER BY id
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 --connection default
 ROLLBACK;
 --connection observer
 SELECT id,v,LENGTH(payload) FROM t ORDER BY id;
+--let $assert_query = SELECT id,v,LENGTH(payload) FROM t ORDER BY id
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 --connection default
 --disable_query_log
 SET DEBUG_SYNC='RESET';

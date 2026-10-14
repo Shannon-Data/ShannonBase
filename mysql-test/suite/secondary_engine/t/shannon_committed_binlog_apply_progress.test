@@ -29,6 +29,8 @@ connection default;
 SET DEBUG_SYNC='now SIGNAL rapid_apply_mutation_continue';
 connection reader;
 --reap
+--let $assert_query = SELECT SUM(cb_a.v),SUM(cb_b.v) FROM cb_a JOIN cb_b ON cb_a.id=cb_b.id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 disconnect reader;
 connection default;
 SET DEBUG_SYNC='RESET';

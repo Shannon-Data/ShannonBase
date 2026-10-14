@@ -20,6 +20,8 @@ UPDATE review_b SET v=11;
 SET use_secondary_engine=FORCED;
 --enable_query_log
 SELECT v FROM review_b;
+--let $assert_query = SELECT v FROM review_b
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 --disable_query_log
 --connection locker
 UNLOCK TABLES;
@@ -32,6 +34,8 @@ COMMIT;
 SET use_secondary_engine=FORCED;
 --enable_query_log
 SELECT a.v,b.v FROM review_a a JOIN review_b b ON a.id=b.id;
+--let $assert_query = SELECT a.v,b.v FROM review_a a JOIN review_b b ON a.id=b.id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 --disable_query_log
 SET use_secondary_engine=OFF;
 ALTER TABLE review_a SECONDARY_UNLOAD;

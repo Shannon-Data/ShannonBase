@@ -24,7 +24,7 @@ alter table rk secondary_load;
 # ===== InnoDB baseline =====
 set session use_secondary_engine = off;
 select id, grp, ord, v,
-row_number() over (partition by grp order by ord is null, ord) as rn,
+row_number() over (partition by grp order by ord is null, ord, id) as rn,
 rank() over (partition by grp order by ord is null, ord) as rnk,
 dense_rank() over (partition by grp order by ord is null, ord) as drnk
 from rk
@@ -44,7 +44,7 @@ id	grp	ord	v	rn	rnk	drnk
 set session use_secondary_engine = forced;
 set session optimizer_switch='hypergraph_optimizer=off';
 select id, grp, ord, v,
-row_number() over (partition by grp order by ord is null, ord) as rn,
+row_number() over (partition by grp order by ord is null, ord, id) as rn,
 rank() over (partition by grp order by ord is null, ord) as rnk,
 dense_rank() over (partition by grp order by ord is null, ord) as drnk
 from rk
@@ -63,7 +63,7 @@ id	grp	ord	v	rn	rnk	drnk
 # ===== Rapid (hypergraph optimizer) =====
 set session optimizer_switch='hypergraph_optimizer=on';
 select id, grp, ord, v,
-row_number() over (partition by grp order by ord is null, ord) as rn,
+row_number() over (partition by grp order by ord is null, ord, id) as rn,
 rank() over (partition by grp order by ord is null, ord) as rnk,
 dense_rank() over (partition by grp order by ord is null, ord) as drnk
 from rk

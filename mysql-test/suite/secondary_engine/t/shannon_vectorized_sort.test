@@ -68,25 +68,85 @@ EXPLAIN FORMAT=TREE SELECT i, d FROM t1 ORDER BY d, i;
 SET SESSION use_secondary_engine = FORCED;
 let $before = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_sort_rows_total', Value, 1);
 SELECT id, i FROM t1 ORDER BY i, id;
+--let $assert_query = SELECT id, i FROM t1 ORDER BY i, id
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT id, u FROM t1 ORDER BY u DESC, id;
+--let $assert_query = SELECT id, u FROM t1 ORDER BY u DESC, id
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT id, bi, si FROM t1 ORDER BY bi, si, id;
+--let $assert_query = SELECT id, bi, si FROM t1 ORDER BY bi, si, id
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT id, d FROM t1 ORDER BY d, id;
+--let $assert_query = SELECT id, d FROM t1 ORDER BY d, id
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT id, f FROM t1 ORDER BY f DESC, id;
+--let $assert_query = SELECT id, f FROM t1 ORDER BY f DESC, id
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT id, dt, ts, y FROM t1 ORDER BY dt, ts, y, id;
+--let $assert_query = SELECT id, dt, ts, y FROM t1 ORDER BY dt, ts, y, id
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT id, ni FROM t1 ORDER BY ni, id;
+--let $assert_query = SELECT id, ni FROM t1 ORDER BY ni, id
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT id, ni FROM t1 ORDER BY ni DESC, id;
+--let $assert_query = SELECT id, ni FROM t1 ORDER BY ni DESC, id
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT id, nd FROM t1 ORDER BY nd, id;
+--let $assert_query = SELECT id, nd FROM t1 ORDER BY nd, id
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT id, c, v FROM t1 ORDER BY c, v, id;
+--let $assert_query = SELECT id, c, v FROM t1 ORDER BY c, v, id
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT id, e FROM t1 ORDER BY e, id;
+--let $assert_query = SELECT id, e FROM t1 ORDER BY e, id
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT id, i, d FROM t1 ORDER BY i DESC, d ASC, id DESC;
+--let $assert_query = SELECT id, i, d FROM t1 ORDER BY i DESC, d ASC, id DESC
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT id, i FROM t1 ORDER BY i, id LIMIT 3;
+--let $assert_query = SELECT id, i FROM t1 ORDER BY i, id LIMIT 3
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT id, i FROM t1 ORDER BY i DESC, id LIMIT 3;
+--let $assert_query = SELECT id, i FROM t1 ORDER BY i DESC, id LIMIT 3
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT id, d, v FROM t1 ORDER BY d, id LIMIT 1;
+--let $assert_query = SELECT id, d, v FROM t1 ORDER BY d, id LIMIT 1
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT id, ni FROM t1 ORDER BY ni, id LIMIT 4;
+--let $assert_query = SELECT id, ni FROM t1 ORDER BY ni, id LIMIT 4
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT id, i FROM t1 ORDER BY i, id LIMIT 3 OFFSET 4;
+--let $assert_query = SELECT id, i FROM t1 ORDER BY i, id LIMIT 3 OFFSET 4
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT id, i FROM t1 ORDER BY i, id LIMIT 100;
+--let $assert_query = SELECT id, i FROM t1 ORDER BY i, id LIMIT 100
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT id, i FROM t1 ORDER BY i, id LIMIT 0;
+--let $assert_query = SELECT id, i FROM t1 ORDER BY i, id LIMIT 0
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT id, i FROM t1 WHERE i > 1000 ORDER BY i, id;
+--let $assert_query = SELECT id, i FROM t1 WHERE i > 1000 ORDER BY i, id
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 let $after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_sort_rows_total', Value, 1);
 --let $sorted = `SELECT $after - $before`
 --echo # rows through the vectorized sort (must be > 0):
@@ -101,25 +161,85 @@ SET SESSION use_secondary_engine = FORCED;
 SET SESSION debug = '+d,rapid_disable_vectorized_sort';
 let $before = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_sort_rows_total', Value, 1);
 SELECT id, i FROM t1 ORDER BY i, id;
+--let $assert_query = SELECT id, i FROM t1 ORDER BY i, id
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT id, u FROM t1 ORDER BY u DESC, id;
+--let $assert_query = SELECT id, u FROM t1 ORDER BY u DESC, id
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT id, bi, si FROM t1 ORDER BY bi, si, id;
+--let $assert_query = SELECT id, bi, si FROM t1 ORDER BY bi, si, id
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT id, d FROM t1 ORDER BY d, id;
+--let $assert_query = SELECT id, d FROM t1 ORDER BY d, id
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT id, f FROM t1 ORDER BY f DESC, id;
+--let $assert_query = SELECT id, f FROM t1 ORDER BY f DESC, id
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT id, dt, ts, y FROM t1 ORDER BY dt, ts, y, id;
+--let $assert_query = SELECT id, dt, ts, y FROM t1 ORDER BY dt, ts, y, id
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT id, ni FROM t1 ORDER BY ni, id;
+--let $assert_query = SELECT id, ni FROM t1 ORDER BY ni, id
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT id, ni FROM t1 ORDER BY ni DESC, id;
+--let $assert_query = SELECT id, ni FROM t1 ORDER BY ni DESC, id
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT id, nd FROM t1 ORDER BY nd, id;
+--let $assert_query = SELECT id, nd FROM t1 ORDER BY nd, id
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT id, c, v FROM t1 ORDER BY c, v, id;
+--let $assert_query = SELECT id, c, v FROM t1 ORDER BY c, v, id
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT id, e FROM t1 ORDER BY e, id;
+--let $assert_query = SELECT id, e FROM t1 ORDER BY e, id
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT id, i, d FROM t1 ORDER BY i DESC, d ASC, id DESC;
+--let $assert_query = SELECT id, i, d FROM t1 ORDER BY i DESC, d ASC, id DESC
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT id, i FROM t1 ORDER BY i, id LIMIT 3;
+--let $assert_query = SELECT id, i FROM t1 ORDER BY i, id LIMIT 3
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT id, i FROM t1 ORDER BY i DESC, id LIMIT 3;
+--let $assert_query = SELECT id, i FROM t1 ORDER BY i DESC, id LIMIT 3
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT id, d, v FROM t1 ORDER BY d, id LIMIT 1;
+--let $assert_query = SELECT id, d, v FROM t1 ORDER BY d, id LIMIT 1
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT id, ni FROM t1 ORDER BY ni, id LIMIT 4;
+--let $assert_query = SELECT id, ni FROM t1 ORDER BY ni, id LIMIT 4
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT id, i FROM t1 ORDER BY i, id LIMIT 3 OFFSET 4;
+--let $assert_query = SELECT id, i FROM t1 ORDER BY i, id LIMIT 3 OFFSET 4
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT id, i FROM t1 ORDER BY i, id LIMIT 100;
+--let $assert_query = SELECT id, i FROM t1 ORDER BY i, id LIMIT 100
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT id, i FROM t1 ORDER BY i, id LIMIT 0;
+--let $assert_query = SELECT id, i FROM t1 ORDER BY i, id LIMIT 0
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT id, i FROM t1 WHERE i > 1000 ORDER BY i, id;
+--let $assert_query = SELECT id, i FROM t1 WHERE i > 1000 ORDER BY i, id
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 let $after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_sort_rows_total', Value, 1);
 SET SESSION debug = '-d,rapid_disable_vectorized_sort';
 --let $sorted = `SELECT $after - $before`
@@ -163,6 +283,9 @@ CREATE TABLE t_empty (id INT PRIMARY KEY, a INT) SECONDARY_ENGINE RAPID;
 ALTER TABLE t_empty SECONDARY_LOAD;
 SET SESSION use_secondary_engine = FORCED;
 SELECT id, a FROM t_empty ORDER BY a, id;
+--let $assert_query = SELECT id, a FROM t_empty ORDER BY a, id
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo #
 --echo # Shapes the operator declines, so MySQL's filesort runs instead and the
@@ -176,8 +299,17 @@ ALTER TABLE t_wide SECONDARY_LOAD;
 let $before = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_sort_rows_total', Value, 1);
 SET SESSION use_secondary_engine = FORCED;
 SELECT id, i FROM t1 ORDER BY i + 0, id;
+--let $assert_query = SELECT id, i FROM t1 ORDER BY i + 0, id
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT id, tx FROM t1 ORDER BY tx, id;
+--let $assert_query = SELECT id, tx FROM t1 ORDER BY tx, id
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT id, s FROM t_wide ORDER BY s, id;
+--let $assert_query = SELECT id, s FROM t_wide ORDER BY s, id
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 let $after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_sort_rows_total', Value, 1);
 --let $sorted = `SELECT $after - $before`
 --echo # rows through the vectorized sort for the declined shapes (0 expected):
@@ -189,6 +321,9 @@ let $after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_sor
 --echo # still its own sort, and that one it does run.
 --echo #
 SELECT DISTINCT i FROM t1 ORDER BY i;
+--let $assert_query = SELECT DISTINCT i FROM t1 ORDER BY i
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo #
 --echo # Spilling. A latin1 CHAR(1000) key is 1000 bytes per row, so with the
@@ -205,6 +340,8 @@ SET SESSION cte_max_recursion_depth = 10000;
 INSERT INTO t_spill (id, s, g)
 WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 400)
 SELECT n, CONCAT('k', LPAD((n * 7919) % 400, 4, '0')), (n * 13) % 50 FROM seq;
+--let $assert_query = WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 400) SELECT n, CONCAT('k', LPAD((n * 7919) % 400, 4, '0')), (n * 13) % 50 FROM seq
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SET SESSION cte_max_recursion_depth = DEFAULT;
 ANALYZE TABLE t_spill;
 ALTER TABLE t_spill SECONDARY_LOAD;
@@ -217,6 +354,10 @@ SET SESSION use_secondary_engine = FORCED;
 SET SESSION debug = '+d,rapid_sort_tiny_budget';
 --disable_result_log
 SELECT id, g FROM t_spill ORDER BY s, id;
+--let $assert_query = SELECT id, g FROM t_spill ORDER BY s, id
+--let $assert_ordered = 1
+--let $assert_results_off = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 --enable_result_log
 let $spill_after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_sort_spill_rows_total', Value, 1);
 --let $spilled = `SELECT $spill_after - $spill_before > 0`
@@ -228,6 +369,10 @@ let $spill_after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectoriz
 let $spill_before = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_sort_spill_rows_total', Value, 1);
 --disable_result_log
 SELECT id, g FROM t_spill ORDER BY s, id LIMIT 400;
+--let $assert_query = SELECT id, g FROM t_spill ORDER BY s, id LIMIT 400
+--let $assert_ordered = 1
+--let $assert_results_off = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 --enable_result_log
 let $spill_after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_sort_spill_rows_total', Value, 1);
 --let $large_limit_spilled = `SELECT $spill_after > $spill_before`
@@ -237,7 +382,13 @@ let $spill_after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectoriz
 --echo # (a LIMIT uses the bounded heap, so it does not spill)
 let $small_topn_spill_before = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_sort_spill_rows_total', Value, 1);
 SELECT id, g FROM t_spill ORDER BY s, id LIMIT 6;
+--let $assert_query = SELECT id, g FROM t_spill ORDER BY s, id LIMIT 6
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT id, g FROM t_spill ORDER BY s DESC, id DESC LIMIT 6;
+--let $assert_query = SELECT id, g FROM t_spill ORDER BY s DESC, id DESC LIMIT 6
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 let $small_topn_spill_after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_sort_spill_rows_total', Value, 1);
 --let $small_topn_no_spill = `SELECT $small_topn_spill_after = $small_topn_spill_before`
 --echo # small Top-N stays in memory (1 expected): $small_topn_no_spill
@@ -245,11 +396,23 @@ SET SESSION debug = '-d,rapid_sort_tiny_budget';
 
 --echo # --- same answers from the operator without the tiny budget
 SELECT id, g FROM t_spill ORDER BY s, id LIMIT 6;
+--let $assert_query = SELECT id, g FROM t_spill ORDER BY s, id LIMIT 6
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT id, g FROM t_spill ORDER BY s DESC, id DESC LIMIT 6;
+--let $assert_query = SELECT id, g FROM t_spill ORDER BY s DESC, id DESC LIMIT 6
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 --echo # --- same answers with the operator switched off
 SET SESSION debug = '+d,rapid_disable_vectorized_sort';
 SELECT id, g FROM t_spill ORDER BY s, id LIMIT 6;
+--let $assert_query = SELECT id, g FROM t_spill ORDER BY s, id LIMIT 6
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT id, g FROM t_spill ORDER BY s DESC, id DESC LIMIT 6;
+--let $assert_query = SELECT id, g FROM t_spill ORDER BY s DESC, id DESC LIMIT 6
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SET SESSION debug = '-d,rapid_disable_vectorized_sort';
 --echo # --- same answers from InnoDB
 SET SESSION use_secondary_engine = OFF;
@@ -288,7 +451,13 @@ SELECT (SELECT COUNT(*) FROM sh_vsort_cap.spilled) - (SELECT COUNT(*) FROM sh_vs
 SET SESSION use_secondary_engine = FORCED;
 SET SESSION debug = '+d,rapid_sort_tiny_budget';
 SELECT id, g FROM t_spill ORDER BY s, id LIMIT 2;
+--let $assert_query = SELECT id, g FROM t_spill ORDER BY s, id LIMIT 2
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT id, g FROM t_spill ORDER BY s, id LIMIT 2;
+--let $assert_query = SELECT id, g FROM t_spill ORDER BY s, id LIMIT 2
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SET SESSION debug = '-d,rapid_sort_tiny_budget';
 
 # Dictionary-code batch keys must use the Field's collation rules, including
@@ -359,16 +528,28 @@ SET SESSION use_secondary_engine = FORCED;
 let $decode_before = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_sort_rows_total', Value, 1);
 SELECT id, HEX(short_v), LENGTH(long_v), SHA2(long_v, 256)
 FROM t_decode ORDER BY id DESC;
+--let $assert_query = SELECT id, HEX(short_v), LENGTH(long_v), SHA2(long_v, 256) FROM t_decode ORDER BY id DESC
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT id, HEX(short_v), LENGTH(long_v), SHA2(long_v, 256)
 FROM t_decode ORDER BY long_v, id;
+--let $assert_query = SELECT id, HEX(short_v), LENGTH(long_v), SHA2(long_v, 256) FROM t_decode ORDER BY long_v, id
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 let $decode_after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_sort_rows_total', Value, 1);
 --let $decode_sorted = `SELECT $decode_after > $decode_before`
 --echo # dictionary output through vectorized sort (1 expected): $decode_sorted
 SET SESSION debug = '+d,rapid_disable_vectorized_sort';
 SELECT id, HEX(short_v), LENGTH(long_v), SHA2(long_v, 256)
 FROM t_decode ORDER BY id DESC;
+--let $assert_query = SELECT id, HEX(short_v), LENGTH(long_v), SHA2(long_v, 256) FROM t_decode ORDER BY id DESC
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SELECT id, HEX(short_v), LENGTH(long_v), SHA2(long_v, 256)
 FROM t_decode ORDER BY long_v, id;
+--let $assert_query = SELECT id, HEX(short_v), LENGTH(long_v), SHA2(long_v, 256) FROM t_decode ORDER BY long_v, id
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SET SESSION debug = '-d,rapid_disable_vectorized_sort';
 SET SESSION use_secondary_engine = OFF;
 SELECT id, HEX(short_v), LENGTH(long_v), SHA2(long_v, 256)
@@ -376,6 +557,24 @@ FROM t_decode ORDER BY id DESC;
 SELECT id, HEX(short_v), LENGTH(long_v), SHA2(long_v, 256)
 FROM t_decode ORDER BY long_v, id;
 SET SESSION use_secondary_engine = DEFAULT;
+--let $assert_reference_table = sh_vsort_cap.innodb
+--let $assert_actual_table = sh_vsort_cap.spilled
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_reference_table = sh_vsort_cap.innodb
+--let $assert_actual_table = sh_vsort_cap.native
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_reference_table = sh_vsort_cap.innodb_ai
+--let $assert_actual_table = sh_vsort_cap.rapid_ai
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_reference_table = sh_vsort_cap.innodb_pad
+--let $assert_actual_table = sh_vsort_cap.rapid_pad
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_reference_table = sh_vsort_cap.innodb_bin
+--let $assert_actual_table = sh_vsort_cap.rapid_bin
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_reference_table = sh_vsort_cap.innodb_latin
+--let $assert_actual_table = sh_vsort_cap.rapid_latin
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 DROP DATABASE sh_vsort_cap;
 DROP TABLE t1, t_empty, t_wide, t_spill, t_strings, t_decode;
 DROP DATABASE sh_vsort_db;

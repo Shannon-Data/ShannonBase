@@ -1,0 +1,103 @@
+# Copyright (c) 2026, Shannon Data AI and/or its affiliates.
+--source include/no_ps_protocol.inc
+--disable_query_log
+--disable_result_log
+--disable_warnings
+CREATE TABLE parity_probe(id INT PRIMARY KEY,v VARCHAR(16)) SECONDARY_ENGINE=rapid;
+INSERT INTO parity_probe VALUES(1,NULL),(2,'same'),(3,'same'),(4,'other');
+ALTER TABLE parity_probe SECONDARY_LOAD;
+--let $mode = 2
+while ($mode) {
+  SET use_secondary_engine=FORCED;
+  if ($mode == 2) {
+    SET optimizer_switch='hypergraph_optimizer=off';
+  }
+  if ($mode == 1) {
+    SET optimizer_switch='hypergraph_optimizer=on';
+  }
+  --let $assert_query = SELECT id,v FROM parity_probe ORDER BY id DESC
+  --let $assert_ordered = 1
+  --let $assert_queries_off = 1
+  --let $assert_results_off = 1
+  --let $assert_warnings_off = 1
+  --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+  --let $assert_query = SELECT v FROM parity_probe
+  --let $assert_queries_off = 1
+  --let $assert_results_off = 1
+  --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+  # Existing callers also consume the primary digest returned by this mode.
+  --let $assert_digest = SELECT CONCAT(COUNT(*),':',GROUP_CONCAT(id ORDER BY id)) FROM parity_probe
+  --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+  --disable_query_log
+  if ($_armi_innodb != '4:1,2,3,4') {
+    --die Scalar digest interface did not return the primary result
+  }
+  --let $restored_mode = `SELECT @@use_secondary_engine`
+  if ($restored_mode != 'FORCED') {
+    --die Result comparison changed the caller's execution mode
+  }
+  --dec $mode
+}
+SET use_secondary_engine=OFF;
+CREATE TABLE parity_reference AS SELECT v FROM parity_probe;
+CREATE TABLE parity_actual AS SELECT v FROM parity_probe;
+--let $assert_reference_table = parity_reference
+--let $assert_actual_table = parity_actual
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--disable_query_log
+
+# A child mysqltest must fail even in --record mode. Deliberately make the
+# same SELECT return different values based on its execution mode.
+--write_file $MYSQL_TMP_DIR/rapid_assert_bad_query.test
+SET use_secondary_engine=FORCED;
+--let $assert_query = SELECT id,IF(@@use_secondary_engine='OFF',1,2) AS mismatch FROM parity_probe ORDER BY id
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+EOF
+--error 1
+--exec $MYSQL_TEST --record -x $MYSQL_TMP_DIR/rapid_assert_bad_query.test -R $MYSQL_TMP_DIR/rapid_assert_bad_query.result > $MYSQL_TMP_DIR/rapid_assert_bad_query.log 2>&1
+--let $assert_file = $MYSQL_TMP_DIR/rapid_assert_bad_query.log
+--let $assert_select = Command.*diff_files.*failed
+--let $assert_count = 1
+--let $assert_text = A mismatch must fail even when recording results
+--source include/assert_grep.inc
+
+# Changing multiplicity must also fail; distinct-set comparison would miss it.
+INSERT INTO parity_actual VALUES('same');
+--write_file $MYSQL_TMP_DIR/rapid_assert_bad_capture.test
+--let $assert_reference_table = parity_reference
+--let $assert_actual_table = parity_actual
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+EOF
+--error 1
+--exec $MYSQL_TEST --record -x $MYSQL_TMP_DIR/rapid_assert_bad_capture.test -R $MYSQL_TMP_DIR/rapid_assert_bad_capture.result > $MYSQL_TMP_DIR/rapid_assert_bad_capture.log 2>&1
+--let $assert_file = $MYSQL_TMP_DIR/rapid_assert_bad_capture.log
+--let $assert_select = Rapid materialized result differs from InnoDB
+--let $assert_count = 1
+--let $assert_text = A mismatch must fail even when recording results
+--source include/assert_grep.inc
+# NULL and the literal string 'NULL' must remain distinct in captures.
+DELETE FROM parity_actual WHERE v='same' LIMIT 1;
+UPDATE parity_actual SET v='NULL' WHERE v IS NULL;
+--error 1
+--exec $MYSQL_TEST --record -x $MYSQL_TMP_DIR/rapid_assert_bad_capture.test -R $MYSQL_TMP_DIR/rapid_assert_bad_capture.result > $MYSQL_TMP_DIR/rapid_assert_bad_capture.log 2>&1
+--let $assert_file = $MYSQL_TMP_DIR/rapid_assert_bad_capture.log
+--let $assert_select = Rapid materialized result differs from InnoDB
+--let $assert_count = 1
+--let $assert_text = A mismatch must fail even when recording results
+--source include/assert_grep.inc
+--remove_file $MYSQL_TMP_DIR/rapid_assert_bad_query.test
+--remove_file $MYSQL_TMP_DIR/rapid_assert_bad_query.log
+--remove_file $MYSQL_TMP_DIR/rapid_assert_bad_capture.test
+--remove_file $MYSQL_TMP_DIR/rapid_assert_bad_capture.log
+--remove_file $MYSQLTEST_VARDIR/log/rapid_assert_innodb.out
+--remove_file $MYSQLTEST_VARDIR/log/rapid_assert_current.out
+--let $assert_warnings_off =
+DROP TABLE parity_reference,parity_actual;
+ALTER TABLE parity_probe SECONDARY_UNLOAD;
+DROP TABLE parity_probe;
+SET optimizer_switch=default;
+--enable_warnings
+--enable_result_log
+--enable_query_log
+--echo # Full-result and capture assertions reject mismatches, including under --record.
