@@ -25,9 +25,26 @@ SELECT * FROM u;
 ERROR HY000: Secondary engine operation failed. table has failed DML propagation and must be reloaded.
 # Kill and restart: --rapid_reload_on_restart=ON
 USE sh_upsert_recovery;
+include/wait_for_pattern_in_file.inc [sh_upsert_recovery.r recovery eligibility is revoked or cannot be verified; automatic recovery stopped]
+include/wait_for_pattern_in_file.inc [sh_upsert_recovery.i recovery eligibility is revoked or cannot be verified; automatic recovery stopped]
+include/wait_for_pattern_in_file.inc [sh_upsert_recovery.u recovery eligibility is revoked or cannot be verified; automatic recovery stopped]
+SELECT COUNT(*) AS automatically_loaded FROM performance_schema.rpd_table_id WHERE SCHEMA_NAME='sh_upsert_recovery';
+automatically_loaded
+0
 SELECT VARIABLE_VALUE FROM performance_schema.global_status WHERE VARIABLE_NAME='rapid_recovery_primary_reloads';
 VARIABLE_VALUE
-3
+0
+SET use_secondary_engine=FORCED;
+SELECT * FROM r;
+ERROR HY000: Table has not been loaded
+SELECT * FROM i;
+ERROR HY000: Table has not been loaded
+SELECT * FROM u;
+ERROR HY000: Table has not been loaded
+SET use_secondary_engine=OFF;
+ALTER TABLE r SECONDARY_LOAD;
+ALTER TABLE i SECONDARY_LOAD;
+ALTER TABLE u SECONDARY_LOAD;
 SET use_secondary_engine=FORCED;
 SELECT * FROM r ORDER BY id;
 id	v
