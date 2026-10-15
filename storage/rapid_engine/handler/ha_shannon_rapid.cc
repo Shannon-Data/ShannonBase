@@ -121,7 +121,7 @@ handlerton *shannon_rapid_hton_ptr{nullptr};
 MEM_ROOT rapid_mem_root(PSI_NOT_INSTRUMENTED, 1024);
 
 // shannon rapid engine configuration.
-RpdEngineConfig shannon_rpd_engine_cfg = RpdEngineConfig::Configuration();
+RpdEngineConfig shannon_rpd_engine_cfg;
 
 // Global rapid engine instances.
 std::shared_ptr<Utils::MemoryPool> shannon_rpd_memory_pool{nullptr};
@@ -2637,6 +2637,7 @@ This function is registered as a callback with MySQL.
 @param[out] var_ptr   where the formal string goes
 @param[in]  save      immediate result from check function */
 static void rpd_max_purger_timeout_update(THD *thd, SYS_VAR *, void *var_ptr, const void *save) {
+  std::lock_guard<std::mutex> lock(ShannonBase::shannon_rpd_engine_cfg.gc_mutex);
   /* check if there is an actual change */
   if (*static_cast<ulonglong *>(var_ptr) == *static_cast<const ulonglong *>(save)) return;
 
@@ -2674,11 +2675,11 @@ This function is registered as a callback with MySQL.
 @param[out] var_ptr   where the formal string goes
 @param[in]  save      immediate result from check function */
 static void rpd_purge_batch_size_update(THD *thd, SYS_VAR *, void *var_ptr, const void *save) {
+  std::lock_guard<std::mutex> lock(ShannonBase::shannon_rpd_engine_cfg.gc_mutex);
   /* check if there is an actual change */
   if (*static_cast<ulonglong *>(var_ptr) == *static_cast<const ulonglong *>(save)) return;
 
   *static_cast<ulonglong *>(var_ptr) = *static_cast<const ulonglong *>(save);
-  ShannonBase::shannon_rpd_engine_cfg.gc_batch_size = *static_cast<const ulonglong *>(save);
 }
 
 /** Validate passed-in "value" is a valid monitor counter name.
@@ -2706,11 +2707,11 @@ This function is registered as a callback with MySQL.
 @param[out] var_ptr   where the formal string goes
 @param[in]  save      immediate result from check function */
 static void rpd_min_versions_for_purge_update(THD *thd, SYS_VAR *, void *var_ptr, const void *save) {
+  std::lock_guard<std::mutex> lock(ShannonBase::shannon_rpd_engine_cfg.gc_mutex);
   /* check if there is an actual change */
   if (*static_cast<ulonglong *>(var_ptr) == *static_cast<const ulonglong *>(save)) return;
 
   *static_cast<ulonglong *>(var_ptr) = *static_cast<const ulonglong *>(save);
-  ShannonBase::shannon_rpd_engine_cfg.gc_min_version = *static_cast<const ulonglong *>(save);
 }
 
 /** Update the system variable shannon_rpd_purge_efficiency_threshold.
@@ -2726,6 +2727,7 @@ static void rpd_purge_efficiency_threshold_update(THD *thd,         /*!< in: thr
                                                   const void *save) /*!< in: immediate result
                                                                     from check function */
 {
+  std::lock_guard<std::mutex> lock(ShannonBase::shannon_rpd_engine_cfg.gc_mutex);
   constexpr double kMin = 0.1;
   constexpr double kMax = 1.0;
 
@@ -2738,7 +2740,6 @@ static void rpd_purge_efficiency_threshold_update(THD *thd,         /*!< in: thr
                         value);
 
   *static_cast<double *>(var_ptr) = value;
-  ShannonBase::shannon_rpd_engine_cfg.gc_version_ratio_threshold = value;
 }
 
 static int rpd_gc_interval_scn_validate(THD *,                          /*!< in: thread handle */
@@ -2756,6 +2757,7 @@ static int rpd_gc_interval_scn_validate(THD *,                          /*!< in:
 }
 
 static void rpd_gc_interval_scn_update(THD *thd, SYS_VAR *, void *var_ptr, const void *save) {
+  std::lock_guard<std::mutex> lock(ShannonBase::shannon_rpd_engine_cfg.gc_mutex);
   /* check if there is an actual change */
   if (*static_cast<ulonglong *>(var_ptr) == *static_cast<const ulonglong *>(save)) return;
 
