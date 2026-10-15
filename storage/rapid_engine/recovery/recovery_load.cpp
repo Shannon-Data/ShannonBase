@@ -150,14 +150,19 @@ int LoadFlagManager::is_table_flagged(THD *thd, const std::string &schema_name, 
                                       bool &loaded) {
   loaded = false;
 
-  std::vector<SecondaryLoadedTable> tables;
-  if (int r = query_loaded_tables(thd, tables); r != 0) return r;
-
-  for (const auto &t : tables) {
-    if (t.schema_name == schema_name && t.table_name == table_name) {
-      loaded = true;
-      break;
-    }
+  if (!thd || is_system_schema(schema_name)) return thd ? 0 : HA_ERR_GENERIC;
+  auto *client = thd->dd_client();
+  if (!client) return HA_ERR_GENERIC;
+  dd::cache::Dictionary_client::Auto_releaser releaser(client);
+  // Dictionary acquisition requires the corresponding table MDL.
+  MDL_request request;
+  MDL_REQUEST_INIT(&request, MDL_key::TABLE, schema_name.c_str(), table_name.c_str(), MDL_SHARED, MDL_TRANSACTION);
+  if (thd->mdl_context.acquire_lock(&request, thd->variables.lock_wait_timeout)) return HA_ERR_GENERIC;
+  const dd::Table *table = nullptr;
+  if (client->acquire(schema_name.c_str(), table_name.c_str(), &table)) return HA_ERR_GENERIC;
+  if (table) {
+    bool value = false;
+    if (table->options().exists("secondary_load") && !table->options().get("secondary_load", &value)) loaded = value;
   }
   return 0;
 }

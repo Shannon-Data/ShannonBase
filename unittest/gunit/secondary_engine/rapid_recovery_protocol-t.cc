@@ -11,6 +11,7 @@
 #include "storage/rapid_engine/recovery/notification_tracker.h"
 #include "storage/rapid_engine/recovery/source_validation.h"
 #include "storage/rapid_engine/recovery/table_persistence.h"
+#include "storage/rapid_engine/trx/transaction.h"
 #include "storage/rapid_engine/utils/crc.h"
 #include "storage/rapid_engine/utils/try_operation.h"
 using namespace ShannonBase::Recovery;
@@ -476,4 +477,60 @@ TEST(RapidRecoveryProtocol, UncheckpointedChunkCannotCertifyNativeRecovery) {
   // Qualification must fail before any column object is needed: there is no
   // native data or Rapid WAL that could reconstruct this declared chunk.
   EXPECT_FALSE(manager.recover({nullptr}).ok());
+}
+
+TEST(RapidRecoveryProtocol, NumericBinlogRolloverAndOutOfOrderCallbacks) {
+  NotificationTracker tracker;
+  tracker.initialize({"binlog.999999", 400, ""});
+  tracker.committed(1, {"/var/log/binlog.1000000", 100, ""});
+  tracker.committed(2, {"binlog.999999", 800, ""});
+  tracker.committed(3, {"binlog.1000000", 90, ""});
+  std::lock_guard lock(tracker.mutex());
+  EXPECT_EQ(tracker.position().file, "/var/log/binlog.1000000");
+  EXPECT_EQ(tracker.position().offset, 100u);
+  EXPECT_FALSE(tracker.disabled());
+}
+TEST(RapidRecoveryProtocol, DifferentBinlogSourceDisablesCheckpoint) {
+  NotificationTracker tracker;
+  tracker.initialize({"binlog.000001", 100, ""});
+  tracker.committed(1, {"other.000002", 200, ""});
+  std::lock_guard lock(tracker.mutex());
+  EXPECT_TRUE(tracker.disabled());
+  EXPECT_FALSE(tracker.needs_checkpoint());
+}
+TEST(RapidRecoveryProtocol, ResetFencesExistingTrackersUntilReload) {
+  NotificationTracker tracker;
+  tracker.initialize({"binlog.000002", 100, ""});
+  NotificationTracker::source_reset();
+  std::lock_guard lock(tracker.mutex());
+  EXPECT_TRUE(tracker.disabled());
+  tracker.initialize({"binlog.000001", 100, ""});
+  EXPECT_FALSE(tracker.quiescent());
+  tracker.reset();
+  tracker.initialize({"binlog.000001", 100, ""});
+  EXPECT_TRUE(tracker.quiescent());
+}
+TEST(RapidRecoveryProtocol, OutstandingSourceTransactionHasAgeDiagnostic) {
+  NotificationTracker tracker;
+  const auto seq = tracker.notify(42);
+  tracker.applied(seq);
+  EXPECT_NE(tracker.checkpoint_blockers().find("oldest age seconds:"), std::string::npos);
+  tracker.aborted(42);
+  EXPECT_TRUE(tracker.checkpoint_blockers().empty());
+}
+
+TEST(RapidRecoveryProtocol, ExactPinsProtectQueriesAndUnpublishedConsumerWork) {
+  using namespace ShannonBase;
+  const auto mode = Populate::configured_change_propagation_mode.exchange(Populate::CopyInfoMode::COMMITTED_BINLOG);
+  auto &coordinator = TransactionCoordinator::instance();
+  coordinator.observe_commit_scn(200);
+  auto publication = coordinator.pin_scn(50);
+  EXPECT_LE(coordinator.get_gc_safe_scn(), 50u);
+  auto query = coordinator.pin_scn(25);
+  coordinator.observe_commit_scn(300);  // a concurrent load must not advance the consumer horizon
+  EXPECT_LE(coordinator.get_gc_safe_scn(), 25u);
+  query.reset();
+  EXPECT_LE(coordinator.get_gc_safe_scn(), 50u);
+  publication.reset();
+  Populate::configured_change_propagation_mode.store(mode);
 }

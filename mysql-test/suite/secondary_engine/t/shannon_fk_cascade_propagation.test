@@ -122,6 +122,34 @@ SET SESSION use_secondary_engine=DEFAULT;
 SET SESSION optimizer_switch = default;
 
 
+# INSERT hooks must also fence loaded children of an unloaded parent.
+--disable_query_log
+--disable_result_log
+REPLACE INTO parent VALUES (3, 'replaced');
+SET SESSION use_secondary_engine=FORCED;
+--error ER_SECONDARY_ENGINE
+SELECT COUNT(*) FROM child;
+SET SESSION use_secondary_engine=OFF;
+ALTER TABLE child SECONDARY_UNLOAD;
+ALTER TABLE child SECONDARY_LOAD;
+--let $assert_digest = SELECT CONCAT(COUNT(*),':',SUM(pid),':',SUM(v)) FROM child
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--disable_query_log
+SET SESSION use_secondary_engine=OFF;
+INSERT INTO parent VALUES (99, 'upserted') ON DUPLICATE KEY UPDATE id=100;
+SET SESSION use_secondary_engine=FORCED;
+--error ER_SECONDARY_ENGINE
+SELECT COUNT(*) FROM child;
+SET SESSION use_secondary_engine=OFF;
+ALTER TABLE child SECONDARY_UNLOAD;
+ALTER TABLE child SECONDARY_LOAD;
+--let $assert_digest = SELECT CONCAT(COUNT(*),':',SUM(pid),':',SUM(v)) FROM child
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--disable_query_log
+SET SESSION use_secondary_engine=DEFAULT;
+--enable_result_log
+--enable_query_log
+
 ALTER TABLE child SECONDARY_UNLOAD;
 DROP TABLE child;
 DROP TABLE parent;

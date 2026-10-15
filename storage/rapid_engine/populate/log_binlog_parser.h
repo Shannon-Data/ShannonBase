@@ -57,11 +57,10 @@
 #include "storage/rapid_engine/recovery/notification_tracker.h"
 
 class THD;
-class TABLE;
-class LEX;
+struct TABLE;
+struct LEX;
 namespace ShannonBase {
 namespace Populate {
-
 struct BinlogTableBinding {
   TABLE *table;
   table_id_t id;
@@ -69,10 +68,12 @@ struct BinlogTableBinding {
   const char *db{nullptr};
   const char *name{nullptr};
 };
+
 struct BinlogTransaction {
   Recovery::BinlogPosition end;
   std::vector<change_record_buff_t> changes;
 };
+
 // One bounded, ordered read of the local binlog. No SQL or replication apply is
 // executed. Only complete source transactions at or below committed_end escape.
 class BinlogParser {
@@ -80,9 +81,10 @@ class BinlogParser {
   static bool read_batch(THD *, const std::vector<BinlogTableBinding> &, const Recovery::BinlogPosition &start,
                          const Recovery::BinlogPosition &committed_end, std::vector<BinlogTransaction> &,
                          Recovery::BinlogPosition &assembled_end, const char **failure_reason = nullptr,
-                         std::vector<table_id_t> *required_tables = nullptr) noexcept;
+                         const std::atomic<bool> *cancel = nullptr) noexcept;
   static bool supports(const TABLE *);
 };
+
 // Shared with the load/capture code: resolve partitions and own off-page bytes
 // while the decoded event and TABLE record buffers are still alive.
 bool FinalizeBinlogRow(TABLE *, change_record_buff_t &);
@@ -97,6 +99,9 @@ class CommittedBinlog {
   static void notify_dml(THD *, TABLE *) noexcept;
   // Called only from the authoritative after_commit observer. No row capture,
   // allocation, disk I/O, queue-space wait or Rapid transaction participant.
+  // after_commit supplies this transaction's end, never get_current_log().
+  // With binlog_order_commits=ON the commit stage completes the flush group
+  // before followers run this hook, so every preceding transaction is committed.
   static void publish_commit(const char *file, uint64_t offset) noexcept;
   static void notify_source_reset() noexcept;
   static const char *prepare_query(THD *, LEX *, uint64_t &view_scn);

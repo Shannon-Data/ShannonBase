@@ -88,17 +88,17 @@ void BkgWorkerPool::auto_maintenance_thread() {
         std::lock_guard<std::mutex> lock(cfg.gc_mutex);
         gc_interval_scn = cfg.gc_interval_scn;
       }
-      uint64_t current_scn = TransactionCoordinator::instance().get_current_scn();
       uint64_t last = m_last_gc_scn.load(std::memory_order_acquire);
-      if (current_scn != 0 && (current_scn == last || (current_scn > last && current_scn - last >= gc_interval_scn))) {
-        uint64_t safe_scn = TransactionCoordinator::instance().get_gc_safe_scn();
-
+      const uint64_t safe_scn = TransactionCoordinator::instance().get_gc_safe_scn();
+      // Each pass is bounded by gc_batch_size and submission can be deferred.
+      // Revisit a nonzero horizon even when no new transactions commit.
+      if (safe_scn != 0 && (safe_scn == last || (safe_scn > last && safe_scn - last >= gc_interval_scn))) {
         imcs->for_each_table([&](RpdTable *table) {
           if (m_auto_thread_running.load(std::memory_order_acquire)) {
             pool->schedule_gc(table, safe_scn);
           }
         });
-        m_last_gc_scn.store(current_scn, std::memory_order_release);
+        m_last_gc_scn.store(safe_scn, std::memory_order_release);
       }
 
       if (!m_auto_thread_running.load(std::memory_order_acquire)) break;

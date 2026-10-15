@@ -73,8 +73,8 @@ namespace {
 
 bool record_applied_imcu(const Rapid_load_context *context, const std::shared_ptr<Imcu> &imcu) {
   if (!context->m_detached_row_image) return true;
-  return Populate::TransactionManager::instance().on_imcu_applied(context->m_extra_info.m_trxid, context->m_table_id,
-                                                                  imcu);
+  return Populate::SourceTxnTracker::instance().on_imcu_applied(context->m_extra_info.m_trxid, context->m_table_id,
+                                                                imcu);
 }
 
 // Last-resort guard for the shared Field clones, used only when a thread

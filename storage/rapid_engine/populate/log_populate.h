@@ -53,6 +53,7 @@
 #include "storage/rapid_engine/include/rapid_const.h"
 #include "storage/rapid_engine/include/rapid_types.h"
 #include "storage/rapid_engine/populate/log_commons.h"
+#include "storage/rapid_engine/recovery/notification_tracker.h"
 #include "storage/rapid_engine/trx/transaction.h"
 
 class IB_thread;
@@ -76,6 +77,16 @@ class RedoLogService {
 
 namespace ShannonBase {
 namespace Populate {
+
+// Stack-owned preparation for one load operation; THD/TABLE remain borrowed.
+struct Populator::LoadState {
+ private:
+  friend class Populator;
+  THD *thd{nullptr};
+  TABLE *table{nullptr};
+  CopyInfoMode mode{CopyInfoMode::NOTIFICATION};
+  Recovery::BinlogPosition baseline;
+};
 
 #define log_rapid_pop_mutex_enter(log) mutex_enter(&((log).rapid_populator_mutex))
 

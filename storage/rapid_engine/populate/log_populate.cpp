@@ -60,8 +60,10 @@
 #include "storage/rapid_engine/include/rapid_config.h"
 #include "storage/rapid_engine/include/rapid_context.h"
 #include "storage/rapid_engine/monitor/rapid_monitor.h"
+#include "storage/rapid_engine/populate/log_binlog_parser.h"
 #include "storage/rapid_engine/populate/log_dml_notification.h"
 #include "storage/rapid_engine/populate/log_redolog.h"
+#include "storage/rapid_engine/recovery/binlog_recovery.h"
 #include "storage/rapid_engine/recovery/table_persistence.h"
 #include "storage/rapid_engine/trx/transaction.h"
 
@@ -196,9 +198,9 @@ static void abandon_table_work(table_worker_context *ctx) {
   }
   size_t bytes = 0;
   for (const auto &candidate : abandoned) {
-    bytes += candidate.record.m_size;
-    TransactionManager::instance().on_change_applied(static_cast<Transaction::ID>(candidate.record.m_source_trx_id),
-                                                     candidate.record.m_table_id);
+    bytes += candidate.record.payload_bytes();
+    SourceTxnTracker::instance().on_change_applied(static_cast<Transaction::ID>(candidate.record.m_source_trx_id),
+                                                   candidate.record.m_table_id);
   }
   if (bytes && ctx->buffer) ctx->buffer->inflight_size.fetch_sub(bytes, std::memory_order_acq_rel);
 }
@@ -446,7 +448,13 @@ static void table_worker_func(table_worker_context *ctx) {
         // A quarantined buffer cancels admission too. Its existing failure
         // reason must not be reported again as a new resource-admission error.
         const bool cancelled =
-            ctx->should_stop.exchange(true) || (ctx->buffer && ctx->buffer->broken.load(std::memory_order_acquire));
+            ctx->should_stop.load() || (ctx->buffer && ctx->buffer->broken.load(std::memory_order_acquire));
+        if (!cancelled && !ResMgmt::work_governor().stopping() &&
+            configured_change_propagation_mode.load() == CopyInfoMode::COMMITTED_BINLOG) {
+          std::this_thread::sleep_for(std::chrono::milliseconds(20));
+          continue;
+        }
+        ctx->should_stop.store(true);
         if (!cancelled && !ResMgmt::work_governor().stopping()) {
           MarkPropagationBufferBroken(ctx->buffer);
           sql_print_warning("Rapid apply resource admission failed: %s", error);
@@ -460,7 +468,7 @@ static void table_worker_func(table_worker_context *ctx) {
           auto &pending = ctx->pending_change_candidates;
           size_t count = 0, bytes = 0;
           do {
-            bytes += pending[count++].record.m_size;
+            bytes += pending[count++].record.payload_bytes();
           } while (count < pending.size() && count < 256 && bytes < 1024 * 1024);
           applying.insert(applying.end(), std::make_move_iterator(pending.begin()),
                           std::make_move_iterator(pending.begin() + count));
@@ -512,7 +520,7 @@ static void table_worker_func(table_worker_context *ctx) {
             // later candidate overtake a failed predecessor. Therefore this is a
             // contiguous physical-apply watermark for this table even though
             // global change ids may contain gaps from other tables.
-            ctx->buffer->inflight_size.fetch_sub(rec.m_size, std::memory_order_acq_rel);
+            ctx->buffer->inflight_size.fetch_sub(rec.payload_bytes(), std::memory_order_acq_rel);
             ctx->buffer->applied_change_id.store(candidate.change_id, std::memory_order_release);
             SignalPropagationBarrier(ctx->buffer);
           }
@@ -522,7 +530,7 @@ static void table_worker_func(table_worker_context *ctx) {
         failed_at = i;
         if (result.status == ChangeApplyResult::Status::RETRYABLE) {
           failed_retry = ++ctx->retry_counts[candidate.change_id];
-          permanent_failure = failed_retry > MAX_RETRY_COUNT;
+          permanent_failure = !rec.is_committed_binlog() && failed_retry > MAX_RETRY_COUNT;
         } else {
           permanent_failure = true;
           failed_retry = MAX_RETRY_COUNT + 1;
@@ -574,7 +582,7 @@ static void table_worker_func(table_worker_context *ctx) {
 
       if (failed_at < applying.size()) {
         size_t retry_sz = 0;
-        for (size_t i = failed_at; i < applying.size(); ++i) retry_sz += applying[i].record.m_size;
+        for (size_t i = failed_at; i < applying.size(); ++i) retry_sz += applying[i].record.payload_bytes();
 
         {
           std::lock_guard<std::mutex> lk(ctx->mtx);
@@ -618,9 +626,9 @@ static void table_worker_func(table_worker_context *ctx) {
     if (!abandoned.empty()) {
       size_t abandoned_bytes = 0;
       for (const auto &candidate : abandoned) {
-        abandoned_bytes += candidate.record.m_size;
-        TransactionManager::instance().on_change_applied(static_cast<Transaction::ID>(candidate.record.m_source_trx_id),
-                                                         candidate.record.m_table_id);
+        abandoned_bytes += candidate.record.payload_bytes();
+        SourceTxnTracker::instance().on_change_applied(static_cast<Transaction::ID>(candidate.record.m_source_trx_id),
+                                                       candidate.record.m_table_id);
       }
       // The coordinator moved these bytes into inflight_size when it handed them
       // over; nothing else takes them back out.
@@ -696,8 +704,8 @@ void table_worker_context::dispatch_to_table_worker(const table_id_t &table_key,
     if (buffer->detached.load() || buffer->broken.load()) {
       buffer->inflight_size.fetch_sub(bytes);
       for (const auto &candidate : batch)
-        TransactionManager::instance().on_change_applied(static_cast<Transaction::ID>(candidate.record.m_source_trx_id),
-                                                         candidate.record.m_table_id);
+        SourceTxnTracker::instance().on_change_applied(static_cast<Transaction::ID>(candidate.record.m_source_trx_id),
+                                                       candidate.record.m_table_id);
       return;
     }
     const bool pooled = ResMgmt::limits_execution(ResMgmt::work_governor().mode());
@@ -709,8 +717,8 @@ void table_worker_context::dispatch_to_table_worker(const table_id_t &table_key,
         MarkPropagationBufferBroken(buffer);
         buffer->inflight_size.fetch_sub(bytes);
         for (const auto &candidate : batch)
-          TransactionManager::instance().on_change_applied(
-              static_cast<Transaction::ID>(candidate.record.m_source_trx_id), candidate.record.m_table_id);
+          SourceTxnTracker::instance().on_change_applied(static_cast<Transaction::ID>(candidate.record.m_source_trx_id),
+                                                         candidate.record.m_table_id);
         return;
       }
     } else {
@@ -772,8 +780,8 @@ void table_worker_context::dispatch_to_table_worker(const table_id_t &table_key,
     if (!appended) {
       buffer->inflight_size.fetch_sub(bytes);
       for (const auto &candidate : batch)
-        TransactionManager::instance().on_change_applied(static_cast<Transaction::ID>(candidate.record.m_source_trx_id),
-                                                         candidate.record.m_table_id);
+        SourceTxnTracker::instance().on_change_applied(static_cast<Transaction::ID>(candidate.record.m_source_trx_id),
+                                                       candidate.record.m_table_id);
     }
     apply_cv.notify_all();
     sql_print_error("Rapid could not dispatch table %llu; reload required", static_cast<unsigned long long>(table_key));
@@ -842,9 +850,13 @@ static void parse_log_func_main(log_t *log_ptr) {
       if (!ResMgmt::work_governor().stopping() && shannon_propagation_thread_started.load() &&
           srv_shutdown_state.load() == SRV_SHUTDOWN_NONE)
         sql_print_warning("Rapid coordinator resource admission failed: %s", error);
-      break;
+      if (ResMgmt::work_governor().stopping() || !shannon_propagation_thread_started.load() ||
+          srv_shutdown_state.load() != SRV_SHUTDOWN_NONE)
+        break;
+      std::this_thread::sleep_for(std::chrono::milliseconds(20));
+      continue;
     }
-    TransactionManager::instance().finalize_committed();
+    SourceTxnTracker::instance().finalize_committed();
 
     if (++health_tick >= PROPAGATION_HEALTH_REFRESH_TICKS) {
       health_tick = 0;
@@ -878,24 +890,27 @@ static void parse_log_func_main(log_t *log_ptr) {
         // held only for the in-memory queue handoff; worker apply remains fully
         // asynchronous.
         std::unique_lock<std::mutex> queue_guard(tbuf->enqueue_mutex);
-        while ((count = tbuf->change_candiates.try_pop_bulk(batch, BATCH_PROCESS_NUM)) > 0) {
+        if ((count = tbuf->change_candiates.try_pop_bulk(batch, BATCH_PROCESS_NUM)) > 0) {
           for (size_t i = 0; i < count; ++i) {
-            const size_t rec_sz = batch[i].record.m_size;
+            const size_t rec_sz = batch[i].record.payload_bytes();
             tbuf->data_size.fetch_sub(rec_sz, std::memory_order_relaxed);
             shannon_pop_data_sz.fetch_sub(rec_sz, std::memory_order_relaxed);
             moved_bytes += rec_sz;
             batch_vec.push_back(std::move(batch[i]));
           }
         }
+        tbuf->inflight_size.fetch_add(moved_bytes, std::memory_order_acq_rel);
       }
 
+      if (!tbuf->change_candiates.empty()) {
+        tbuf->pending_flush.store(true, std::memory_order_release);
+        os_event_set(log_ptr->rapid_events[0]);
+      }
       if (batch_vec.empty()) continue;
 
       // Once a record leaves the ring it is still "pending" until the worker
       // successfully applies it.  This closes the optimizer visibility gap
       // between coordinator pop and worker apply.
-      tbuf->inflight_size.fetch_add(moved_bytes, std::memory_order_acq_rel);
-
       table_worker_context::dispatch_to_table_worker(table_key, tbuf, std::move(batch_vec), moved_bytes);
     }
 
@@ -923,7 +938,49 @@ bool Populator::active() { return get_impl()->active_impl(); }
  */
 void Populator::start() { get_impl()->start_impl(); }
 
-void Populator::unload(const table_id_t &table_id) { get_impl()->unload_impl(table_id); }
+const char *Populator::prepare_load(THD *thd, TABLE *table, LoadState &state, bool partial_load) {
+  state = {};
+  LoadState prepared;
+  prepared.thd = thd;
+  prepared.table = table;
+  prepared.mode = configured_change_propagation_mode.load();
+  if (!propagation_backend_available(prepared.mode))
+    return "COMMITTED_BINLOG change propagation backend is not implemented";
+
+  if (prepared.mode == CopyInfoMode::COMMITTED_BINLOG) {
+    if (partial_load) return "COMMITTED_BINLOG requires loading the whole partitioned table";
+    if (const char *error = CommittedBinlog::check_configuration(thd)) return error;
+    if (!BinlogParser::supports(table))
+      return "COMMITTED_BINLOG requires a primary key and no foreign keys or generated columns";
+
+    // Autopilot loads need the same write fence as explicit SECONDARY_LOAD.
+    MDL_request fence;
+    MDL_REQUEST_INIT(&fence, MDL_key::TABLE, table->s->db.str, table->s->table_name.str, MDL_SHARED_NO_WRITE,
+                     MDL_TRANSACTION);
+    if (thd->mdl_context.acquire_lock(&fence, thd->variables.lock_wait_timeout))
+      return "cannot lock source table for change propagation";
+    prepared.baseline = Recovery::BinlogRecovery::current_position();
+    if (!prepared.baseline.valid()) return "cannot establish a durable, unencrypted binlog load boundary";
+  }
+  state = std::move(prepared);
+  return nullptr;
+}
+
+const char *Populator::start(const LoadState &state) {
+  if (!state.thd || !state.table) return "change propagation load was not prepared";
+  start();
+  if (state.mode == CopyInfoMode::COMMITTED_BINLOG &&
+      !CommittedBinlog::attach(state.thd, state.table, state.baseline)) {
+    QuarantinePropagationTable(state.table->file->get_table_id());
+    return "cannot start COMMITTED_BINLOG propagation; unload and retry";
+  }
+  return nullptr;
+}
+
+void Populator::unload(const table_id_t &table_id) {
+  CommittedBinlog::detach(table_id);
+  get_impl()->unload_impl(table_id);
+}
 
 /**
  * To stop log pop main thread.
@@ -962,7 +1019,7 @@ void PopulatorImpl::start_impl() {
   static std::mutex start_mutex;
   std::lock_guard<std::mutex> guard(start_mutex);
   if (!active_impl() && shannon_loaded_tables->size()) {
-    TransactionManager::instance().start();
+    SourceTxnTracker::instance().start();
     srv_threads.m_change_pop_cordinator = os_thread_create(rapid_populate_thread_key, 0, parse_log_func_main, log_sys);
     ShannonBase::Populate::shannon_propagation_thread_started.store(true, std::memory_order_seq_cst);
     srv_threads.m_change_pop_cordinator.start();
@@ -971,7 +1028,7 @@ void PopulatorImpl::start_impl() {
 }
 
 void PopulatorImpl::unload_impl(const table_id_t &table_id) {
-  TransactionManager::instance().forget_table(table_id);
+  SourceTxnTracker::instance().forget_table(table_id);
   if (unlikely(!active_impl() || !shannon_loaded_tables->size())) return;
   auto &shard = get_pop_shard(table_id);
   std::shared_ptr<table_pop_buffer_t> detached_buffer;
@@ -1092,7 +1149,7 @@ void PopulatorImpl::end_impl() {
     }
     shard.buffers.clear();
   }
-  TransactionManager::instance().shutdown();
+  SourceTxnTracker::instance().shutdown();
   ut_a(!active_impl());
 }
 
@@ -1100,7 +1157,8 @@ int PopulatorImpl::write_impl(FILE *file [[maybe_unused]], uint64_t start_lsn, c
   if (!changed_rec || !shannon_loaded_tables->size()) return SHANNON_SUCCESS;
 
   const table_id_t table_key = changed_rec->m_table_id;
-  const size_t rec_sz = changed_rec->m_size;
+  const size_t rec_sz = changed_rec->payload_bytes();
+  changed_rec->m_accounted_bytes = rec_sz;
   const Source record_source = changed_rec->m_source;  // changed_rec is moved from below
   const bool committed_binlog = changed_rec->is_committed_binlog();
   auto &shard = get_pop_shard(table_key);
@@ -1199,6 +1257,7 @@ int PopulatorImpl::write_impl(FILE *file [[maybe_unused]], uint64_t start_lsn, c
 
   bool enqueued = false;
   bool crossed_global_buffer = false;
+  bool ring_high_water = false;
   {
     std::unique_lock<std::mutex> enqueue_guard(tbuf->enqueue_mutex);
     if (tbuf->broken.load(std::memory_order_acquire) || tbuf->detached.load(std::memory_order_acquire))
@@ -1210,7 +1269,10 @@ int PopulatorImpl::write_impl(FILE *file [[maybe_unused]], uint64_t start_lsn, c
     item.change_id = assigned_change_id;
     bool force_full = false;
     DBUG_EXECUTE_IF("rapid_propagation_buffer_full", { force_full = true; });
-    if (!force_full && tbuf->change_candiates.try_put(std::move(item))) {
+    const auto cap = shannon_rpd_engine_cfg.pop_buff_sz_max;
+    const auto outstanding = tbuf->data_size.load() + tbuf->inflight_size.load();
+    const bool byte_full = rec_sz > cap || outstanding > cap - rec_sz || shannon_pop_data_sz.load() > cap - rec_sz;
+    if (!force_full && !byte_full && tbuf->change_candiates.try_put(std::move(item))) {
       tbuf->data_size.fetch_add(rec_sz, std::memory_order_relaxed);
       const uint64_t old_global = shannon_pop_data_sz.fetch_add(rec_sz, std::memory_order_acq_rel);
 
@@ -1220,12 +1282,17 @@ int PopulatorImpl::write_impl(FILE *file [[maybe_unused]], uint64_t start_lsn, c
 
       crossed_global_buffer = old_global < CHANGE_PROPAGATION_BUFFER_TRIGGER_BYTES &&
                               old_global + rec_sz >= CHANGE_PROPAGATION_BUFFER_TRIGGER_BYTES;
+      ring_high_water = tbuf->change_candiates.size() >= tbuf->change_candiates.capacity * 3 / 4;
       enqueued = true;
     }
   }
 
   if (enqueued) {
     if (crossed_global_buffer) RequestAllBufferedTablesFlush();
+    if (ring_high_water) {
+      tbuf->pending_flush.store(true, std::memory_order_release);
+      send_notify_impl();
+    }
 
     // Do not wake merely because this is the first record for a table. Normal
     // DML batches until the 200ms timer, the global 64MiB trigger, or a Rapid

@@ -1,0 +1,23 @@
+SET use_secondary_engine=OFF;
+SET GLOBAL rapid_change_propagation_mode=COMMITTED_BINLOG;
+CREATE TABLE cb_bad (id INT PRIMARY KEY,v INT) SECONDARY_ENGINE=rapid;
+CREATE TABLE cb_good LIKE cb_bad;
+INSERT INTO cb_bad VALUES (1,10);
+INSERT INTO cb_good VALUES (1,20);
+ALTER TABLE cb_bad SECONDARY_LOAD;
+ALTER TABLE cb_good SECONDARY_LOAD;
+SET sql_log_bin=OFF;
+UPDATE cb_bad SET v=11 WHERE id=1;
+SET sql_log_bin=ON;
+UPDATE cb_good SET v=21 WHERE id=1;
+SET use_secondary_engine=FORCED;
+SELECT SUM(v) FROM cb_bad;
+ERROR HY000: Secondary engine operation failed. source DML was not covered by ROW/FULL binlog logging; unload and reload the table.
+SELECT SUM(v) FROM cb_good;
+SUM(v)
+21
+SET use_secondary_engine=OFF;
+ALTER TABLE cb_bad SECONDARY_UNLOAD;
+ALTER TABLE cb_good SECONDARY_UNLOAD;
+DROP TABLE cb_bad,cb_good;
+SET GLOBAL rapid_change_propagation_mode=CAPTURE;
