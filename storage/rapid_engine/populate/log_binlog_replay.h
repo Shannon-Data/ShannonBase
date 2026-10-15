@@ -21,26 +21,22 @@
 
    Copyright (c) 2026, Shannon Data AI and/or its affiliates.
 */
-#ifndef __SHANNONBASE_BINLOG_RECOVERY_H__
-#define __SHANNONBASE_BINLOG_RECOVERY_H__
+#ifndef __SHANNONBASE_LOG_BINLOG_REPLAY_H__
+#define __SHANNONBASE_LOG_BINLOG_REPLAY_H__
 #include <functional>
-#include "storage/rapid_engine/populate/log_commons.h"
-#include "storage/rapid_engine/recovery/notification_tracker.h"
+#include "storage/rapid_engine/include/rapid_change_record.h"
 class THD;
 struct TABLE;
+
 namespace ShannonBase {
-namespace Recovery {
-// Recovery-only reader of local committed MySQL transactions. Never executes
-// replication events against the primary. Failure discards the private restore.
-class BinlogRecovery {
+namespace Populate {
+// Applies complete source transactions to an unpublished restored table.
+// The caller holds write-excluding source MDL and discards the image on failure.
+class BinlogReplay {
  public:
-  static BinlogPosition current_position();
-  static bool certify(BinlogPosition &position);
-  // Caller pins/locks the binlog index when validating an already resolved file.
-  static bool certify_file(const char *path, BinlogPosition &position);
-  static bool replay(THD *thd, TABLE *table, const BinlogPosition &start,
-                     const std::function<bool(Populate::change_record_buff_t &)> &apply);
+  static bool replay(THD *, TABLE *, const BinlogPosition &, const std::function<bool(change_record_buff_t &)> &apply);
 };
-}  // namespace Recovery
+
+}  // namespace Populate
 }  // namespace ShannonBase
 #endif

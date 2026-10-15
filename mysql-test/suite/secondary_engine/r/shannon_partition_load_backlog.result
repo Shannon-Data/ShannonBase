@@ -38,8 +38,7 @@ INSERT INTO t_wm VALUES (4,40),(103,1030),(202,2020),(302,3020);
 #    A stalled worker keeps its batch in the per-worker queue, so the
 #    pending bytes are non-zero exactly while the window is open.
 #
-# bytes still queued in the worker when the reload starts (0 means the stall did not fire):
-64
+# propagation batch is still queued when the reload starts
 #
 # 4. Reload the partitions while those records are still queued. The scan
 #    reads them out of InnoDB, so the rebuilt partitions already hold them;

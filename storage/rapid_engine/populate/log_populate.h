@@ -51,6 +51,7 @@
 #include "storage/innobase/include/trx0types.h"
 
 #include "storage/rapid_engine/include/rapid_const.h"
+#include "storage/rapid_engine/include/rapid_notification_tracker.h"
 #include "storage/rapid_engine/include/rapid_types.h"
 #include "storage/rapid_engine/populate/log_commons.h"
 #include "storage/rapid_engine/trx/transaction.h"
@@ -76,6 +77,16 @@ class RedoLogService {
 
 namespace ShannonBase {
 namespace Populate {
+
+// Stack-owned preparation for one load operation; THD/TABLE remain borrowed.
+struct Populator::LoadState {
+ private:
+  friend class Populator;
+  THD *thd{nullptr};
+  TABLE *table{nullptr};
+  CopyInfoMode mode{CopyInfoMode::NOTIFICATION};
+  BinlogPosition baseline;
+};
 
 #define log_rapid_pop_mutex_enter(log) mutex_enter(&((log).rapid_populator_mutex))
 
@@ -180,6 +191,7 @@ void EndCommittedTransactionPublish(const std::vector<table_id_t> &table_ids);
 // fast-restoring an image this instance could not certify.
 void QuarantinePropagationTable(table_id_t table_id) noexcept;
 void QuarantinePropagationTables(const std::vector<table_id_t> &table_ids);
+
 // True once the table's propagation buffer has been marked broken. A broken table
 // is never propagated or checkpointed again until reload, so journaling more of its
 // changes only costs an fsync and grows the journal.

@@ -426,10 +426,7 @@ double SelectivityEstimator::estimate_predicate_selectivity_internal(const TABLE
     if (!table || !table->file) return nullptr;
     auto share = ShannonBase::shannon_loaded_tables->get(table->s->db.str, table->s->table_name.str);
     if (!share) return nullptr;
-    Imcs::RpdTable *rpd_table = (share->is_partitioned)
-                                    ? ShannonBase::Imcs::Imcs::instance()->get_rpd_parttable(share->m_tableid)
-                                    : ShannonBase::Imcs::Imcs::instance()->get_rpd_table(share->m_tableid);
-    return rpd_table;
+    return ShannonBase::Imcs::Imcs::instance()->get_rpd_table(share->m_tableid);
   };
 
   // Get Rapid table for statistics
@@ -1157,10 +1154,7 @@ Imcs::RpdTable *RpdCostEstimator::get_rapid_table(TABLE *table) {
   if (!table || !table->file) return nullptr;
   auto share = ShannonBase::shannon_loaded_tables->get(table->s->db.str, table->s->table_name.str);
   if (!share) return nullptr;
-  Imcs::RpdTable *rpd_table = (share->is_partitioned)
-                                  ? ShannonBase::Imcs::Imcs::instance()->get_rpd_parttable(share->m_tableid)
-                                  : ShannonBase::Imcs::Imcs::instance()->get_rpd_table(share->m_tableid);
-  return rpd_table;
+  return ShannonBase::Imcs::Imcs::instance()->get_rpd_table(share->m_tableid);
 }
 
 double PredicateAnalyzer::analyze(const Item *condition, bool *can_use_si) {
@@ -1471,10 +1465,7 @@ bool ModifyTableScanCost(const THD *thd, const JoinHypergraph &graph, const Acce
   auto get_rpd_table = [&](TABLE *table) -> ShannonBase::Imcs::RpdTable * {
     auto share = ShannonBase::shannon_loaded_tables->get(table->s->db.str, table->s->table_name.str);
     if (!share) return nullptr;
-    ShannonBase::Imcs::RpdTable *rpd_table{nullptr};
-    rpd_table = share->is_partitioned ? ShannonBase::Imcs::Imcs::instance()->get_rpd_parttable(share->m_tableid)
-                                      : ShannonBase::Imcs::Imcs::instance()->get_rpd_table(share->m_tableid);
-    return rpd_table;
+    return ShannonBase::Imcs::Imcs::instance()->get_rpd_table(share->m_tableid);
   };
 
   auto *rpd_table = get_rpd_table(table);
@@ -1622,10 +1613,7 @@ bool ModifyIndexScanCost(THD *thd, const JoinHypergraph &graph [[maybe_unused]],
   auto get_rpd_table = [&](TABLE *table) -> ShannonBase::Imcs::RpdTable * {
     auto share = ShannonBase::shannon_loaded_tables->get(table->s->db.str, table->s->table_name.str);
     if (!share) return nullptr;
-    ShannonBase::Imcs::RpdTable *rpd_table{nullptr};
-    rpd_table = share->is_partitioned ? ShannonBase::Imcs::Imcs::instance()->get_rpd_parttable(share->m_tableid)
-                                      : ShannonBase::Imcs::Imcs::instance()->get_rpd_table(share->m_tableid);
-    return rpd_table;
+    return ShannonBase::Imcs::Imcs::instance()->get_rpd_table(share->m_tableid);
   };
   auto *rpd_table = get_rpd_table(table);
   if (!rpd_table) {
@@ -1882,8 +1870,7 @@ bool WideningLookupPays(THD *thd, const AccessPath *lookup, double outer_rows) {
 
   auto share = ShannonBase::shannon_loaded_tables->get(table->s->db.str, table->s->table_name.str);
   if (share == nullptr) return false;  // not priceable: keep the lookup
-  Imcs::RpdTable *rpd_table = share->is_partitioned ? Imcs::Imcs::instance()->get_rpd_parttable(share->m_tableid)
-                                                    : Imcs::Imcs::instance()->get_rpd_table(share->m_tableid);
+  Imcs::RpdTable *rpd_table = Imcs::Imcs::instance()->get_rpd_table(share->m_tableid);
   if (rpd_table == nullptr) return false;
 
   // The widened scan reads in rowid order (use_order=false), so it is priced

@@ -46,9 +46,9 @@
 
 #include "storage/rapid_engine/imcs/imcs.h"  // imcs:pool
 #include "storage/rapid_engine/imcs/table.h"
+#include "storage/rapid_engine/imcs/table0persistence.h"
 #include "storage/rapid_engine/include/rapid_const.h"
 #include "storage/rapid_engine/include/rapid_context.h"
-#include "storage/rapid_engine/recovery/table_persistence.h"
 #include "storage/rapid_engine/utils/crc.h"
 #include "storage/rapid_engine/utils/utils.h"
 

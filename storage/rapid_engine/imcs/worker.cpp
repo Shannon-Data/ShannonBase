@@ -26,6 +26,7 @@
 #include "storage/rapid_engine/imcs/worker.h"
 #include "storage/rapid_engine/recovery/recovery.h"
 #include "storage/rapid_engine/resource_management/res_mgmt.h"
+#include "storage/rapid_engine/utils/background_session.h"
 
 #include <algorithm>
 #include <cmath>
@@ -88,17 +89,17 @@ void BkgWorkerPool::auto_maintenance_thread() {
         std::lock_guard<std::mutex> lock(cfg.gc_mutex);
         gc_interval_scn = cfg.gc_interval_scn;
       }
-      uint64_t current_scn = TransactionCoordinator::instance().get_current_scn();
       uint64_t last = m_last_gc_scn.load(std::memory_order_acquire);
-      if (current_scn != 0 && (current_scn == last || (current_scn > last && current_scn - last >= gc_interval_scn))) {
-        uint64_t safe_scn = TransactionCoordinator::instance().get_gc_safe_scn();
-
+      const uint64_t safe_scn = TransactionCoordinator::instance().get_gc_safe_scn();
+      // Each pass is bounded by gc_batch_size and submission can be deferred.
+      // Revisit a nonzero horizon even when no new transactions commit.
+      if (safe_scn != 0 && (safe_scn == last || (safe_scn > last && safe_scn - last >= gc_interval_scn))) {
         imcs->for_each_table([&](RpdTable *table) {
           if (m_auto_thread_running.load(std::memory_order_acquire)) {
             pool->schedule_gc(table, safe_scn);
           }
         });
-        m_last_gc_scn.store(current_scn, std::memory_order_release);
+        m_last_gc_scn.store(safe_scn, std::memory_order_release);
       }
 
       if (!m_auto_thread_running.load(std::memory_order_acquire)) break;
@@ -190,7 +191,7 @@ void BkgWorkerPool::worker_loop() {
     try {
       // Maintenance functions do not need a SQL session, but native SYSTEM
       // groups need a THD/MDL owner whose lifetime encloses the group scope.
-      Recovery::RecoveryAdminSession session;
+      Utils::BackgroundSession session;
       ResMgmt::WorkScope resource_scope;
       const char *error = resource_scope.enter(session.thd(), ResMgmt::WorkClass::MAINT, true, [&] {
         return task->state.load(std::memory_order_acquire) == TaskState::kCancelled;
@@ -499,14 +500,15 @@ void BkgWorkerPool ::schedule_gc(RpdTable *table, uint64_t min_active_scn) {
   if (!table) return;
   const uint64_t table_id = table->meta().table_id;
   auto *imcs = ShannonBase::Imcs::Imcs::instance();
-  auto exact = imcs->get_rpd_table_shared(table_id);
+  auto exact = imcs->get_rpd_table<std::shared_ptr<ShannonBase::Imcs::RpdTable>>(table_id);
   if (!exact || exact.get() != table) return;
 
   const std::string dedup_key = maintenance_key("gc", table);
   submit_unique(
       TaskType::GC,
       [table_id, table = std::move(exact), min_active_scn]() -> TaskResult {
-        auto current = ShannonBase::Imcs::Imcs::instance()->get_rpd_table_shared(table_id);
+        auto current =
+            ShannonBase::Imcs::Imcs::instance()->get_rpd_table<std::shared_ptr<ShannonBase::Imcs::RpdTable>>(table_id);
         if (!current || current.get() != table.get()) return TaskResult::kCancelled;
         table->garbage_collect(min_active_scn);
         return TaskResult::kSuccess;
@@ -518,14 +520,15 @@ void BkgWorkerPool ::schedule_compact(RpdTable *table, std::shared_ptr<Imcu> imc
   if (!table || !imcu) return;
   const uint64_t table_id = table->meta().table_id;
   auto *imcs = ShannonBase::Imcs::Imcs::instance();
-  auto exact = imcs->get_rpd_table_shared(table_id);
+  auto exact = imcs->get_rpd_table<std::shared_ptr<ShannonBase::Imcs::RpdTable>>(table_id);
   if (!exact || exact.get() != table) return;
 
   const std::string dedup_key = maintenance_key("compact", table, imcu.get());
   submit_unique(
       TaskType::COMPACT,
       [table_id, table = std::move(exact), imcu = std::move(imcu)]() -> TaskResult {
-        auto current = ShannonBase::Imcs::Imcs::instance()->get_rpd_table_shared(table_id);
+        auto current =
+            ShannonBase::Imcs::Imcs::instance()->get_rpd_table<std::shared_ptr<ShannonBase::Imcs::RpdTable>>(table_id);
         if (!current || current.get() != table.get()) return TaskResult::kCancelled;
         table->compact_imcu(imcu);
         return TaskResult::kSuccess;
@@ -537,14 +540,15 @@ void BkgWorkerPool ::schedule_stats_update(RpdTable *table) {
   if (!table) return;
   const uint64_t table_id = table->meta().table_id;
   auto *imcs = ShannonBase::Imcs::Imcs::instance();
-  auto exact = imcs->get_rpd_table_shared(table_id);
+  auto exact = imcs->get_rpd_table<std::shared_ptr<ShannonBase::Imcs::RpdTable>>(table_id);
   if (!exact || exact.get() != table) return;
 
   const std::string dedup_key = maintenance_key("stats", table);
   submit_unique(
       TaskType::STATS_UPDATE,
       [table_id, table = std::move(exact)]() -> TaskResult {
-        auto current = ShannonBase::Imcs::Imcs::instance()->get_rpd_table_shared(table_id);
+        auto current =
+            ShannonBase::Imcs::Imcs::instance()->get_rpd_table<std::shared_ptr<ShannonBase::Imcs::RpdTable>>(table_id);
         if (!current || current.get() != table.get()) return TaskResult::kCancelled;
         table->update_statistics();
         return TaskResult::kSuccess;

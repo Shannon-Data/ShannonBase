@@ -71,8 +71,7 @@ INSERT INTO t_wm VALUES (4,40),(103,1030),(202,2020),(302,3020);
 --echo #    pending bytes are non-zero exactly while the window is open.
 --echo #
 --let $pop_queued = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_pop_worker_pending_bytes', Value, 1)
---echo # bytes still queued in the worker when the reload starts (0 means the stall did not fire):
---echo $pop_queued
+--echo # propagation batch is still queued when the reload starts
 if ($pop_queued == 0) {
   --die propagation batch drained before the reload; the window was not exercised
 }

@@ -1,0 +1,34 @@
+SET use_secondary_engine=OFF;
+SET GLOBAL rapid_change_propagation_mode=COMMITTED_BINLOG;
+CREATE TABLE cb_epoch_a(id INT PRIMARY KEY,v INT) SECONDARY_ENGINE=rapid;
+CREATE TABLE cb_epoch_b(id INT PRIMARY KEY,v INT) SECONDARY_ENGINE=rapid;
+INSERT INTO cb_epoch_a VALUES(1,10);
+INSERT INTO cb_epoch_b VALUES(1,100);
+ALTER TABLE cb_epoch_a SECONDARY_LOAD;
+ALTER TABLE cb_epoch_b SECONDARY_LOAD;
+SET GLOBAL debug='+d,rapid_pause_committed_enqueue';
+BEGIN;
+INSERT INTO cb_epoch_a VALUES(2,20);
+INSERT INTO cb_epoch_b VALUES(2,200);
+COMMIT;
+SET DEBUG_SYNC='now WAIT_FOR rapid_batch_decoded';
+SET GLOBAL debug='-d,rapid_pause_committed_enqueue';
+ALTER TABLE cb_epoch_b SECONDARY_UNLOAD;
+ALTER TABLE cb_epoch_b SECONDARY_LOAD;
+SET DEBUG_SYNC='now SIGNAL rapid_enqueue_continue';
+SET use_secondary_engine=FORCED;
+SELECT COUNT(*),SUM(a.v),SUM(b.v) FROM cb_epoch_a a JOIN cb_epoch_b b USING(id);
+COUNT(*)	SUM(a.v)	SUM(b.v)
+2	30	300
+SET use_secondary_engine=OFF;
+INSERT INTO cb_epoch_b VALUES(3,300);
+SET use_secondary_engine=FORCED;
+SELECT COUNT(*),SUM(v) FROM cb_epoch_b;
+COUNT(*)	SUM(v)
+3	600
+SET use_secondary_engine=OFF;
+ALTER TABLE cb_epoch_a SECONDARY_UNLOAD;
+ALTER TABLE cb_epoch_b SECONDARY_UNLOAD;
+DROP TABLE cb_epoch_a,cb_epoch_b;
+SET GLOBAL rapid_change_propagation_mode=CAPTURE;
+SET DEBUG_SYNC='RESET';

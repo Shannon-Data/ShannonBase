@@ -1,0 +1,2 @@
+# Compressed committed rows must use native snapshot replay, not a full reload.
+--source suite/secondary_engine/t/shannon_recovery_pending_commit.test

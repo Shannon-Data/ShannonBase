@@ -1,1 +1,3 @@
 --skip-log-bin
+# Persistence/restart coverage does not require optional model inference.
+--loose-rapid_schema_embedding=OFF

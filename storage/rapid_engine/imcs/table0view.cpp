@@ -87,6 +87,7 @@ int RapidCursor::init() {
 
   m_scan_context->m_extra_info.m_trxid = m_scan_context->m_trx->get_id();
   m_scan_context->m_extra_info.m_scn = Populate::CommittedBinlog::query_scn(current_thd);
+  if (current_thd->is_error()) return HA_ERR_GENERIC;
 
   ::ReadView *read_view = m_scan_context->m_trx->acquire_snapshot();
   if (m_scan_context->m_trx->isolation_level() > ShannonBase::Transaction::ISOLATION_LEVEL::READ_UNCOMMITTED &&
@@ -118,59 +119,65 @@ int RapidCursor::init() {
   if (barrier_table == nullptr) return HA_ERR_GENERIC;
 
   const table_id_t table_id = barrier_table->meta().table_id;
-  const auto barrier = ShannonBase::Populate::Populator::request_table_barrier(table_id);
-  if (barrier.state == ShannonBase::Populate::TablePropagationState::BROKEN) {
-    my_error(ER_SECONDARY_ENGINE, MYF(0),
-             "Rapid table has failed DML propagation and must be reloaded before secondary-engine reads");
-    return HA_ERR_GENERIC;
-  }
+  auto *execution = dynamic_cast<Rapid_execution_context *>(current_thd->lex->secondary_engine_execution_context());
+  if (!execution || !execution->m_committed_binlog_view) {
+    const auto barrier = ShannonBase::Populate::Populator::request_table_barrier(table_id);
+    if (barrier.state == ShannonBase::Populate::TablePropagationState::BROKEN) {
+      my_error(ER_SECONDARY_ENGINE, MYF(0),
+               "Rapid table has failed DML propagation and must be reloaded before secondary-engine reads");
+      return HA_ERR_GENERIC;
+    }
 
-  if (barrier.needs_wait()) {
-    const auto deadline = std::chrono::steady_clock::now() +
-                          std::chrono::milliseconds(ShannonBase::shannon_rpd_engine_cfg.query_sync_timeout_ms);
-    for (;;) {
-      if (std::chrono::steady_clock::now() >= deadline) {
-        my_error(ER_SECONDARY_ENGINE, MYF(0), "CAPTURE synchronization timed out");
-        return HA_ERR_GENERIC;
-      }
-      if (current_thd != nullptr && current_thd->killed) return HA_ERR_GENERIC;
+    if (barrier.needs_wait()) {
+      const auto deadline = std::chrono::steady_clock::now() +
+                            std::chrono::milliseconds(ShannonBase::shannon_rpd_engine_cfg.query_sync_timeout_ms);
+      for (;;) {
+        if (std::chrono::steady_clock::now() >= deadline) {
+          my_error(ER_SECONDARY_ENGINE, MYF(0), "CAPTURE synchronization timed out");
+          return HA_ERR_GENERIC;
+        }
+        if (current_thd != nullptr && current_thd->killed) return HA_ERR_GENERIC;
 
-      // buffer_generation is not optional here. Without it the generation check
-      // inside the wait is disabled, so an unload+reload during the wait leaves
-      // this loop watching a replacement buffer whose change ids restarted at 0
-      // and whose detached flag is false -- a watermark it can never reach, and
-      // the loop has no deadline.
-      const auto wait_ms = std::max<int64_t>(
-          1, std::min<int64_t>(
-                 ShannonBase::Populate::QUERY_PROPAGATION_WAIT_SLICE_MS,
-                 std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now())
-                     .count()));
-      const auto wait_result = ShannonBase::Populate::Populator::wait_table_applied_for(
-          table_id, barrier.required_change_id, wait_ms, barrier.buffer_generation);
+        // buffer_generation is not optional here. Without it the generation check
+        // inside the wait is disabled, so an unload+reload during the wait leaves
+        // this loop watching a replacement buffer whose change ids restarted at 0
+        // and whose detached flag is false -- a watermark it can never reach, and
+        // the loop has no deadline.
+        const auto wait_ms = std::max<int64_t>(
+            1, std::min<int64_t>(
+                   ShannonBase::Populate::QUERY_PROPAGATION_WAIT_SLICE_MS,
+                   std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now())
+                       .count()));
+        const auto wait_result = ShannonBase::Populate::Populator::wait_table_applied_for(
+            table_id, barrier.required_change_id, wait_ms, barrier.buffer_generation);
 
-      if (wait_result == ShannonBase::Populate::TablePropagationWaitResult::APPLIED) break;
+        if (wait_result == ShannonBase::Populate::TablePropagationWaitResult::APPLIED) break;
 
-      if (wait_result == ShannonBase::Populate::TablePropagationWaitResult::BROKEN) {
-        my_error(ER_SECONDARY_ENGINE, MYF(0),
-                 "Rapid table DML propagation failed while waiting for the query watermark; reload required");
-        return HA_ERR_GENERIC;
-      }
+        if (wait_result == ShannonBase::Populate::TablePropagationWaitResult::BROKEN) {
+          my_error(ER_SECONDARY_ENGINE, MYF(0),
+                   "Rapid table DML propagation failed while waiting for the query watermark; reload required");
+          return HA_ERR_GENERIC;
+        }
 
-      if (wait_result == ShannonBase::Populate::TablePropagationWaitResult::GONE) {
-        my_error(ER_SECONDARY_ENGINE, MYF(0), "Rapid table was unloaded while waiting for DML propagation");
-        return HA_ERR_GENERIC;
-      }
+        if (wait_result == ShannonBase::Populate::TablePropagationWaitResult::GONE) {
+          my_error(ER_SECONDARY_ENGINE, MYF(0), "Rapid table was unloaded while waiting for DML propagation");
+          return HA_ERR_GENERIC;
+        }
 
-      // PENDING after the timed condition-variable wait is not an error. It is
-      // only a chance to observe query cancellation or Populator shutdown.
-      if (!ShannonBase::Populate::Populator::active()) {
-        my_error(ER_SECONDARY_ENGINE, MYF(0),
-                 "Rapid change propagation stopped before the query watermark was applied");
-        return HA_ERR_GENERIC;
+        // PENDING after the timed condition-variable wait is not an error. It is
+        // only a chance to observe query cancellation or Populator shutdown.
+        if (!ShannonBase::Populate::Populator::active()) {
+          my_error(ER_SECONDARY_ENGINE, MYF(0),
+                   "Rapid change propagation stopped before the query watermark was applied");
+          return HA_ERR_GENERIC;
+        }
       }
     }
-  }
 
+  } else if (Populate::IsPropagationBroken(table_id)) {
+    my_error(ER_SECONDARY_ENGINE, MYF(0), "Rapid table propagation failed; reload required");
+    return HA_ERR_GENERIC;
+  }
   switch_scan_imcus(m_rpd_table);
 
   m_scan_context->m_schema_name = const_cast<char *>(m_data_source->s->db.str);
@@ -281,7 +288,7 @@ void RapidCursor::switch_scan_imcus(RpdTable *new_table) {
   }
 }
 
-void RapidCursor::active_table(std::shared_ptr<RpdTable> rpd_table) {
+void RapidCursor::active_table(std::shared_ptr<ShannonBase::Imcs::RpdTable> rpd_table) {
   // Hold the previous table until this function returns: switch_scan_imcus()
   // releases its IMCU reader pins, and the old table must not be freed before
   // that happens.

@@ -800,8 +800,7 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
         return false;
       }
       auto table_id = share->m_tableid;
-      scan->rpd_table = (share->is_partitioned) ? Imcs::Imcs::instance()->get_rpd_parttable(table_id)
-                                                : Imcs::Imcs::instance()->get_rpd_table(table_id);
+      scan->rpd_table = Imcs::Imcs::instance()->get_rpd_table(table_id);
       if (!scan->rpd_table) {
         make_native_plan(state, path);
         return false;

@@ -24,7 +24,7 @@
 #include "storage/rapid_engine/imcs/cu.h"
 #include "storage/rapid_engine/imcs/predicate.h"
 #include "storage/rapid_engine/imcs/table0meta.h"
-#include "storage/rapid_engine/recovery/table_persistence.h"
+#include "storage/rapid_engine/imcs/table0persistence.h"
 #include "storage/rapid_engine/utils/crc.h"
 #include "storage/rapid_engine/utils/memory_pool.h"
 

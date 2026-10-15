@@ -1,0 +1,19 @@
+--disable_warnings
+SET use_secondary_engine=OFF;
+SET GLOBAL rapid_change_propagation_mode=COMMITTED_BINLOG;
+CREATE TABLE cb_read(id INT PRIMARY KEY,v INT) SECONDARY_ENGINE=rapid;
+INSERT INTO cb_read VALUES(1,10);
+ALTER TABLE cb_read SECONDARY_LOAD;
+SET sql_log_bin=OFF;
+SET binlog_row_image=MINIMAL;
+SET binlog_format=MIXED;
+SET use_secondary_engine=FORCED;
+SELECT SUM(v) FROM cb_read;
+SET use_secondary_engine=OFF;
+SET sql_log_bin=ON;
+SET binlog_row_image=FULL;
+SET binlog_format=ROW;
+ALTER TABLE cb_read SECONDARY_UNLOAD;
+DROP TABLE cb_read;
+SET GLOBAL rapid_change_propagation_mode=CAPTURE;
+--enable_warnings

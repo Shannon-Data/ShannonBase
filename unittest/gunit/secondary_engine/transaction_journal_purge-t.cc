@@ -46,9 +46,9 @@ TEST(TransactionJournalPurge, PurgeCommittedAndAborted) {
   journal.commit_transaction(100, 10);
   journal.commit_transaction(101, 20);
 
-  // After committing, purge with min_active_scn = 15 should remove versions <=15
+  // A reader at 15 still needs the version at 10 beneath the newer head.
   size_t purged = journal.purge(15);
-  EXPECT_GT(purged, 0u);
+  EXPECT_EQ(purged, 0u);
 
   // Add an aborted transaction
   TransactionJournal::Entry e3;
@@ -112,10 +112,10 @@ TEST(TransactionJournalPurge, RetainsNewestCommittedVersion) {
   commit_update(journal, 1, 102, 30);
   ASSERT_EQ(journal.get_entry_count(), 3u);
 
-  // Watermark 25: scn 30 is the newest and must survive; 10 and 20 are behind it
-  // and are reclaimable.
-  EXPECT_EQ(journal.purge(25), 2u);
-  EXPECT_EQ(journal.get_entry_count(), 1u);
+  // Watermark 25 needs the floor at 20 as well as the newer version at 30.
+  EXPECT_EQ(journal.purge(25), 1u);
+  EXPECT_EQ(journal.get_entry_count(), 2u);
+  EXPECT_EQ(journal.get_row_state_at_scn(1, 25), OPER_TYPE::OPER_UPDATE);
 
   // The surviving version still answers visibility for a current reader.
   EXPECT_EQ(journal.get_row_state_at_scn(1, 40), ShannonBase::OPER_TYPE::OPER_UPDATE);
@@ -212,4 +212,17 @@ TEST(TransactionJournalPurge, PurgingInsertedFloorUpdatesCountAndBytes) {
   EXPECT_EQ(1U, journal.purge(20, 1));
   EXPECT_EQ(0U, journal.get_entry_count());
   EXPECT_EQ(0U, journal.get_total_size());
+}
+
+TEST(TransactionJournalPurge, DeletedFloorCanBeReclaimedAfterReadersLeave) {
+  TransactionJournal journal(1024);
+  journal.add_entry(make_entry(1, OPER_TYPE::OPER_INSERT, 1));
+  journal.commit_transaction(1, 10);
+  journal.add_entry(make_entry(1, OPER_TYPE::OPER_DELETE, 2));
+  journal.commit_transaction(2, 20);
+  EXPECT_EQ(journal.purge(15), 0u);
+  EXPECT_EQ(journal.get_row_state_at_scn(1, 15), OPER_TYPE::OPER_INSERT);
+  EXPECT_EQ(journal.purge(21), 2u);
+  EXPECT_EQ(journal.get_entry_count(), 0u);
+  EXPECT_EQ(journal.get_total_size(), 0u);
 }

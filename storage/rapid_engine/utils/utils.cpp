@@ -74,20 +74,6 @@ void Util::close_spill_file(FILE *stream) {
   if (stream != nullptr) my_fclose(stream, MYF(0));
 }
 
-// Memory the host can still hand out, from MemAvailable (which counts
-// reclaimable page cache); 0 when it cannot be read.
-static uint64 host_available_memory() {
-  FILE *f = std::fopen("/proc/meminfo", "r");
-  if (f == nullptr) return 0;
-  char line[128];
-  unsigned long long kb = 0;
-  while (std::fgets(line, sizeof(line), f) != nullptr) {
-    if (std::sscanf(line, "MemAvailable: %llu kB", &kb) == 1) break;
-  }
-  std::fclose(f);
-  return static_cast<uint64>(kb) * 1024;
-}
-
 // This is a requested grant, not a claim on the same unreserved global
 // headroom by every operator. Constructors acquire an owning lease below.
 static size_t rapid_operator_memory_budget(uint64 floor_bytes [[maybe_unused]]) {
@@ -572,7 +558,7 @@ size_t rpd_columns_count() {
 bool rapid_column_live_stats(uint table_id, uint column_id, rpd_column_live_stats_t *out, bool want_dict_size) {
   if (!out) return false;
 
-  auto rpd_table = Imcs::Imcs::instance()->get_rpd_table_shared(table_id);
+  auto rpd_table = Imcs::Imcs::instance()->get_rpd_table<std::shared_ptr<ShannonBase::Imcs::RpdTable>>(table_id);
   if (!rpd_table) return false;
 
   rpd_column_live_stats_t stats;

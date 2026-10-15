@@ -20,7 +20,7 @@ primary_commit_did_not_wait_for_apply
 1
 SET use_secondary_engine=FORCED;
 SELECT a.v,b.v FROM a JOIN b USING(id);
-ERROR HY000: Secondary engine operation failed. COMMITTED_BINLOG consumer synchronization timed out; unload and reload the table.
+ERROR HY000: Secondary engine operation failed. table has failed DML propagation and must be reloaded.
 SET use_secondary_engine=ON;
 SELECT a.v,b.v FROM a JOIN b USING(id);
 v	v

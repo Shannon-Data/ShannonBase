@@ -152,8 +152,7 @@ bool VectorizedTableScanIterator::Init() {
     return true;
   }
   auto table_id = m_share->m_tableid;
-  m_rpd_table = m_share->is_partitioned ? Imcs::Imcs::instance()->get_rpd_parttable(table_id)
-                                        : Imcs::Imcs::instance()->get_rpd_table(table_id);
+  m_rpd_table = Imcs::Imcs::instance()->get_rpd_table(table_id);
   if (!m_rpd_table) {
     my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid in-memory table disappeared before scan initialization");
     return true;

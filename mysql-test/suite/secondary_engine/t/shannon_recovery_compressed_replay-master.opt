@@ -1,0 +1,8 @@
+--log-bin
+--binlog-format=ROW
+--binlog-row-image=FULL
+--sync-binlog=1
+--innodb-flush-log-at-trx-commit=1
+--binlog-transaction-compression=ON
+# Persistence/restart coverage does not require optional model inference.
+--loose-rapid_schema_embedding=OFF

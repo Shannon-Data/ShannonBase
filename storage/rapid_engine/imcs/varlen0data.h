@@ -40,7 +40,9 @@
 #include "field_types.h"  //for MYSQL_TYPE_XXX
 #include "my_inttypes.h"  //uintxxx
 
-#include "storage/innobase/include/ut0dbg.h"
+// univ.i defines UNIV_DEBUG and then pulls in ut0dbg.h; including ut0dbg.h
+// directly leaves ut_ad() empty while other headers still see UNIV_DEBUG.
+#include "storage/innobase/include/univ.i"
 
 #include "storage/rapid_engine/include/rapid_arch_inf.h"  //cache line sz
 #include "storage/rapid_engine/include/rapid_const.h"

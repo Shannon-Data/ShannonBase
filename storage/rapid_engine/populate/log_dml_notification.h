@@ -44,25 +44,25 @@
 #include "sql/sql_base.h"
 #include "storage/rapid_engine/include/rapid_const.h"
 #include "storage/rapid_engine/include/rapid_context.h"  //Rapid_load_context
-#include "storage/rapid_engine/populate/log_commons.h"   //change_record_buff_t::OperType
-#include "storage/rapid_engine/recovery/notification_tracker.h"
-#include "storage/rapid_engine/trx/transaction.h"  //TransactionSubscriber
+#include "storage/rapid_engine/include/rapid_notification_tracker.h"
+#include "storage/rapid_engine/populate/log_commons.h"  //change_record_buff_t::OperType
+#include "storage/rapid_engine/trx/transaction.h"       //TransactionSubscriber
 #include "storage/rapid_engine/utils/utils.h"
 
 namespace ShannonBase {
 namespace Populate {
 
-// Addresses distinguish IMCUs with the same partition-local ID. Ownership
-// retains each participant until its source transaction is finalized.
-template <typename Imcu>
-class TransactionImcuParticipants {
+// Addresses distinguish participants that share the same partition-local ID.
+// Ownership retains each registered object until its source transaction is finalized.
+template <typename T>
+class TableParticipantSet {
  public:
-  using Set = std::unordered_map<Imcu *, std::shared_ptr<Imcu>>;
+  using Set = std::unordered_map<T *, std::shared_ptr<T>>;
 
-  bool add(const std::shared_ptr<Imcu> &imcu) noexcept {
-    if (!imcu) return true;
+  bool add(const std::shared_ptr<T> &item) noexcept {
+    if (!item) return true;
     try {
-      m_imcus.try_emplace(imcu.get(), imcu);
+      m_items.try_emplace(item.get(), item);
       return true;
     } catch (const std::bad_alloc &) {
       return false;
@@ -71,14 +71,14 @@ class TransactionImcuParticipants {
 
   Set take() noexcept {
     Set participants;
-    participants.swap(m_imcus);
+    participants.swap(m_items);
     return participants;
   }
 
-  bool empty() const noexcept { return m_imcus.empty(); }
+  bool empty() const noexcept { return m_items.empty(); }
 
  private:
-  Set m_imcus;
+  Set m_items;
 };
 
 /**
@@ -90,7 +90,7 @@ class TransactionImcuParticipants {
  * may outlive the THD-local Transaction facade until every queued record is
  * applied.
  */
-class TransactionManager final : public TransactionSubscriber {
+class SourceTxnTracker final : public TransactionSubscriber {
  public:
   enum class Outcome : uint8_t { ACTIVE = 0, COMMITTED, ABORTED };
 
@@ -100,13 +100,13 @@ class TransactionManager final : public TransactionSubscriber {
     explicit operator bool() const noexcept { return source_trx_id != 0; }
   };
 
-  static TransactionManager &instance() {
-    static TransactionManager manager;
+  static SourceTxnTracker &instance() {
+    static SourceTxnTracker manager;
     return manager;
   }
 
-  TransactionManager(const TransactionManager &) = delete;
-  TransactionManager &operator=(const TransactionManager &) = delete;
+  SourceTxnTracker(const SourceTxnTracker &) = delete;
+  SourceTxnTracker &operator=(const SourceTxnTracker &) = delete;
 
   Registration register_change(THD *thd, table_id_t table_id);
 
@@ -114,6 +114,10 @@ class TransactionManager final : public TransactionSubscriber {
   // statement-rollback callback. Keep this explicit while COPY_INFO lacks
   // per-operation undo.
   void quarantine_partial_rollback(THD *thd, const char *reason);
+  void on_savepoint_rollback(THD *thd, const char *reason = nullptr) override {
+    quarantine_partial_rollback(thd,
+                                reason != nullptr ? reason : "ROLLBACK TO SAVEPOINT after DML was already propagated");
+  }
 
   Outcome get_outcome(Transaction::ID txn_id, uint64_t *commit_scn = nullptr);
   void finalize_committed();
@@ -121,7 +125,7 @@ class TransactionManager final : public TransactionSubscriber {
   bool on_imcu_applied(Transaction::ID txn_id, table_id_t table_id, const std::shared_ptr<Imcs::Imcu> &imcu);
   void forget_table(table_id_t table_id);
 
-  void on_transaction_commit(THD *thd, const Recovery::BinlogPosition &position);
+  void on_transaction_commit(THD *thd, const BinlogPosition &position);
   void on_transaction_rollback(THD *thd) override;
   void record_source_abort(THD *thd);
   void quarantine_failed_transaction(THD *thd) noexcept;
@@ -145,7 +149,7 @@ class TransactionManager final : public TransactionSubscriber {
     uint64_t registered{0};
     uint64_t applied{0};
     uint64_t finalizing{0};
-    TransactionImcuParticipants<Imcs::Imcu> imcus;
+    TableParticipantSet<Imcs::Imcu> imcus;
   };
 
   struct TxnProgress {
@@ -154,7 +158,7 @@ class TransactionManager final : public TransactionSubscriber {
     std::unordered_map<table_id_t, TableProgress> tables;
   };
 
-  TransactionManager() = default;
+  SourceTxnTracker() = default;
 
   void ensure_subscribed();
   void clear();
@@ -271,7 +275,7 @@ class CopyInfoParser {
    * Owns everything specific to the row-image source: validating the primary
    * writer identity, resolving the asynchronous primary COMMIT/ROLLBACK race,
    * preparing the Rapid_load_context and driving parse_copy_info(). On success
-   * it also reports the record to TransactionManager so the source transaction
+   * it also reports the record to SourceTxnTracker so the source transaction
    * can be finalized. The propagation worker only routes the record here and
    * acts on the returned status.
    *

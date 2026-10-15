@@ -177,6 +177,7 @@ class Rapid_execution_context : public Rapid_context {
 
   Rapid_execution_context() {}
   ResMgmt::WorkScope m_resource_scope;
+  std::shared_ptr<void> m_committed_binlog_pin;
   bool m_committed_binlog_view{false};
   uint64_t m_committed_binlog_scn{0};
   /**

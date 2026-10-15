@@ -1,0 +1,29 @@
+SET @saved_debug=@@GLOBAL.debug;
+CALL mtr.add_suppression("Rapid COMMITTED_BINLOG: binlog reader allocation or decoding failed");
+SET use_secondary_engine=OFF;
+SET GLOBAL rapid_change_propagation_mode=COMMITTED_BINLOG;
+CREATE TABLE cb_thread (id INT PRIMARY KEY,v INT) SECONDARY_ENGINE=rapid;
+INSERT INTO cb_thread VALUES (1,10);
+ALTER TABLE cb_thread SECONDARY_LOAD;
+INSERT INTO cb_thread VALUES (2,20);
+SET use_secondary_engine=FORCED;
+SELECT SUM(v) FROM cb_thread;
+ERROR HY000: Secondary engine operation failed. binlog reader allocation or decoding failed; unload and reload the table.
+SET use_secondary_engine=ON;
+SELECT COUNT(*),SUM(v) FROM cb_thread;
+COUNT(*)	SUM(v)
+2	30
+SET use_secondary_engine=OFF;
+ALTER TABLE cb_thread SECONDARY_UNLOAD;
+SET GLOBAL debug='-d,rapid_committed_decode_bad_alloc';
+ALTER TABLE cb_thread SECONDARY_LOAD;
+INSERT INTO cb_thread VALUES (3,30);
+SET use_secondary_engine=FORCED;
+SELECT COUNT(*),SUM(v) FROM cb_thread;
+COUNT(*)	SUM(v)
+3	60
+SET use_secondary_engine=OFF;
+ALTER TABLE cb_thread SECONDARY_UNLOAD;
+DROP TABLE cb_thread;
+SET GLOBAL rapid_change_propagation_mode=CAPTURE;
+SET GLOBAL debug=@saved_debug;

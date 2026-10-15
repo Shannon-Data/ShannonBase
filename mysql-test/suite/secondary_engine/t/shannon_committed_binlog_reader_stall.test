@@ -1,3 +1,41 @@
-# Copyright (c) 2026, Shannon Data AI and/or its affiliates.
---let $stall_debug = rapid_committed_reader_stall
---source suite/secondary_engine/include/shannon_committed_binlog_stall.inc
+# A paused reader has not lost input: timeout the query, then resume without reload.
+--source include/have_debug.inc
+--source include/no_ps_protocol.inc
+SET @saved_debug=@@GLOBAL.debug;
+SET use_secondary_engine=OFF;
+CREATE TABLE cb_reader(id INT PRIMARY KEY,v INT) SECONDARY_ENGINE=rapid;
+INSERT INTO cb_reader VALUES(1,10);
+ALTER TABLE cb_reader SECONDARY_LOAD;
+SET use_secondary_engine=FORCED;
+SELECT SUM(v) FROM cb_reader;
+SET use_secondary_engine=OFF;
+SET GLOBAL debug='+d,rapid_committed_reader_stall';
+--disable_query_log
+SET @tp_started=NOW(6);
+UPDATE cb_reader SET v=11;
+SET @tp_elapsed=TIMESTAMPDIFF(MICROSECOND,@tp_started,NOW(6));
+--let $primary_commit_fast = `SELECT @tp_elapsed < 2000000`
+if ($primary_commit_fast != 1) {
+  --die Primary commit waited for the paused reader
+}
+--enable_query_log
+SET use_secondary_engine=FORCED;
+--error ER_SECONDARY_ENGINE
+SELECT SUM(v) FROM cb_reader;
+SET use_secondary_engine=ON;
+SELECT SUM(v) FROM cb_reader;
+--disable_query_log
+--let $broken = `SELECT COUNT(*) FROM performance_schema.rpd_tables t JOIN performance_schema.rpd_table_id i ON t.ID=i.ID WHERE i.TABLE_NAME='cb_reader' AND t.STALE_REASON='RELOAD_REQUIRED'`
+if ($broken != 0) {
+  --die A query timeout must not discard intact committed input
+}
+--enable_query_log
+SET GLOBAL debug=@saved_debug;
+# No new source commit: query demand must wake the sleeping reader itself.
+SET use_secondary_engine=FORCED;
+SELECT SUM(v) FROM cb_reader;
+--let $assert_query = SELECT SUM(v) FROM cb_reader
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+SET use_secondary_engine=OFF;
+ALTER TABLE cb_reader SECONDARY_UNLOAD;
+DROP TABLE cb_reader;

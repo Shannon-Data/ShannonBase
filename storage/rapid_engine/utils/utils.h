@@ -41,6 +41,8 @@
 #include "include/my_inttypes.h"
 #include "sql-common/my_decimal.h"
 #include "sql/field.h"  //Field
+#include "sql/partition_element.h"
+#include "sql/partition_info.h"
 #include "sql/sql_base.h"
 #include "sql/sql_class.h"                                        // THD
 #include "sql/tztime.h"                                           //timzone
@@ -141,6 +143,24 @@ inline bool IsOffPageType(enum_field_types type) {
 
 /** A typed array reports its element type, so it is correctly not one. */
 inline bool IsOffPageField(const Field *field) { return field != nullptr && IsOffPageType(field->type()); }
+
+/**
+ * Build the Rapid routing key of one physical partition.
+ *
+ * Rapid stores a partitioned table as one sub-table per physical partition,
+ * registered under "<part_name>#<part_id>".
+ */
+inline std::string rapid_partition_key(partition_info *part_info, uint32 part_id) {
+  if (part_info == nullptr || part_id == NOT_A_PARTITION_ID || part_id >= part_info->get_tot_partitions())
+    return std::string();
+
+  const partition_element *elem = part_info->partitions[part_id];
+  if (elem == nullptr || elem->partition_name == nullptr) return std::string();
+
+  std::string key(elem->partition_name);
+  key.append("#").append(std::to_string(part_id));
+  return key;
+}
 
 /**
  * Load a value of type T from an arbitrary (possibly unaligned) address.
