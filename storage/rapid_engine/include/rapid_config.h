@@ -26,6 +26,7 @@
 #ifndef __SHANNONBASE_RPD_CONFIG_H__
 #define __SHANNONBASE_RPD_CONFIG_H__
 #include <cstring>
+#include <mutex>
 #include "storage/rapid_engine/autopilot/loader.h"
 #include "storage/rapid_engine/compress/algorithms.h"
 #include "storage/rapid_engine/include/rapid_const.h"
@@ -104,7 +105,8 @@ struct SHANNON_ALIGNAS RpdEngineConfig {
   size_t max_concurrent_transactions{1000};
   size_t background_worker_threads{3};
 
-  // GC Configuration
+  // GC Configuration: hold gc_mutex when reading or updating these fields at runtime.
+  std::mutex gc_mutex;
   ulonglong gc_interval_seconds{ShannonBase::SHANNON_DEFAULT_GC_INTERVAL_TIME};  // GC interval (seconds)
   ulonglong gc_batch_size{SHANNON_DEFAULT_PURGE_BATCH_SIZE};
   ulonglong gc_interval_scn{ShannonBase::SHANNON_DEFAULT_GC_INTERVAL_SCN};

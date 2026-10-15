@@ -1131,15 +1131,22 @@ bool Imcu::rollback_transaction(Transaction::ID txn_id) {
 
 size_t Imcu::garbage_collect(uint64 min_active_scn) {
   const auto start = std::chrono::steady_clock::now();
-  const auto &cfg = shannon_rpd_engine_cfg;
+  auto &cfg = shannon_rpd_engine_cfg;
+  ulonglong min_versions, batch_size;
+  double ratio_threshold;
+  {
+    std::lock_guard<std::mutex> lock(cfg.gc_mutex);
+    min_versions = cfg.gc_min_version;
+    batch_size = cfg.gc_batch_size;
+    ratio_threshold = cfg.gc_version_ratio_threshold;
+  }
   size_t versions = m_header.txn_journal ? m_header.txn_journal->get_entry_count() : 0;
   for (const auto &[column, cu] : m_column_units)
     if (cu) versions += cu->get_version_count(nullptr);
   const size_t rows = get_row_count();
-  if (versions < cfg.gc_min_version || (rows && static_cast<double>(versions) / rows < cfg.gc_version_ratio_threshold))
-    return 0;
+  if (versions < min_versions || (rows && static_cast<double>(versions) / rows < ratio_threshold)) return 0;
 
-  const size_t limit = static_cast<size_t>(std::min<ulonglong>(cfg.gc_batch_size, SIZE_MAX));
+  const size_t limit = static_cast<size_t>(std::min<ulonglong>(batch_size, SIZE_MAX));
   size_t purged = 0;
   if (m_header.txn_journal) purged = m_header.txn_journal->purge(min_active_scn, limit);
   for (auto &[column, cu] : m_column_units)

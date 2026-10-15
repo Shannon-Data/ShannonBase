@@ -82,11 +82,15 @@ void BkgWorkerPool::auto_maintenance_thread() {
 
       // 1. auto GC —— gc_interval_scn is the minimum interval between two consecutive GC operations, but the real safe
       // SCN is determined by the actual active transactions.
+      ulonglong gc_interval_scn;
+      {
+        auto &cfg = ShannonBase::shannon_rpd_engine_cfg;
+        std::lock_guard<std::mutex> lock(cfg.gc_mutex);
+        gc_interval_scn = cfg.gc_interval_scn;
+      }
       uint64_t current_scn = TransactionCoordinator::instance().get_current_scn();
       uint64_t last = m_last_gc_scn.load(std::memory_order_acquire);
-      if (current_scn != 0 &&
-          (current_scn == last ||
-           (current_scn > last && current_scn - last >= ShannonBase::shannon_rpd_engine_cfg.gc_interval_scn))) {
+      if (current_scn != 0 && (current_scn == last || (current_scn > last && current_scn - last >= gc_interval_scn))) {
         uint64_t safe_scn = TransactionCoordinator::instance().get_gc_safe_scn();
 
         imcs->for_each_table([&](RpdTable *table) {
@@ -480,7 +484,11 @@ BkgWorkerPool::BkgWorkerPool(size_t num_workers) {
 
     bool expected = false;
     if (m_auto_thread_running.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
-      set_gc_interval_seconds(ShannonBase::shannon_rpd_engine_cfg.gc_interval_seconds);
+      {
+        auto &cfg = ShannonBase::shannon_rpd_engine_cfg;
+        std::lock_guard<std::mutex> lock(cfg.gc_mutex);
+        set_gc_interval_seconds(cfg.gc_interval_seconds);
+      }
       m_maintenance_wait.start();
       m_auto_thread = std::thread(&BkgWorkerPool::auto_maintenance_thread);
     }

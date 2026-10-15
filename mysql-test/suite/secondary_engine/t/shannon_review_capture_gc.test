@@ -2,6 +2,9 @@
 --source include/have_debug.inc
 --disable_query_log
 SET use_secondary_engine=OFF;
+SET @saved_gc_batch=@@GLOBAL.rapid_purge_batch_size;
+SET @saved_gc_min=@@GLOBAL.rapid_min_versions_for_purge;
+SET @saved_gc_ratio=@@GLOBAL.rapid_purge_efficiency_threshold;
 SET GLOBAL rapid_max_purger_timeout=1;
 SET GLOBAL rapid_gc_interval_scn=1;
 CREATE TABLE review_gc(id INT PRIMARY KEY,v INT) SECONDARY_ENGINE=rapid;
@@ -17,6 +20,10 @@ SELECT v INTO @old_value FROM review_gc;
 --let $purged_before= query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_gc_total_purged_versions', Value, 1)
 --let $i= 40
 while ($i) {
+  # Exercise configuration publication while maintenance and apply are active.
+  --eval SET GLOBAL rapid_purge_batch_size=16 + MOD($i, 2)
+  --eval SET GLOBAL rapid_min_versions_for_purge=1 + MOD($i, 2)
+  --eval SET GLOBAL rapid_purge_efficiency_threshold=0.1 + MOD($i, 2) * 0.1
   UPDATE review_gc SET v=v+1;
   --dec $i
 }
@@ -50,6 +57,9 @@ SELECT v FROM review_gc;
 SET use_secondary_engine=OFF;
 ALTER TABLE review_gc SECONDARY_UNLOAD;
 DROP TABLE review_gc;
+SET GLOBAL rapid_purge_batch_size=@saved_gc_batch;
+SET GLOBAL rapid_min_versions_for_purge=@saved_gc_min;
+SET GLOBAL rapid_purge_efficiency_threshold=@saved_gc_ratio;
 SET GLOBAL rapid_max_purger_timeout=DEFAULT;
 SET GLOBAL rapid_gc_interval_scn=DEFAULT;
 --disconnect old
