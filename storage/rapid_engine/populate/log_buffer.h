@@ -28,6 +28,7 @@
 */
 #ifndef __SHANNONBASE_MPMC_RINGBUFFER_H__
 #define __SHANNONBASE_MPMC_RINGBUFFER_H__
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cstddef>
@@ -37,67 +38,16 @@
 #include <new>
 #include <type_traits>
 #include <utility>
+#include "storage/rapid_engine/utils/row_image_buffer.h"
 
 #include "storage/rapid_engine/include/rapid_arch_inf.h"  // CACHE_LINE_SIZE
 #include "storage/rapid_engine/include/rapid_const.h"
 namespace ShannonBase {
 namespace Populate {
-// Producer-local cache; ownership follows the record across asynchronous apply
-// and producer exit. Returning a buffer never allocates. Large rows bypass it.
-class RowImageBufferPool {
- public:
-  using Buffer = unsigned char[];
-
-  static std::shared_ptr<Buffer> acquire(size_t bytes) {
-    if (!bytes) return {};
-    if (bytes > kMaxBuffer) return std::shared_ptr<Buffer>(new unsigned char[bytes]);
-    thread_local auto pool = std::make_shared<RowImageBufferPool>();
-    size_t capacity = 256;
-    while (capacity < bytes) capacity *= 2;
-    auto buffer = pool->take(capacity);
-    if (!buffer) buffer = std::make_unique<Buffer>(capacity);
-    return std::shared_ptr<Buffer>(buffer.release(), [owner = pool, capacity](unsigned char *data) {
-      owner->put(std::unique_ptr<Buffer>(data), capacity);
-    });
-  }
-
- private:
-  static constexpr size_t kMaxBuffer = 64 * 1024;
-  static constexpr size_t kMaxCachedBytes = 1024 * 1024;
-  struct Slot {
-    std::unique_ptr<Buffer> buffer;
-    size_t capacity{0};
-  };
-  std::unique_ptr<Buffer> take(size_t capacity) {
-    std::lock_guard guard(m_mutex);
-    for (size_t i = m_count; i > 0; --i) {
-      auto &slot = m_slots[i - 1];
-      if (slot.capacity == capacity) {
-        m_cached_bytes -= capacity;
-        auto buffer = std::move(slot.buffer);
-        --m_count;
-        if (i - 1 != m_count) slot = std::move(m_slots[m_count]);
-        return buffer;
-      }
-    }
-    return {};
-  }
-  void put(std::unique_ptr<Buffer> buffer, size_t capacity) {
-    std::lock_guard guard(m_mutex);
-    if (m_cached_bytes + capacity > kMaxCachedBytes || m_count == m_slots.size()) return;
-    auto &slot = m_slots[m_count++];
-    slot.capacity = capacity;
-    slot.buffer = std::move(buffer);
-    m_cached_bytes += capacity;
-  }
-  std::mutex m_mutex;
-  std::array<Slot, 256> m_slots;
-  size_t m_count{0};
-  size_t m_cached_bytes{0};
-};
+using ::ShannonBase::RowImageBufferPool;
 
 /**
- * MPMC (multi-producer, multi-consumer) lock-free ring buffer.
+ * Multi-producer ring buffer with an exclusive consumer interface.
  *
  * Concurrency model:
  *   - try_put()  : any number of producers may call concurrently.
@@ -122,9 +72,27 @@ class Ringbuffer {
                 "T must be move constructible and move assignable");
 
  private:
-  using Storage = typename std::aligned_storage<sizeof(T), alignof(T)>::type;
-  T *slot_ptr(size_t pos) noexcept { return reinterpret_cast<T *>(&buffer_[pos]); }
-  const T *slot_ptr(size_t pos) const noexcept { return reinterpret_cast<const T *>(&buffer_[pos]); }
+  struct alignas(T) Storage {
+    std::byte bytes[sizeof(T)];
+  };
+  static constexpr size_t chunk_size = BufferSize < 256 ? BufferSize : 256;
+  static constexpr size_t chunk_count = BufferSize / chunk_size;
+  bool ensure_chunk(size_t pos) noexcept {
+    auto &slot = chunks_[pos / chunk_size];
+    if (slot.load(std::memory_order_acquire)) return true;
+    auto *chunk = new (std::nothrow) Storage[chunk_size];
+    if (!chunk) return false;
+    Storage *expected = nullptr;
+    if (!slot.compare_exchange_strong(expected, chunk, std::memory_order_release, std::memory_order_acquire))
+      delete[] chunk;
+    return true;
+  }
+  T *slot_ptr(size_t pos) noexcept {
+    return reinterpret_cast<T *>(&chunks_[pos / chunk_size].load(std::memory_order_acquire)[pos % chunk_size]);
+  }
+  const T *slot_ptr(size_t pos) const noexcept {
+    return reinterpret_cast<const T *>(&chunks_[pos / chunk_size].load(std::memory_order_acquire)[pos % chunk_size]);
+  }
 
  public:
   constexpr static size_t capacity = BufferSize;
@@ -134,7 +102,10 @@ class Ringbuffer {
     }
   }
 
-  ~Ringbuffer() noexcept { clear(); }
+  ~Ringbuffer() noexcept {
+    clear();
+    for (auto &chunk : chunks_) delete[] chunk.load(std::memory_order_relaxed);
+  }
 
   Ringbuffer(const Ringbuffer &) = delete;
   Ringbuffer &operator=(const Ringbuffer &) = delete;
@@ -200,16 +171,19 @@ class Ringbuffer {
     tail_.store(tail + n, std::memory_order_release);
   }
 
+  // Occupancy includes reserved, not-yet-published slots. Use try_pop()/peek()
+  // to check readiness; a nonempty ring does not guarantee peek() is non-null.
   bool empty() const noexcept { return head_.load(std::memory_order_acquire) == tail_.load(std::memory_order_acquire); }
   bool full() const noexcept {
     uint64_t head = head_.load(std::memory_order_acquire);
     uint64_t tail = tail_.load(std::memory_order_acquire);
     return (head - tail) >= BufferSize;
   }
+  // Advisory only while producers/consumer are active.
   size_t size() const noexcept {
     uint64_t h = head_.load(std::memory_order_acquire);
     uint64_t t = tail_.load(std::memory_order_acquire);
-    return static_cast<size_t>(h - t);
+    return h >= t ? std::min<size_t>(h - t, BufferSize) : 0;
   }
   size_t available() const noexcept { return capacity - size(); }
   void clear() noexcept {
@@ -236,6 +210,7 @@ class Ringbuffer {
       uint64_t seq = seqs_[pos].load(std::memory_order_acquire);
       int64_t diff = static_cast<int64_t>(seq - head);
       if (diff == 0) {
+        if (!ensure_chunk(pos)) return false;
         if (head_.compare_exchange_weak(head, head + 1, std::memory_order_relaxed)) {
           new (slot_ptr(pos)) T(std::forward<U>(item));
           seqs_[pos].store(head + 1, std::memory_order_release);
@@ -252,7 +227,9 @@ class Ringbuffer {
   alignas(CacheLine) std::atomic<uint64_t> head_{0};
   alignas(CacheLine) std::atomic<uint64_t> tail_{0};
   alignas(CacheLine) std::atomic<uint64_t> seqs_[BufferSize]{};
-  alignas(CacheLine) Storage buffer_[BufferSize];
+  // Allocate row storage only as occupancy grows; cold tables retain only
+  // sequence metadata rather than reserving all 256K heavyweight records.
+  alignas(CacheLine) std::atomic<Storage *> chunks_[chunk_count]{};
 };
 }  // namespace Populate
 }  // namespace ShannonBase

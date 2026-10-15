@@ -1,0 +1,3 @@
+# This test measures reclamation after its explicit primary ReadView closes.
+# Unrelated schema-embedding readers can conservatively hold the GC horizon.
+--loose-rapid_schema_embedding=OFF

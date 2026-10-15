@@ -46,9 +46,8 @@ Copyright (c) 2023, Shannon Data AI and/or its affiliates.
 #include "storage/rapid_engine/include/rapid_column_info.h"
 #include "storage/rapid_engine/include/rapid_config.h"
 #include "storage/rapid_engine/include/rapid_context.h"
-#include "storage/rapid_engine/populate/log_binlog_parser.h"
 #include "storage/rapid_engine/populate/log_populate.h"
-#include "storage/rapid_engine/recovery/binlog_recovery.h"
+#include "storage/rapid_engine/utils/binlog_position.h"
 #include "storage/rapid_engine/utils/utils.h"
 
 namespace ShannonBase {
@@ -148,7 +147,7 @@ int drain_table_changes(THD *thd, table_id_t table_id) {
 
 // SECONDARY_UNLOAD PARTITION (...): detach only the named partitions.
 int unload_named_partitions(THD *thd, Table_ref *table_list, table_id_t table_id) {
-  auto *part_table = down_cast<Imcs::PartTable *>(Imcs::Imcs::instance()->get_rpd_parttable(table_id));
+  auto *part_table = down_cast<Imcs::PartTable *>(Imcs::Imcs::instance()->get_rpd_table(table_id));
   if (part_table == nullptr) return SHANNON_SUCCESS;
 
   if (int error = drain_table_changes(thd, table_id)) return error;
@@ -488,8 +487,6 @@ int ha_rapidpart::load_table(const TABLE &table, bool *skip_metadata_update) {
   auto *mutable_table = const_cast<TABLE *>(&table);
   std::shared_lock mode_lock(Populate::propagation_mode_mutex);
   DEBUG_SYNC(m_thd, "rapid_change_propagation_load_admitted");
-  if (!Populate::propagation_backend_available(Populate::configured_change_propagation_mode.load()))
-    return fail_secondary("COMMITTED_BINLOG change propagation backend is not implemented");
 
   // A partitioned table without partition info cannot be loaded at all, and
   // every partition-enumerating path below dereferences it.
@@ -498,16 +495,9 @@ int ha_rapidpart::load_table(const TABLE &table, bool *skip_metadata_update) {
   // Loading specific partitions? (e.g. SECONDARY_LOAD PARTITION (p1)).
   Table_ref *table_list = statement_table_list(m_thd);
   const bool is_partition_load = table_list != nullptr && table_list->partition_names != nullptr;
-  const bool committed_binlog =
-      Populate::configured_change_propagation_mode.load() == Populate::CopyInfoMode::COMMITTED_BINLOG;
-  Recovery::BinlogPosition binlog_baseline;
-  if (committed_binlog) {
-    if (is_partition_load) return fail_secondary("COMMITTED_BINLOG requires loading the whole partitioned table");
-    if (const char *error = Populate::CommittedBinlog::check_configuration(m_thd)) return fail_secondary(error);
-    if (!Populate::BinlogParser::supports(&table))
-      return fail_secondary("COMMITTED_BINLOG requires a primary key and no foreign keys or generated columns");
-    binlog_baseline = Recovery::BinlogRecovery::current_position();
-  }
+  Populate::Populator::LoadState propagation;
+  if (const char *error = Populate::Populator::prepare_load(m_thd, mutable_table, propagation, is_partition_load))
+    return fail_secondary(error);
 
   if (!is_partition_load && shannon_loaded_tables->get(db, tbl) != nullptr)
     return fail_secondary(std::string(db) + "." + tbl + " already loaded");
@@ -570,11 +560,7 @@ int ha_rapidpart::load_table(const TABLE &table, bool *skip_metadata_update) {
   }
 
   // Start the population thread now that a table is loaded.
-  ShannonBase::Populate::Populator::start();
-  if (committed_binlog && !Populate::CommittedBinlog::attach(m_thd, mutable_table, binlog_baseline)) {
-    Populate::QuarantinePropagationTable(context.m_table_id);
-    return fail_secondary("cannot start COMMITTED_BINLOG propagation; unload and retry");
-  }
+  if (const char *error = Populate::Populator::start(propagation)) return fail_secondary(error);
   return ShannonBase::SHANNON_SUCCESS;
 }
 
@@ -598,7 +584,6 @@ int ha_rapidpart::unload_table(const char *db_name, const char *table_name, bool
   }
 
   // Full table unload.
-  Populate::CommittedBinlog::detach(table_id);
   ShannonBase::Populate::Populator::unload(table_id);
 
   ShannonBase::Rapid_load_context context;

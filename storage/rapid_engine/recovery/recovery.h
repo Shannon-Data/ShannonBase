@@ -21,7 +21,7 @@
 
    Copyright (c) 2023, Shannon Data AI and/or its affiliates.
 
-   The fundmental code for imcs.
+   The fundmental code for recovery.
 */
 #ifndef __SHANNONBASE_RECOVERY_H__
 #define __SHANNONBASE_RECOVERY_H__
@@ -40,9 +40,7 @@
 #include <vector>
 
 #include "my_inttypes.h"
-#include "storage/rapid_engine/recovery/recovery_load.h"
-#include "storage/rapid_engine/recovery/source_validation.h"
-#include "storage/rapid_engine/recovery/table_persistence.h"  // per-table checkpoint storage
+#include "storage/rapid_engine/imcs/table0persistence.h"  // per-table checkpoint storage
 
 class THD;
 class TABLE;
@@ -146,11 +144,12 @@ class RecoveryManager {
 };
 
 /**
- * Source-DML hook for a table that is not registered in IMCS: revokes fast
- * recovery when that table has an on-disk image awaiting restart recovery.
- * Cheap (one atomic load) once no table is pending. Never throws.
+ * Source-DML hook for a table not registered in IMCS: durably revoke the
+ * restart-pending on-disk image so a restart reloads from the primary.
+ *
+ * No-throw: the checkpoint scheduler may be absent during startup/shutdown.
  */
-void note_unregistered_source_change(const char *db, const char *tbl) noexcept;
+void revoke_unregistered_table_image(const char *db, const char *tbl) noexcept;
 
 // Background thread. Two triggers:
 //   1. Periodic sweep of READ_ONLY IMCUs every `interval` seconds.
@@ -198,141 +197,6 @@ class CheckpointScheduler {
   static std::atomic<CheckpointScheduler *> s_global;
 };
 
-class RecoveryAdminSession {
- public:
-  RecoveryAdminSession();
-  ~RecoveryAdminSession();
-
-  RecoveryAdminSession(const RecoveryAdminSession &) = delete;
-  RecoveryAdminSession &operator=(const RecoveryAdminSession &) = delete;
-
-  THD *thd() const { return m_thd; }
-  bool is_valid() const { return m_thd != nullptr; }
-
- private:
-  THD *m_thd{nullptr};
-};
-
-class RecoveryJob {
- public:
-  explicit RecoveryJob(const SecondaryLoadedTable &table_info,
-                       SourceValidationPolicy validation = SourceRecoveryValidation::current())
-      : m_table_info(table_info), m_source_validation(std::move(validation)) {}
-  ~RecoveryJob() = default;
-
-  /**
-   * Execute recovery for this table.
-   *
-   * Restore a certified columnar checkpoint and committed MySQL binlog when
-   * source history is complete. Otherwise discard the old epoch and reload
-   * from recovered InnoDB. Both paths fence source writes through publication.
-   *
-   * @return true only if recovering and registering the table succeeded.
-   */
-  bool execute();
-
-  const SecondaryLoadedTable &table_info() const { return m_table_info; }
-
- private:
-  bool try_snapshot_recovery(THD *thd);
-  bool reconstruct_field_pointers(THD *thd, Imcs::RpdTable *rpd_table, TABLE *&out_source);
-  bool register_in_loaded_tables(THD *thd, TABLE *source, Imcs::RpdTable *rpd_table);
-  void schedule_checkpoint_async();
-
-  /** Start the change-propagation coordinator for a table this job restored. */
-  void start_change_propagation() const;
-
-  /**
-   * Drop checkpoint generations left by the previous epoch before
-   * rebuilding this table from InnoDB (see TablePersistenceManager::reset_epoch()).
-   */
-  bool discard_stale_recovery_state();
-
-  // Authoritative primary-engine reload.
-  bool reload_normal_table(THD *thd);
-  bool reload_partitioned_table(THD *thd);
-
-  SecondaryLoadedTable m_table_info;
-  SourceValidationPolicy m_source_validation;
-  bool m_source_validation_failed{false};
-};
-
-class DDWorker {
- public:
-  DDWorker() = default;
-  ~DDWorker() { stop(); }
-
-  DDWorker(const DDWorker &) = delete;
-  DDWorker &operator=(const DDWorker &) = delete;
-
-  bool start();
-  void stop();
-
-  bool is_done() const { return m_done.load(std::memory_order_acquire); }
-  const std::vector<SecondaryLoadedTable> &found_tables() const { return m_found_tables; }
-
- private:
-  void run();
-
-  std::thread m_thread;
-  std::mutex m_mutex;
-  std::condition_variable m_cv;
-
-  std::atomic<bool> m_stop{false};
-  std::atomic<bool> m_done{false};
-
-  std::vector<SecondaryLoadedTable> m_found_tables;
-};
-
-class RecoveryFramework {
- public:
-  static RecoveryFramework &instance() {
-    static RecoveryFramework inst;
-    return inst;
-  }
-
-  void startup();
-  void shutdown();
-
-  bool global_state_was_empty() const { return m_global_state_empty.load(); }
-  size_t reloaded_count() const { return m_reloaded_count.load(); }
-  bool restart_in_progress() const { return m_restart_in_progress.load(std::memory_order_acquire); }
-
- private:
-  RecoveryFramework() = default;
-  ~RecoveryFramework() = default;
-  RecoveryFramework(const RecoveryFramework &) = delete;
-  RecoveryFramework &operator=(const RecoveryFramework &) = delete;
-
-  bool is_global_state_empty() const;
-  void process_external_global_state();
-  void dispatch_jobs(const std::vector<SecondaryLoadedTable> &tables);
-  void invalidate_external_global_state();
-  static std::string resolve_snapshot_dir();
-
-  std::thread m_monitoring_thread;
-
-  std::atomic<bool> m_global_state_empty{false};
-  std::atomic<size_t> m_reloaded_count{0};
-
-  std::unique_ptr<DDWorker> m_dd_worker;
-  std::unique_ptr<CheckpointScheduler> m_checkpoint_scheduler;
-
-  std::mutex m_jobs_mutex;
-  std::condition_variable m_jobs_cv;
-  std::atomic<size_t> m_active_jobs{0};
-
-  std::atomic<bool> m_started{false};
-  std::atomic<bool> m_restart_in_progress{false};
-  std::atomic<bool> m_stopped{false};
-
-  std::vector<std::thread> m_job_threads;
-  std::mutex m_job_threads_mutex;
-};
-
-// Plugin entry points
-inline void rapid_recovery_startup() { RecoveryFramework::instance().startup(); }
-inline void rapid_recovery_shutdown() { RecoveryFramework::instance().shutdown(); }
 }  // namespace Recovery
 }  // namespace ShannonBase
 #endif  // __SHANNONBASE_RECOVERY_H__

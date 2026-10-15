@@ -32,6 +32,7 @@
 #include <memory>
 #include <mutex>
 #include <shared_mutex>
+#include <type_traits>
 #include <unordered_map>
 #include <vector>
 
@@ -112,45 +113,34 @@ class Imcs : public MemoryObject {
 
   bool is_global_state_empty() const;
 
+ public:
   /**
-   * Return a raw pointer to the RpdTable.  The caller MUST ensure that
-   * the returned pointer is not used after the table has been unloaded
-   * (i.e. it is only valid for the duration of the current operation
-   * under the protection of the caller's own synchronization).
+   * Return a loaded RpdTable in the requested form.
+   *
+   * - Ret = RpdTable *: raw pointer; the caller must prevent concurrent unload (for
+   *   example, by holding the table metadata lock).
+   * - Ret = std::shared_ptr<ShannonBase::Imcs::RpdTable>: ownership-safe handle for background
+   *   tasks that outlive the current lock scope.
    */
-  inline RpdTable *get_rpd_table(const table_id_t &table_id) {
+  template <typename Ret = RpdTable *>
+  inline Ret get_rpd_table(const table_id_t &table_id) {
+    static_assert(std::is_same_v<Ret, RpdTable *> || std::is_same_v<Ret, std::shared_ptr<RpdTable>>,
+                  "get_rpd_table returns either RpdTable * or std::shared_ptr<RpdTable>");
     std::shared_lock lk(m_table_mutex);
-    if (m_rpd_tables.find(table_id) == m_rpd_tables.end())
-      return nullptr;
-    else
-      return m_rpd_tables[table_id].get();
-  }
-
-  /**
-   * Return a shared_ptr to the RpdTable (normal or partitioned).  The returned
-   * shared_ptr keeps the table alive after the shared lock is released, so
-   * background tasks can safely hold it while the table may be concurrently
-   * unloaded.
-   */
-  inline std::shared_ptr<RpdTable> get_rpd_table_shared(const table_id_t &table_id) {
-    std::shared_lock lk(m_table_mutex);
+    const std::shared_ptr<RpdTable> *table = nullptr;
     auto it = m_rpd_tables.find(table_id);
-    if (it != m_rpd_tables.end()) return it->second;
-    auto pit = m_rpd_parttables.find(table_id);
-    if (pit != m_rpd_parttables.end()) return pit->second;
-    return nullptr;
-  }
+    if (it != m_rpd_tables.end()) {
+      table = &it->second;
+    } else {
+      auto pit = m_rpd_parttables.find(table_id);
+      if (pit != m_rpd_parttables.end()) table = &pit->second;
+    }
 
-  /**
-   * Return a raw pointer to a partitioned RpdTable.  Same lifetime
-   * constraints as get_rpd_table().
-   */
-  inline RpdTable *get_rpd_parttable(const table_id_t &table_id) {
-    std::shared_lock lk(m_table_mutex);
-    if (m_rpd_parttables.find(table_id) == m_rpd_parttables.end())
-      return nullptr;
-    else
-      return m_rpd_parttables[table_id].get();
+    if constexpr (std::is_same_v<Ret, RpdTable *>) {
+      return table ? table->get() : nullptr;
+    } else {
+      return table ? *table : Ret{};
+    }
   }
 
   bool has_loaded_tables() {
@@ -167,7 +157,7 @@ class Imcs : public MemoryObject {
    */
   template <typename Func>
   void for_each_table(Func &&func) {
-    std::vector<std::shared_ptr<RpdTable>> snapshot;
+    std::vector<std::shared_ptr<ShannonBase::Imcs::RpdTable>> snapshot;
     {
       std::shared_lock<std::shared_mutex> lock(m_table_mutex);
       snapshot.reserve(m_rpd_tables.size() + m_rpd_parttables.size());
@@ -189,7 +179,7 @@ class Imcs : public MemoryObject {
    *         released, or nullptr if not found.
    */
   // Allocation-free lookup for notification exception recovery.
-  std::shared_ptr<RpdTable> get_rpd_table_by_name(const char *db, const char *tbl) {
+  std::shared_ptr<ShannonBase::Imcs::RpdTable> get_rpd_table_by_name(const char *db, const char *tbl) {
     std::shared_lock<std::shared_mutex> lk(m_table_mutex);
     for (const auto &[id, table] : m_rpd_tables)
       if (table && table->meta().db_name == db && table->meta().table_name == tbl) return table;
@@ -198,7 +188,7 @@ class Imcs : public MemoryObject {
     return nullptr;
   }
 
-  std::shared_ptr<RpdTable> get_rpd_table_by_name(const std::string &db, const std::string &tbl) {
+  std::shared_ptr<ShannonBase::Imcs::RpdTable> get_rpd_table_by_name(const std::string &db, const std::string &tbl) {
     std::shared_lock<std::shared_mutex> lk(m_table_mutex);
     for (const auto &[id, table] : m_rpd_tables) {
       if (table && table->meta().db_name == db && table->meta().table_name == tbl) return table;
@@ -274,10 +264,10 @@ class Imcs : public MemoryObject {
   // loaded tables. key format: schema_name + "." + table_name.
   // Use shared_ptr so that for_each_table snapshots keep tables alive
   // even if unload_table() removes them from the map concurrently.
-  std::unordered_map<table_id_t, std::shared_ptr<RpdTable>> m_rpd_tables;
+  std::unordered_map<table_id_t, std::shared_ptr<ShannonBase::Imcs::RpdTable>> m_rpd_tables;
 
   // loaded partitioned tables. key format: schema_name + "." + table_name.
-  std::unordered_map<table_id_t, std::shared_ptr<RpdTable>> m_rpd_parttables;
+  std::unordered_map<table_id_t, std::shared_ptr<ShannonBase::Imcs::RpdTable>> m_rpd_parttables;
 
   // the current version of imcs.
   uint m_version{SHANNON_RPD_VERSION};

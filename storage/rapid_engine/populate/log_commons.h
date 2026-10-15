@@ -121,9 +121,13 @@
 
 #include "my_inttypes.h"
 #include "storage/rapid_engine/include/rapid_arch_inf.h"
+#include "storage/rapid_engine/include/rapid_change_record.h"
 #include "storage/rapid_engine/include/rapid_const.h"       // SHANNON_ALIGNAS
 #include "storage/rapid_engine/include/rapid_table_info.h"  // stale_reason_t
 #include "storage/rapid_engine/populate/log_buffer.h"
+
+class THD;
+struct TABLE;
 
 namespace ShannonBase {
 namespace Populate {
@@ -131,100 +135,15 @@ namespace Populate {
 // running flag of pop thread.
 extern std::atomic<bool> shannon_propagation_thread_started;
 
-// Source selects the record format/parser; COPY_INFO has two producer modes.
-enum class Source : uint8 {
-  UN_KNOWN = 0,
-  REDO_LOG, /** serialized InnoDB redo/mtr records */
-  COPY_INFO /** detached MySQL row images from notification or committed binlog */
-};
-
-enum class CopyInfoMode : uint8 { NOTIFICATION = 0, COMMITTED_BINLOG };
-
-// Loads and unloads hold shared ownership through publication or worker shutdown.
-// A mode change takes exclusive ownership and requires no loaded tables or active
-// propagation. try_lock in the sysvar callbacks avoids waiting while holding
-// MySQL global system-variable locks.
-inline std::shared_mutex propagation_mode_mutex;
-
-// The configured backend is sampled at load admission and stays fixed until
-// all tables have been unloaded and propagation has stopped.
-inline std::atomic<CopyInfoMode> configured_change_propagation_mode{CopyInfoMode::NOTIFICATION};
-
-constexpr bool propagation_query_supported(CopyInfoMode mode, bool autocommit, bool explicit_transaction) {
-  return mode == CopyInfoMode::NOTIFICATION || (autocommit && !explicit_transaction);
-}
-constexpr bool propagation_backend_available(CopyInfoMode mode) {
-  return mode == CopyInfoMode::NOTIFICATION || mode == CopyInfoMode::COMMITTED_BINLOG;
-}
-
-// it's an iterterface struct to store all the info of changed data. such as where it comes from
-// data and its length, etc.
-typedef struct SHANNON_ALIGNAS change_record_buff_t {
-  using off_page_data_t =
-      std::map<size_t, std::pair<size_t, std::shared_ptr<uchar[]>>>;  //<field_id, <length, off_page_data>>
-  Source m_source;                                                    // data source
-  CopyInfoMode m_copy_info_mode{CopyInfoMode::NOTIFICATION};
-  size_t m_size;
-  enum class OperType : uint8 { UNSET = 0, INSERT, DELETE, UPDATE } m_oper{OperType::UNSET};  // oper type
-  table_id_t m_table_id{0};
-
-  // COPY_INFO transaction metadata. Row notifications are queued immediately
-  // with the real primary InnoDB creator id and commit_scn == 0, which means
-  // ACTIVE in Rapid MVCC. Primary COMMIT/ROLLBACK publishes only the outcome;
-  // TransactionManager later finalizes the version to a Rapid commit
-  // SCN or aborts it. SQL visibility always uses the primary InnoDB ReadView.
-  uint64_t m_source_trx_id{0};
-  uint64_t m_notification_sequence{0};  // volatile notification identity
-  uint64_t m_commit_scn{0};             // 0 => ACTIVE notification version
-
-  // Physical partition routing. A partitioned Rapid table stores its rows in
-  // one sub-table per partition (PartTable::build_partitions), so m_table_id
-  // alone only reaches the parent. The capture side owns the TABLE and its
-  // partition_info, so it resolves the partition there and carries the key
-  // ("<part_name>#<part_id>") in the record; the apply worker has no TABLE of
-  // its own and cannot recompute it. Both are empty for a non-partitioned
-  // table. m_old_part_key is the partition the pre-image lives in
-  // (DELETE/UPDATE), m_part_key the one the post-image belongs to
-  // (INSERT/UPDATE); they differ when an UPDATE moves a row across partitions.
-  std::string m_part_key;
-  std::string m_old_part_key;
-#ifndef NDEBUG
-  std::string m_schema_name, m_table_name;
-#endif
-  std::shared_ptr<uchar[]> m_buff0{nullptr};  // rep: record[0]
-  off_page_data_t m_offpage_data0;
-  std::shared_ptr<uchar[]> m_buff1{nullptr};  // rep: record[1]
-  off_page_data_t m_offpage_data1;            // using to store offpage data.
-
-  change_record_buff_t(Source sc, size_t s) : m_source(sc), m_size(s) {
-    if (!s) return;
-    if (s > std::numeric_limits<size_t>::max() / 2) throw std::length_error("row image size overflow");
-    m_buff0 = RowImageBufferPool::acquire(2 * s);
-    // Both images share one allocation and lifetime; copies remain detached
-    // from TABLE even when the producer thread has already exited.
-    m_buff1 = std::shared_ptr<uchar[]>(m_buff0, m_buff0.get() + s);
-  }
-
-  change_record_buff_t() : m_source(Source::UN_KNOWN), m_size(0), m_oper(OperType::UNSET) {}
-
-  change_record_buff_t(const change_record_buff_t &other) = default;
-  change_record_buff_t &operator=(const change_record_buff_t &other) = default;
-  change_record_buff_t(change_record_buff_t &&other) noexcept = default;
-  change_record_buff_t &operator=(change_record_buff_t &&other) noexcept = default;
-  ~change_record_buff_t() = default;
-
-  inline bool is_committed_binlog() const noexcept {
-    return m_source == Source::COPY_INFO && m_copy_info_mode == CopyInfoMode::COMMITTED_BINLOG;
-  }
-
-  inline uchar *get_buff0() const { return m_buff0.get(); }
-  inline uchar *get_buff1() const { return m_buff1.get(); }
-
-  inline bool has_buff0() const { return m_buff0 != nullptr; }
-  inline bool has_buff1() const { return m_buff1 != nullptr; }
-  inline long use_count_buff0() const { return m_buff0.use_count(); }
-  inline long use_count_buff1() const { return m_buff1.use_count(); }
-} change_record_buff;
+using ::ShannonBase::change_record_buff;
+using ::ShannonBase::change_record_buff_t;
+using ::ShannonBase::ChangeApplyResult;
+using ::ShannonBase::configured_change_propagation_mode;
+using ::ShannonBase::CopyInfoMode;
+using ::ShannonBase::propagation_backend_available;
+using ::ShannonBase::propagation_mode_mutex;
+using ::ShannonBase::propagation_query_supported;
+using ::ShannonBase::Source;
 
 struct SHANNON_ALIGNAS change_candidate_t {
   uint64_t change_id{0};  // process-local unique id; never overload LSN as identity
@@ -239,29 +158,6 @@ struct SHANNON_ALIGNAS change_candidate_t {
   change_candidate_t &operator=(const change_candidate_t &) = default;
   change_candidate_t(change_candidate_t &&) = default;
   change_candidate_t &operator=(change_candidate_t &&) = default;
-};
-
-/**
- * Result of offering one buffered change record to the module that owns its
- * record format (log_redolog.cc / log_dml_notification.cc).
- *
- * The propagation worker uses this to decide whether to advance the apply
- * watermark, retry the same record in place, or quarantine the table. Keeping
- * that classification here, rather than re-deriving it from Source inside the
- * worker, is what lets the worker stay free of per-source knowledge.
- */
-struct SHANNON_ALIGNAS ChangeApplyResult {
-  enum class Status : uint8_t {
-    APPLIED = 0, /** record fully consumed; the apply watermark may advance */
-    RETRYABLE,   /** transient failure; retry the same record in place */
-    PERMANENT    /** unrecoverable; the table must be quarantined */
-  };
-
-  Status status{Status::RETRYABLE};
-  size_t parsed_bytes{0};
-  // Why the table goes stale if this result ends in quarantine. A retryable
-  // failure that exhausts the retry budget also reuses this reason.
-  stale_reason_t stale_reason{stale_reason_t::UNIDENTIFIED_ERROR};
 };
 
 enum class TablePropagationState : uint8_t { READY = 0, PENDING, BROKEN, GONE };
@@ -334,6 +230,14 @@ class Populator {
    * To launch log pop main thread.
    */
   static void start();
+
+  struct LoadState;
+
+  // Call before copying rows, then start(state) after publishing the loaded table.
+  // Keep propagation_mode_mutex shared and the source MDL until start returns;
+  // the state borrows THD/TABLE and must not outlive the load operation.
+  static const char *prepare_load(THD *thd, TABLE *table, LoadState &state, bool partial_load = false);
+  static const char *start(const LoadState &state);
 
   /**
    * To stop log pop main thread.

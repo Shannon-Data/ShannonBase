@@ -649,8 +649,7 @@ bool Query_arbitrator::check_dict_encoding_projection(THD *thd) {
     if (!share) return true;
 
     auto table_id = share->m_tableid;
-    bool is_part = (table_ref->partition_names != nullptr);
-    auto rpd_table = is_part ? imcs_instance->get_rpd_parttable(table_id) : imcs_instance->get_rpd_table(table_id);
+    auto rpd_table = imcs_instance->get_rpd_table(table_id);
     if (!rpd_table) return true;
 
     const auto &rapid_fields = rpd_table->meta().fields;

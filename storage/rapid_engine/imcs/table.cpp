@@ -51,11 +51,11 @@
 #include "storage/rapid_engine/imcs/index/encoder.h"
 #include "storage/rapid_engine/imcs/index/iterator.h"
 #include "storage/rapid_engine/imcs/index/key_codec.h"
+#include "storage/rapid_engine/imcs/table0persistence.h"
 #include "storage/rapid_engine/include/rapid_const.h"  // INVALID_ROW_ID
 #include "storage/rapid_engine/include/rapid_context.h"
 #include "storage/rapid_engine/populate/log_dml_notification.h"
 #include "storage/rapid_engine/recovery/recovery.h"
-#include "storage/rapid_engine/recovery/table_persistence.h"
 #include "storage/rapid_engine/utils/memory_pool.h"  //Blob
 #include "storage/rapid_engine/utils/utils.h"        //Blob
 namespace ShannonBase {
@@ -73,8 +73,8 @@ namespace {
 
 bool record_applied_imcu(const Rapid_load_context *context, const std::shared_ptr<Imcu> &imcu) {
   if (!context->m_detached_row_image) return true;
-  return Populate::TransactionManager::instance().on_imcu_applied(context->m_extra_info.m_trxid, context->m_table_id,
-                                                                  imcu);
+  return Populate::SourceTxnTracker::instance().on_imcu_applied(context->m_extra_info.m_trxid, context->m_table_id,
+                                                                imcu);
 }
 
 // Last-resort guard for the shared Field clones, used only when a thread
@@ -1552,7 +1552,7 @@ int PartTable::build_partitions(const Rapid_load_context *context, uint64_t load
     sub_part_table.get()->set_load_watermark(load_watermark);
 
     std::unique_lock lock(m_partitions_mutex);
-    m_partitions.insert_or_assign(part_key, std::shared_ptr<RpdTable>(std::move(sub_part_table)));
+    m_partitions.insert_or_assign(part_key, std::shared_ptr<ShannonBase::Imcs::RpdTable>(std::move(sub_part_table)));
     published_keys.push_back(part_key);
   }
 

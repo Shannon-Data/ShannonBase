@@ -4,3 +4,5 @@
 --sync-binlog=1
 --innodb-flush-log-at-trx-commit=1
 --rapid-reload-on-restart=ON
+# Persistence/restart coverage does not require optional model inference.
+--loose-rapid_schema_embedding=OFF

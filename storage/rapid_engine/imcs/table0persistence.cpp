@@ -21,7 +21,7 @@
 
    Copyright (c) 2023, 2024, Shannon Data AI and/or its affiliates.
 */
-#include "storage/rapid_engine/recovery/table_persistence.h"
+#include "storage/rapid_engine/imcs/table0persistence.h"
 #include "storage/rapid_engine/utils/try_operation.h"
 
 #include <algorithm>
@@ -55,8 +55,8 @@
 #include "storage/rapid_engine/imcs/cu.h"
 #include "storage/rapid_engine/imcs/imcu.h"
 #include "storage/rapid_engine/imcs/table.h"
-#include "storage/rapid_engine/recovery/binlog_recovery.h"
 #include "storage/rapid_engine/recovery/native_stream.h"
+#include "storage/rapid_engine/utils/binlog_position.h"
 #include "storage/rapid_engine/utils/crc.h"
 
 namespace ShannonBase {
@@ -830,7 +830,7 @@ bool TablePersistenceManager::checkpoint(Imcu *trigger, uint64_t snapshot_sequen
   freeze_locks.clear();
   notification_guard.unlock();
   table_list_lock.unlock();
-  if (!Recovery::BinlogRecovery::certify(position)) return false;
+  if (!Utils::BinlogPositionReader::certify(position)) return false;
   manifest.binlog = position;
 
   for (const auto &snap_file : snap_files) {

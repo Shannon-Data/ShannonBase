@@ -1,0 +1,3 @@
+# Start without embedding work inherited from unrelated DDL tests.
+# The test explicitly enables embedding before creating its own schema.
+--loose-rapid_schema_embedding=OFF

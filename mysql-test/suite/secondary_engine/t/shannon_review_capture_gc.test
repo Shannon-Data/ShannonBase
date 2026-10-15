@@ -16,7 +16,6 @@ SET use_secondary_engine=OFF;
 START TRANSACTION;
 SELECT v INTO @old_value FROM review_gc;
 --connection default
---let $runs_before= query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_gc_total_runs', Value, 1)
 --let $purged_before= query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_gc_total_purged_versions', Value, 1)
 --let $i= 40
 while ($i) {
@@ -30,12 +29,14 @@ while ($i) {
 SET use_secondary_engine=FORCED;
 SELECT v INTO @new_value FROM review_gc;
 SET use_secondary_engine=OFF;
---let $wait_condition= SELECT VARIABLE_VALUE > $runs_before FROM performance_schema.global_status WHERE VARIABLE_NAME='rapid_gc_total_runs'
---source include/wait_condition.inc
+# A zero safe horizon no longer schedules no-op GC tasks.
 --let $purged_now= query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_gc_total_purged_versions', Value, 1)
 --let $assert_text= Primary-only old ReadView must protect Rapid versions
 --let $assert_cond= $purged_now = $purged_before
 --source include/assert.inc
+# Require several bounded passes after the old reader releases its view.
+# No subsequent DML advances the safe SCN.
+SET GLOBAL rapid_purge_batch_size=2;
 --connection old
 SET use_secondary_engine=FORCED;
 --enable_query_log
@@ -46,7 +47,7 @@ SELECT v FROM review_gc;
 COMMIT;
 SET use_secondary_engine=OFF;
 --connection default
---let $wait_condition= SELECT VARIABLE_VALUE > $purged_before FROM performance_schema.global_status WHERE VARIABLE_NAME='rapid_gc_total_purged_versions'
+--let $wait_condition= SELECT VARIABLE_VALUE >= $purged_before + 10 FROM performance_schema.global_status WHERE VARIABLE_NAME='rapid_gc_total_purged_versions'
 --source include/wait_condition.inc
 SET use_secondary_engine=FORCED;
 --enable_query_log

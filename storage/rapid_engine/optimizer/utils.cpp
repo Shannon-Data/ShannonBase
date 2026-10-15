@@ -49,8 +49,7 @@ RpdTableLookup rpd_lookup_func() {
     auto share = ShannonBase::shannon_loaded_tables->get(table->s->db.str, table->s->table_name.str);
     if (!share) return nullptr;
 
-    return share->is_partitioned ? Imcs::Imcs::instance()->get_rpd_parttable(share->m_tableid)
-                                 : Imcs::Imcs::instance()->get_rpd_table(share->m_tableid);
+    return Imcs::Imcs::instance()->get_rpd_table(share->m_tableid);
   };
 }
 

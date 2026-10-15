@@ -84,13 +84,17 @@ SET(SHANNON_IMCS_SOURCES
    utils/memory_pool.cpp
    autopilot/loader.cpp
    recovery/recovery.cpp
-   recovery/table_persistence.cpp
-   recovery/binlog_recovery.cpp
+   imcs/table0persistence.cpp
+   utils/binlog_position.cpp
+   utils/background_session.cpp
+   service/recovery_service.cpp
+   service/change_notification.cpp
    recovery/recovery_load.cpp
 )
 
 SET(SHANNON_POPULATE_SOURCES
     populate/log_binlog_parser.cpp
+    populate/log_binlog_replay.cpp
     populate/log_populate.cpp
     populate/log_redolog.cpp
     populate/log_dml_notification.cpp

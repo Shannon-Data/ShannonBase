@@ -27,9 +27,9 @@
    The fundmental code for imcs.
 */
 #include "storage/rapid_engine/imcs/imcs.h"
+#include "storage/rapid_engine/imcs/table0persistence.h"
 #include "storage/rapid_engine/populate/log_commons.h"
 #include "storage/rapid_engine/recovery/recovery.h"
-#include "storage/rapid_engine/recovery/table_persistence.h"
 
 #include <threads.h>
 #if defined(__GLIBC__)
@@ -67,8 +67,8 @@
 #include "storage/rapid_engine/include/rapid_column_info.h"
 #include "storage/rapid_engine/include/rapid_config.h"
 #include "storage/rapid_engine/include/rapid_context.h"
-#include "storage/rapid_engine/recovery/binlog_recovery.h"
 #include "storage/rapid_engine/recovery/recovery_load.h"
+#include "storage/rapid_engine/utils/binlog_position.h"
 #include "storage/rapid_engine/utils/utils.h"  //Utils
 
 namespace ShannonBase {
@@ -372,7 +372,7 @@ int Imcs::create_parttable_memo(const Rapid_load_context *context, const TABLE *
     if (it != m_rpd_parttables.end()) {
       // Pin the table before dropping the lock: a concurrent unload erases the map
       // entry, and the raw pointer used to dangle across build_partitions().
-      std::shared_ptr<RpdTable> pinned = it->second;
+      std::shared_ptr<ShannonBase::Imcs::RpdTable> pinned = it->second;
       lock.unlock();
       auto *part_table = down_cast<PartTable *>(pinned.get());
       if (part_table != nullptr) return part_table->build_partitions(context, load_watermark);
@@ -421,7 +421,7 @@ int Imcs::create_parttable_memo(const Rapid_load_context *context, const TABLE *
  * The periodic refresh still runs; this only removes the cold window.
  */
 void Imcs::finalize_load_statistics(const table_id_t &table_id) {
-  std::shared_ptr<RpdTable> table;
+  std::shared_ptr<ShannonBase::Imcs::RpdTable> table;
   {
     std::shared_lock lock(m_table_mutex);
     if (auto it = m_rpd_tables.find(table_id); it != m_rpd_tables.end()) {
@@ -468,7 +468,7 @@ int Imcs::guard_load(const table_id_t &table_id, const char *schema_name, const 
     const int rc = loader();
     if (rc == ShannonBase::SHANNON_SUCCESS) {
       finalize_load_statistics(table_id);
-      if (auto table = get_rpd_table_shared(table_id);
+      if (auto table = get_rpd_table<std::shared_ptr<ShannonBase::Imcs::RpdTable>>(table_id);
           table && table->recovery_supported()) {  // do checkpoint if recovery is supported.
         if (auto *scheduler = Recovery::CheckpointScheduler::global()) scheduler->enqueue(schema_name, table_name);
       }
@@ -505,7 +505,7 @@ int Imcs::load_table_impl(const Rapid_load_context *context, const TABLE *source
     return HA_ERR_GENERIC;
   }
 
-  auto loaded = get_rpd_table_shared(context->m_table_id);
+  auto loaded = get_rpd_table<std::shared_ptr<ShannonBase::Imcs::RpdTable>>(context->m_table_id);
   if (loaded && loaded->recovery_manager() && !loaded->recovery_manager()->enable_notifications()) {
     my_error(ER_SECONDARY_ENGINE, MYF(0), "Cannot initialize Rapid notification recovery epoch");
     return HA_ERR_GENERIC;
@@ -523,7 +523,7 @@ int Imcs::load_table_impl(const Rapid_load_context *context, const TABLE *source
   if (load_ret == SHANNON_SUCCESS && loaded && loaded->recovery_manager() &&
       context->m_thd->mdl_context.owns_equal_or_stronger_lock(MDL_key::TABLE, source->s->db.str,
                                                               source->s->table_name.str, MDL_SHARED_NO_WRITE)) {
-    loaded->recovery_manager()->notifications()->initialize(Recovery::BinlogRecovery::current_position());
+    loaded->recovery_manager()->notifications()->initialize(Utils::BinlogPositionReader::current_position());
   }
   return load_ret;
 }
@@ -1234,7 +1234,7 @@ void Imcs::release_freed_heap() {
 int Imcs::unload_innodb(const Rapid_load_context *context, const table_id_t &table_id, bool error_if_not_loaded) {
   // Move the table out of the map under lock, then destroy it outside the lock to avoid blocking concurrent load
   // lookup operations while large column-store memory is freed.
-  std::shared_ptr<RpdTable> victim;
+  std::shared_ptr<ShannonBase::Imcs::RpdTable> victim;
   {
     std::unique_lock lock(m_table_mutex);
     auto it = m_rpd_tables.find(table_id);
@@ -1255,7 +1255,7 @@ int Imcs::unload_innodb(const Rapid_load_context *context, const table_id_t &tab
 int Imcs::unload_innodbpart(const Rapid_load_context *context, const table_id_t &table_id, bool error_if_not_loaded) {
   // Move the partition table out of the map under lock, then destroy it outside the lock (same pattern as
   // unload_innodb). m_rpd_parttables stores RpdTable* (the base), not a separate PartTable map.
-  std::shared_ptr<RpdTable> victim;
+  std::shared_ptr<ShannonBase::Imcs::RpdTable> victim;
   {
     std::unique_lock lock(m_table_mutex);
     auto it = m_rpd_parttables.find(table_id);

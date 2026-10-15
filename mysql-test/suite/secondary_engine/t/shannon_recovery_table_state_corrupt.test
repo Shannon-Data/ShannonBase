@@ -9,6 +9,8 @@ if ($state_available != 1) {
 }
 --disable_query_log
 CALL mtr.add_suppression("recovery eligibility is revoked or cannot be verified; automatic recovery stopped");
+# The deliberate primary UPDATE below must revoke the pending corrupt image.
+CALL mtr.add_suppression("RecoveryManager: a source change reached sh_storage_recovery.t before its restart recovery finished; its on-disk image is revoked");
 --enable_query_log
 --source include/kill_mysqld.inc
 --remove_file $state_file

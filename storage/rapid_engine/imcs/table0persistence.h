@@ -36,9 +36,9 @@
 #include <vector>
 #include "storage/rapid_engine/imcs/cu.h"
 #include "storage/rapid_engine/include/rapid_const.h"
+#include "storage/rapid_engine/include/rapid_notification_tracker.h"
 #include "storage/rapid_engine/recovery/checkpoint_store.h"
 #include "storage/rapid_engine/recovery/durable_fs.h"
-#include "storage/rapid_engine/recovery/notification_tracker.h"
 namespace ShannonBase {
 namespace Imcs {
 class Imcu;
@@ -74,7 +74,7 @@ struct RecoveryManifest {
   uint64_t schema_fingerprint{0};
   uint64_t snapshot_scn{0};
   uint64_t persisted_scn{0};
-  Recovery::BinlogPosition binlog;
+  BinlogPosition binlog;
   std::vector<ManifestImcuEntry> imcus;
 };
 
@@ -101,7 +101,7 @@ class TablePersistenceManager {
   std::filesystem::path table_state_path() const { return m_partition_dir / "table_state.checkpoint"; }
   bool erase_store() { return m_store->erase(m_db_name, m_tbl_name); }
   bool enable_notifications() { return reset_epoch(); }
-  Recovery::NotificationTracker *notifications() { return &m_notifications; }
+  NotificationTracker *notifications() { return &m_notifications; }
   // Serialize recovery jobs for this table; source callbacks do not take it.
   std::mutex &recovery_mutex() { return m_recovery_mutex; }
   bool checkpoint(Imcu *trigger, uint64_t sequence = 0);
@@ -142,7 +142,7 @@ class TablePersistenceManager {
   std::filesystem::path m_partition_dir, m_recovery_taint_root;
   mutable std::mutex m_checkpoint_mutex;
   std::shared_ptr<Recovery::CheckpointStore> m_store;
-  Recovery::NotificationTracker m_notifications;
+  NotificationTracker m_notifications;
   std::atomic<bool> m_recovery_required{false};
 };
 }  // namespace Imcs

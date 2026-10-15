@@ -147,11 +147,15 @@ full source-state verification is required to close that separate window.
 ## Recovery lifecycle and failure decisions
 
 The DD `secondary_load` flag records intent to recover a loaded table; it is not
-proof that an AP generation covers every TP commit. `DDWorker` discovers that
-intent and `RecoveryFramework` dispatches bounded background `RecoveryJob`s.
+proof that an AP generation covers every TP commit. The `service/` layer owns
+`DDWorker`, which discovers that intent, and `RecoveryFramework`, which dispatches
+bounded background `RecoveryJob`s.
 `CheckpointScheduler` and `TablePersistenceManager` own native generations;
 `NotificationTracker` supplies the volatile commit/apply boundary;
-`BinlogRecovery` certifies source-log identity and replays committed row images.
+`Utils::BinlogPositionReader` certifies source-log identity and
+`Populate::BinlogReplay` replays committed row images under service orchestration.
+DML hooks report source changes through `Service::notify_*`; the service retains
+synchronous pending-image invalidation. See [the boundary description](../PROPAGATION_BOUNDARY_IMPLEMENTATION.md).
 
 For each table, the job first checks revocation/inspection failures, then takes
 `MDL_SHARED_NO_WRITE` to hold the source cut through restore or reload, index
@@ -163,7 +167,7 @@ of partial old AP data and fresh TP rows inside one table.
 
 | Condition | Current action |
 | --- | --- |
-| Compatible native generation and supported committed-binlog replay succeed | Publish restored AP; attach propagation; schedule a new checkpoint |
+| Compatible native generation and supported committed-binlog replay succeed | Attach propagation; publish restored AP; schedule a new checkpoint |
 | Missing/corrupt/incompatible image, unsupported replay or required log purged | Discard the partial table and old recovery epoch; reload from TP |
 | Revoked eligibility or error inspecting it | Warning; leave AP unloaded; explicit user SECONDARY_LOAD |
 | Requested FULL validation fails or no implementation is installed | Warning; leave AP unloaded; explicit user SECONDARY_LOAD |

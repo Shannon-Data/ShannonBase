@@ -47,18 +47,7 @@ ROLLBACK;
 SELECT id,v FROM rpl_rapid ORDER BY id;
 if ($replica_enabled)
 {
-  --echo # Replica Rapid result
-  SET use_secondary_engine=FORCED;
-  SELECT id,v FROM rpl_rapid ORDER BY id;
-  --let $assert_query = SELECT id,v FROM rpl_rapid ORDER BY id
-  --let $assert_ordered = 1
-  --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
-  --let $actual= `SELECT COUNT(*)=3 AND SUM(v)=98 AND SUM(id)=9 FROM rpl_rapid`
-  if (!$actual)
-  {
-    --die Rapid result does not match committed replicated data
-  }
-  SET use_secondary_engine=OFF;
+  --source suite/secondary_engine/include/shannon_rpl_query_matrix.inc
 }
 --connection master
 --echo # Source primary result

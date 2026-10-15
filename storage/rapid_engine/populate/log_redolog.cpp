@@ -822,8 +822,7 @@ int LogParser::parse_rec_fields(Rapid_load_context *context, const rec_t *rec, c
 
   auto imcs_instance = ShannonBase::Imcs::Imcs::instance();
   ut_a(imcs_instance);
-  auto rpd_table = dict_table_is_partition(real_index->table) ? imcs_instance->get_rpd_parttable(real_index->table->id)
-                                                              : imcs_instance->get_rpd_table(real_index->table->id);
+  auto rpd_table = imcs_instance->get_rpd_table(real_index->table->id);
   auto field_mutex = std::make_shared<std::mutex>();
   std::unique_ptr<mem_heap_t, decltype(&mem_heap_free)> heap(mem_heap_create(UNIV_PAGE_SIZE, UT_LOCATION_HERE),
                                                              mem_heap_free);
@@ -879,8 +878,7 @@ int LogParser::parse_cur_rec_change_apply_low(Rapid_load_context *context, const
 #endif /* UNIV_DEBUG_VALGRIND */
   auto imcs_instance = ShannonBase::Imcs::Imcs::instance();
   ut_a(imcs_instance);
-  auto rpd_tb = dict_table_is_partition(real_index->table) ? imcs_instance->get_rpd_parttable(real_index->table->id)
-                                                           : imcs_instance->get_rpd_table(real_index->table->id);
+  auto rpd_tb = imcs_instance->get_rpd_table(real_index->table->id);
   // no user defined index.
   if (!strncmp(real_index->name(), innobase_index_reserve_name, strlen(innobase_index_reserve_name))) {
     context->m_extra_info.m_key_buff = std::make_unique<uchar[]>(SHANNON_DATA_DB_ROW_ID_LEN);

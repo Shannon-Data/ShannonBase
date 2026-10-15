@@ -24,6 +24,8 @@
    Copyright (c) 2023, Shannon Data AI and/or its affiliates. */
 
 #include <optional>
+#include "storage/rapid_engine/service/change_notification.h"
+#include "storage/rapid_engine/service/recovery_service.h"
 
 #include "storage/rapid_engine/handler/ha_shannon_rapid.h"
 
@@ -98,9 +100,9 @@
 #include "storage/rapid_engine/populate/log_commons.h"
 #include "storage/rapid_engine/populate/log_dml_notification.h"  // DML notification capture side
 #include "storage/rapid_engine/populate/log_populate.h"
-#include "storage/rapid_engine/recovery/binlog_recovery.h"
 #include "storage/rapid_engine/recovery/recovery.h"  // rapid_recovery_startup, rapid_recovery_shutdown
 #include "storage/rapid_engine/trx/transaction.h"    //transaction
+#include "storage/rapid_engine/utils/binlog_position.h"
 #include "storage/rapid_engine/utils/concurrent.h"
 #include "storage/rapid_engine/utils/memory_pool.h"
 #include "storage/rapid_engine/utils/utils.h"
@@ -203,8 +205,7 @@ int ha_rapid::open(const char *name, int, uint open_flags, const dd::Table *tabl
   m_share = share;
   thr_lock_data_init(&share->lock, &m_lock, nullptr);
 
-  m_rpd_table = dd_table_is_partitioned(*table_def) ? Imcs::Imcs::instance()->get_rpd_parttable(share->m_tableid)
-                                                    : Imcs::Imcs::instance()->get_rpd_table(share->m_tableid);
+  m_rpd_table = Imcs::Imcs::instance()->get_rpd_table(share->m_tableid);
   m_cursor.reset(new Imcs::RapidCursor(table, m_rpd_table));
 
   if (auto ret = m_cursor->open(); ret) return ret;  // open failed.
@@ -228,7 +229,7 @@ int ha_rapid::info(unsigned int flags) {
   auto share = shannon_loaded_tables->get(table_share->db.str, table_share->table_name.str);
   if (share == nullptr) return secondary_error("Table has not been loaded", HA_ERR_GENERIC);
 
-  auto rpd_tb = Imcs::Imcs::instance()->get_rpd_table_shared(share->m_tableid);
+  auto rpd_tb = Imcs::Imcs::instance()->get_rpd_table<std::shared_ptr<ShannonBase::Imcs::RpdTable>>(share->m_tableid);
   stats.records = rpd_tb ? rpd_tb->count_total_rows() : 0;
   return ShannonBase::SHANNON_SUCCESS;
 }
@@ -338,7 +339,7 @@ int ha_rapid::records(ha_rows *num_rows) {
   auto share = shannon_loaded_tables->get(table_share->db.str, table_share->table_name.str);
   if (share == nullptr) return secondary_error("Table has not been loaded", HA_ERR_GENERIC);
 
-  auto rpd_tb = Imcs::Imcs::instance()->get_rpd_table_shared(share->m_tableid);
+  auto rpd_tb = Imcs::Imcs::instance()->get_rpd_table<std::shared_ptr<ShannonBase::Imcs::RpdTable>>(share->m_tableid);
   ShannonBase::Rapid_scan_context scan_context;
   // Bind this statement's transaction and snapshot before capturing its watermark.
   const auto prepare_count_scan = [&scan_context]() {
@@ -353,12 +354,20 @@ int ha_rapid::records(ha_rows *num_rows) {
     scan_context.m_trx = trx;
     scan_context.m_extra_info.m_trxid = trx->get_id();
     scan_context.m_extra_info.m_scn = ShannonBase::Populate::CommittedBinlog::query_scn(thd);
+    if (thd->is_error()) return false;
 
     ::ReadView *read_view = trx->acquire_snapshot();
     return !(trx->isolation_level() > ShannonBase::Transaction::ISOLATION_LEVEL::READ_UNCOMMITTED &&
              read_view == nullptr);
   };
   if (rpd_tb == nullptr || !prepare_count_scan()) return HA_ERR_GENERIC;
+  auto *execution = dynamic_cast<Rapid_execution_context *>(current_thd->lex->secondary_engine_execution_context());
+  if (execution && execution->m_committed_binlog_view) {
+    if (Populate::IsPropagationBroken(share->m_tableid))
+      return secondary_error(RapidErrMsg[BROKEN_INITIAL], HA_ERR_GENERIC);
+    *num_rows = static_cast<ha_rows>(rpd_tb->count_visible_rows(&scan_context));
+    return ShannonBase::SHANNON_SUCCESS;
+  }
 
   // nullptr when the barrier state permits proceeding. GONE means the buffer owning this
   // table's changes was detached, so there is no live watermark a read could wait for.
@@ -404,7 +413,8 @@ int ha_rapid::records(ha_rows *num_rows) {
         case TablePropagationWaitResult::GONE: {
           auto share = shannon_loaded_tables->get(table_share->db.str, table_share->table_name.str);
           if (share == nullptr) return {false, RapidErrMsg[UNLOADED_WAITING]};
-          rpd_tb = Imcs::Imcs::instance()->get_rpd_table_shared(share->m_tableid);
+          rpd_tb =
+              Imcs::Imcs::instance()->get_rpd_table<std::shared_ptr<ShannonBase::Imcs::RpdTable>>(share->m_tableid);
           if (rpd_tb == nullptr) return {false, RapidErrMsg[UNLOADED_WAITING]};
 
           barrier = Populator::request_table_barrier(rpd_tb->meta().table_id);
@@ -447,6 +457,7 @@ THR_LOCK_DATA **ha_rapid::store_lock(THD *, THR_LOCK_DATA **to, thr_lock_type lo
 }
 
 int ha_rapid::load_table(const TABLE &table_arg, bool *skip_metadata_update [[maybe_unused]]) {
+  DBUG_TRACE;
   ut_ad(table_arg.file != nullptr && table_arg.s != nullptr);
 
 #ifndef NDEBUG
@@ -461,20 +472,10 @@ int ha_rapid::load_table(const TABLE &table_arg, bool *skip_metadata_update [[ma
   std::shared_lock mode_lock(ShannonBase::Populate::propagation_mode_mutex);
   DEBUG_SYNC(m_thd, "rapid_change_propagation_load_admitted");
 
-  const auto propagation_mode = ShannonBase::Populate::configured_change_propagation_mode.load();
-  if (!ShannonBase::Populate::propagation_backend_available(propagation_mode))
-    return secondary_error("COMMITTED_BINLOG change propagation backend is not implemented", HA_ERR_GENERIC);
   if (auto err = check_loadable(table_arg)) return secondary_error(*err, HA_ERR_KEY_NOT_FOUND);
-
-  ShannonBase::Recovery::BinlogPosition binlog_baseline;
-  if (propagation_mode == Populate::CopyInfoMode::COMMITTED_BINLOG) {
-    if (const char *error = Populate::CommittedBinlog::check_configuration(m_thd))
-      return secondary_error(error, HA_ERR_GENERIC);
-    if (!Populate::BinlogParser::supports(table))
-      return secondary_error("COMMITTED_BINLOG requires a primary key and no foreign keys or generated columns",
-                             HA_ERR_GENERIC);
-    binlog_baseline = Recovery::BinlogRecovery::current_position();
-  }
+  Populate::Populator::LoadState propagation;
+  if (const char *error = Populate::Populator::prepare_load(m_thd, table, propagation))
+    return secondary_error(error, HA_ERR_GENERIC);
 
   m_thd->set_sent_row_count(0);
 
@@ -515,16 +516,12 @@ int ha_rapid::load_table(const TABLE &table_arg, bool *skip_metadata_update [[ma
     return secondary_error("Failed to load table", HA_ERR_KEY_NOT_FOUND);
 
   // Start the population thread now that a table is loaded.
-  ShannonBase::Populate::Populator::start();
-  if (propagation_mode == Populate::CopyInfoMode::COMMITTED_BINLOG &&
-      !Populate::CommittedBinlog::attach(m_thd, table, binlog_baseline)) {
-    Populate::QuarantinePropagationTable(context.m_table_id);
-    return secondary_error("cannot start COMMITTED_BINLOG propagation; unload and retry", HA_ERR_GENERIC);
-  }
+  if (const char *error = Populate::Populator::start(propagation)) return secondary_error(error, HA_ERR_GENERIC);
   return ShannonBase::SHANNON_SUCCESS;
 }
 
 int ha_rapid::unload_table(const char *db_name, const char *table_name, bool error_if_not_loaded) {
+  DBUG_TRACE;
   std::shared_lock mode_lock(ShannonBase::Populate::propagation_mode_mutex);
   // stop the table worker thread.
   const auto share = shannon_loaded_tables->get(db_name, table_name);
@@ -535,7 +532,6 @@ int ha_rapid::unload_table(const char *db_name, const char *table_name, bool err
   const auto table_id = share ? share->m_tableid : 0;
 
   // Stop change propagation for this table before tearing down its data.
-  ShannonBase::Populate::CommittedBinlog::detach(table_id);
   ShannonBase::Populate::Populator::unload(table_id);
 
   // The unload path works from the table id and names only and never reads context.m_table,
@@ -592,6 +588,7 @@ int ha_rapid::start_stmt(THD *const thd, thr_lock_type lock_type) {
                         without rnd_end() in between
 @return 0 or error number */
 int ha_rapid::rnd_init(bool scan) {
+  DBUG_TRACE;
   // For LATERAL / correlated re-scans, MySQL calls rnd_init(scan=true)
   // without an intervening rnd_end().  Rewind the scan position so each
   // outer row sees a fresh inner scan, but keep the transaction and
@@ -605,6 +602,7 @@ int ha_rapid::rnd_init(bool scan) {
 }
 
 int ha_rapid::rnd_end(void) {
+  DBUG_TRACE;
   if (auto ret = m_cursor->end(); ret) return ret;
 
   inited = handler::NONE;
@@ -629,6 +627,7 @@ int ha_rapid::rnd_pos(unsigned char *buff, unsigned char *pos) {
  in a table scan).
  @return 0, HA_ERR_END_OF_FILE, or error number */
 int ha_rapid::rnd_next(uchar *buf) {
+  DBUG_TRACE;
   if (inited != handler::RND) return HA_ERR_END_OF_FILE;
 
   auto *reader_pool = ShannonBase::Imcs::Imcs::pool();
@@ -719,6 +718,7 @@ int ha_rapid::index_read_last(uchar *buf, const uchar *key, uint key_len) {
 }
 
 int ha_rapid::index_next(uchar *buf) {
+  DBUG_TRACE;
   ut_ad(inited == handler::INDEX);
   assert_index_capability(HA_READ_NEXT);
 
@@ -728,6 +728,7 @@ int ha_rapid::index_next(uchar *buf) {
 }
 
 int ha_rapid::index_next_same(uchar *buf, const uchar *, uint) {
+  DBUG_TRACE;
   ut_ad(inited == handler::INDEX);
 
   auto error = m_cursor->index_next(buf);
@@ -749,6 +750,7 @@ int ha_rapid::index_first(uchar *buf) {
 }
 
 int ha_rapid::index_prev(uchar *buf) {
+  DBUG_TRACE;
   ut_ad(inited == handler::INDEX);
   assert_index_capability(HA_READ_PREV);
 
@@ -858,12 +860,8 @@ static int rapid_rollback(handlerton *hton,    /*!< in: handlerton */
                                               transaction false - rollback the
                                               current statement only */
   if (thd->lex->sql_command == SQLCOM_ROLLBACK_TO_SAVEPOINT) {
-    // MySQL also invokes full rollback for engines first registered AFTER the
-    // savepoint. The source transaction is still alive: do not publish ABORTED
-    // for its writer id, which would discard subsequent valid notifications.
-    ShannonBase::Populate::TransactionManager::instance().quarantine_partial_rollback(
-        thd, "ROLLBACK TO SAVEPOINT for a newly registered Rapid participant");
-    return ShannonBase::SHANNON_SUCCESS;
+    auto *trx = ShannonBase::Transaction::find_trx(thd);
+    return trx ? trx->rollback_to_savepoint(nullptr) : ShannonBase::SHANNON_SUCCESS;
   }
   const bool final_rollback = rollback_trx || rpd_thd_trx_is_auto_commit(thd);
 
@@ -927,8 +925,6 @@ static int rapid_start_trx_and_assign_read_view(handlerton *hton, /* in: Rapid h
 static int rapid_savepoint(handlerton *const, THD *const, void *const) { return 0; }
 
 static int rapid_rollback_to_savepoint(handlerton *const hton, THD *const thd, void *const savepoint) {
-  ShannonBase::Populate::TransactionManager::instance().quarantine_partial_rollback(
-      thd, "ROLLBACK TO SAVEPOINT after DML was already propagated");
   auto *trx = ShannonBase::Transaction::find_trx(thd);
   return trx ? trx->rollback_to_savepoint(savepoint) : ShannonBase::SHANNON_SUCCESS;
 }
@@ -1147,448 +1143,39 @@ bool NotifyAlterTable(THD *thd, const MDL_key *mdl_key, ha_notification_type not
   return false;
 }
 
-/**
- * @brief Read and copy BLOB-type off-page data from table
- *
- * The main purpose of this function is to address the storage characteristics of BLOB data types in MySQL:
- * - BLOB fields only store pointers and length information in the row record, actual data is stored in off-page areas
- * - When inserting multiple records consecutively, MySQL may reuse the same memory area for BLOB data
- * - If we only copy pointers from record[0], subsequent operations will overwrite the actual data pointed to
- *
- * The function ensures data integrity through the following steps:
- * 1. Use pre-cached BLOB field indices to avoid traversing all fields
- * 2. Parse BLOB field length prefixes and pointer information
- * 3. Create independent memory copies for each BLOB data
- * 4. Store copied data in off_page_data structure for later use
- *
- * @param table MySQL table structure pointer
- * @param off_page_data Output parameter, stores field indices and corresponding BLOB data copies
- */
-static inline bool table_has_off_page_blob_data(const TABLE *table) {
-  return table != nullptr && table->s != nullptr && table->s->blob_fields > 0;
-}
-
-/**
- * Point every Field of @a table at @a record for the lifetime of the guard.
- *
- * Field accessors read through Field::ptr, which is bound to record[0]. A
- * COPY_INFO UPDATE has to capture the *pre*-image too, and that lives in
- * record[1], so the fields have to be walked over there and back. This is the
- * same move_field_offset() idiom the partitioning and trigger code uses.
- */
-namespace {
-class RecordImageGuard {
- public:
-  RecordImageGuard(TABLE *table, const uchar *record) : m_table(table), m_diff(record - table->record[0]) {
-    move(m_diff);
-  }
-
-  ~RecordImageGuard() { move(-m_diff); }
-
-  RecordImageGuard(const RecordImageGuard &) = delete;
-  RecordImageGuard &operator=(const RecordImageGuard &) = delete;
-
- private:
-  void move(ptrdiff_t diff) {
-    if (diff == 0) return;
-    // Bound by s->fields rather than a nullptr sentinel: the loop in
-    // read_off_page_data() below indexes the same way.
-    for (uint idx = 0; idx < m_table->s->fields; ++idx) m_table->field[idx]->move_field_offset(diff);
-  }
-
-  TABLE *m_table;
-  ptrdiff_t m_diff;
-};
-}  // namespace
-
-/**
- * Copy the out-of-line bytes of every off-page column of @a record.
- *
- * The row image only stores a length plus a pointer into the primary engine's
- * blob heap, and that heap is released when the originating statement ends --
- * long before the asynchronous propagation worker parses the record. So the
- * payload has to be copied here, at capture time, for *both* the pre- and the
- * post-image: RowBuffer::extract_field_data() otherwise falls through to the
- * raw-pointer path and dereferences freed memory.
- *
- * Columns are admitted regardless of the statement's read_set. An UPDATE need
- * not read a blob column it does not touch, but the apply side still has to
- * encode that column into the row's index keys, and a map that is non-empty
- * yet missing an entry is exactly the shape extract_field_data() cannot
- * resolve.
- */
-static bool read_off_page_data(TABLE *table, const uchar *record,
-                               ShannonBase::Populate::change_record_buff_t::off_page_data_t &off_page_data) {
-  if (!table_has_off_page_blob_data(table) || record == nullptr) return true;
-
-  RecordImageGuard image(table, record);
-  ShannonBase::Utils::ColumnMapGuard columns(table, ShannonBase::Utils::ColumnMapGuard::TYPE::READ);
-
-  for (uint idx = 0; idx < table->s->fields; idx++) {
-    Field *fld = *(table->field + idx);
-    if (!bitmap_is_set(table->read_set, idx) || fld->is_flag_set(NOT_SECONDARY_FLAG)) continue;
-
-    // Must admit exactly the types RowBuffer::extract_field_data() reads back
-    // out of this map. JSON, GEOMETRY and VECTOR are Field_blob subclasses
-    // whose data is off-page just like a BLOB's, but they report their own
-    // field type, so a BLOB-only filter left them uncaptured. The reader then
-    // found a non-empty map without an entry for that column and asserted.
-    if (!ShannonBase::Utils::IsOffPageField(fld)) continue;
-    if (fld->is_null()) continue;
-
-    auto bfld = down_cast<Field_blob *>(fld);
-    const size_t data_len = bfld->get_length();
-    const uchar *actual_blob_data = bfld->get_blob_data();
-    if (actual_blob_data == nullptr) continue;
-
-    std::shared_ptr<uchar[]> blob_copy;
-    try {
-      blob_copy.reset(new uchar[data_len ? data_len : 1]);
-      std::memcpy(blob_copy.get(), actual_blob_data, data_len);
-      off_page_data.emplace(idx, std::make_pair(data_len, std::move(blob_copy)));
-    } catch (const std::bad_alloc &) {
-      off_page_data.clear();
-      return false;
-    }
-  }
-
-  return true;
-}
-
-/**
- * @brief Build the Rapid routing key of one physical partition.
- *
- * Rapid stores a partitioned table as one sub-table per physical partition,
- * registered under "<part_name>#<part_id>" (see PartTable::build_partitions,
- * ha_rapidpart::rnd_init_in_part). Change records therefore have to name the
- * partition explicitly: their table id only identifies the parent PartTable.
- *
- * @return the partition key, empty if part_id is not one of this table's
- *         partitions.
- */
-static std::string rapid_partition_key(partition_info *part_info, uint32 part_id) {
-  if (part_info == nullptr || part_id == NOT_A_PARTITION_ID || part_id >= part_info->get_tot_partitions())
-    return std::string();
-
-  const partition_element *elem = part_info->partitions[part_id];
-  if (elem == nullptr || elem->partition_name == nullptr) return std::string();
-
-  std::string key(elem->partition_name);
-  key.append("#").append(std::to_string(part_id));
-  return key;
-}
-
-/**
- * @brief Resolve which partition(s) a captured row change belongs to.
- *
- * The propagation worker owns no TABLE and cannot evaluate a partition
- * function, so the routing decision is made here while partition_info and the
- * row images are still in hand. An UPDATE is allowed to move a row between
- * partitions, hence the separate pre-image / post-image keys.
- *
- * Both keys stay empty for a non-partitioned table.
- *
- * @return false when the partition cannot be resolved. The caller must then
- *         quarantine the table instead of enqueueing a record that the apply
- *         worker would not be able to route.
- */
-static bool resolve_change_partitions(TABLE *table, ShannonBase::Populate::change_record_buff_t::OperType oper,
-                                      const uchar *old_row, const uchar *new_row, std::string &part_key,
-                                      std::string &old_part_key) {
-  using OperType = ShannonBase::Populate::change_record_buff_t::OperType;
-
-  partition_info *part_info = table->part_info;
-  assert(part_info != nullptr);
-
-  uint32 part_id{NOT_A_PARTITION_ID}, old_part_id{NOT_A_PARTITION_ID};
-  longlong func_value{0};
-  int error{0};
-
-  // The partitioning fields are not necessarily in the statement's read_set;
-  // mark them readable exactly like Partition_helper::ph_write_row() does.
-  ShannonBase::Utils::ColumnMapGuard guard(table, ShannonBase::Utils::ColumnMapGuard::TYPE::READ);
-  switch (oper) {
-    case OperType::INSERT:
-      error = part_info->get_partition_id(part_info, &part_id, &func_value);
-      old_part_id = part_id;
-      break;
-    case OperType::DELETE:
-      error = get_part_for_delete(old_row, table->record[0], part_info, &old_part_id);
-      part_id = old_part_id;
-      break;
-    case OperType::UPDATE:
-      error = get_parts_for_update(old_row, new_row, table->record[0], part_info, &old_part_id, &part_id, &func_value);
-      break;
-    default:
-      error = HA_ERR_GENERIC;
-      break;
-  }
-
-  if (error != 0) return false;
-
-  part_key = rapid_partition_key(part_info, part_id);
-  old_part_key = rapid_partition_key(part_info, old_part_id);
-  return !part_key.empty() && !old_part_key.empty();
-}
-
-namespace {
-/**
- * True when @a field holds a different value in the two raw row images.
- */
-bool FieldDiffersBetweenRows(const Field *field, const uchar *old_row, const uchar *new_row) {
-  if (field->is_nullable()) {
-    const bool was_null = (old_row[field->null_offset()] & field->null_bit) != 0;
-    const bool is_null = (new_row[field->null_offset()] & field->null_bit) != 0;
-    if (was_null != is_null) return true;
-    if (was_null) return false;
-  }
-  const ptrdiff_t off = field->offset(field->table->record[0]);
-  return std::memcmp(old_row + off, new_row + off, field->pack_length()) != 0;
-}
-
-/**
- * ON UPDATE CASCADE only needs to touch the child when the UPDATE actually
- * changed one of the parent's unique-key columns; without this an ordinary
- * UPDATE of an unrelated column would stale every loaded child table.
- *
- * Only unique keys are inspected. MySQL also permits a foreign key to
- * reference a non-unique index, and TABLE_SHARE_FOREIGN_KEY_PARENT_INFO
- * carries no referenced-column list, so such a target is missed here.
- */
-bool ParentUniqueKeyChanged(const TABLE *table, const uchar *old_row, const uchar *new_row) {
-  if (table->key_info == nullptr) return true;  // cannot tell: stay conservative
-  for (uint k = 0; k < table->s->keys; ++k) {
-    const KEY &key = table->key_info[k];
-    if ((key.flags & HA_NOSAME) == 0) continue;  // not unique: never an FK target
-    for (uint part = 0; part < key.user_defined_key_parts; ++part) {
-      const Field *field = key.key_part[part].field;
-      if (field != nullptr && FieldDiffersBetweenRows(field, old_row, new_row)) return true;
-    }
-  }
-  return false;
-}
-
-// A failed row notification has no SQL error channel: the callback runs after
-// write_record() and must not touch the statement diagnostics. Quarantine the
-// affected tables instead, so Rapid stops serving rows it did not capture.
-void QuarantineFailedNotification(const TABLE *table) noexcept {
-  if (!table || !table->s) return;
-  auto *imcs = ShannonBase::Imcs::Imcs::instance();
-  auto loaded = imcs->get_rpd_table_by_name(table->s->db.str, table->s->table_name.str);
-  if (loaded) ShannonBase::Populate::QuarantinePropagationTable(loaded->meta().table_id);
-  // The callback failed after primary DML. Either cascade may already have run;
-  // visit the existing FK metadata without constructing a temporary ID vector.
-  for (uint i = 0; table->s->foreign_key_parent && i < table->s->foreign_key_parents; ++i) {
-    const auto &fk = table->s->foreign_key_parent[i];
-    auto child = imcs->get_rpd_table_by_name(fk.referencing_table_db.str, fk.referencing_table_name.str);
-    if (child) ShannonBase::Populate::QuarantinePropagationTable(child->meta().table_id);
-  }
-  sql_print_error("Rapid row notification failed; affected loaded tables require reload");
-}
-
-void QuarantineCascadeChildren(const TABLE *table, bool for_delete) {
-  if (table == nullptr || table->s == nullptr) return;
-  // Single integer test on the hot path: almost no table is an FK parent.
-  if (table->s->foreign_key_parents == 0 || table->s->foreign_key_parent == nullptr) return;
-
-  for (uint i = 0; i < table->s->foreign_key_parents; ++i) {
-    const auto &fk = table->s->foreign_key_parent[i];
-    const auto rule = for_delete ? fk.delete_rule : fk.update_rule;
-    // NO ACTION / RESTRICT reject the parent DML instead of touching the child.
-    if (rule != dd::Foreign_key::RULE_CASCADE && rule != dd::Foreign_key::RULE_SET_NULL &&
-        rule != dd::Foreign_key::RULE_SET_DEFAULT)
-      continue;
-
-    auto child = ShannonBase::Imcs::Imcs::instance()->get_rpd_table_by_name(fk.referencing_table_db.str,
-                                                                            fk.referencing_table_name.str);
-    if (!child) continue;
-
-    ShannonBase::Populate::QuarantinePropagationTable(child->meta().table_id);
-    ShannonBase::RpdMirror::Registry::mark_stale(static_cast<uint>(child->meta().table_id),
-                                                 ShannonBase::stale_reason_t::RELOAD_REQUIRED);
-    sql_print_warning(
-        "Rapid: %s on %s.%s cascades into loaded table %s.%s, which change propagation cannot observe; "
-        "the table is now stale. Reload it to resume change propagation.",
-        for_delete ? "DELETE" : "UPDATE", table->s->db.str, table->s->table_name.str, fk.referencing_table_db.str,
-        fk.referencing_table_name.str);
-  }
-}
-
-/**
- * Capture one row change as a COPY_INFO record and hand it to change propagation.
- *
- * @param pre   image copied into buff0: the old row, or record[0] for INSERT
- * @param post  image copied into buff1 (UPDATE only), otherwise nullptr
- * @param partition_role  wording for the "cannot resolve partition" warning
- */
-bool BuildRowChange(TABLE *table, ShannonBase::table_id_t table_id,
-                    ShannonBase::Populate::change_record_buff_t::OperType oper, const uchar *pre, const uchar *post,
-                    const char *partition_role,
-                    std::optional<ShannonBase::Populate::change_record_buff_t> &record) noexcept {
-  DBUG_EXECUTE_IF("rapid_notification_bad_alloc", {
-    QuarantineFailedNotification(table);
-    return false;
-  });
-  try {
-    record.emplace(ShannonBase::Populate::Source::COPY_INFO, table->s->rec_buff_length);
-
-#ifndef NDEBUG
-    record->m_schema_name = table->s->db.str;
-    record->m_table_name = table->s->table_name.str;
-#endif
-  } catch (...) {
-    QuarantineFailedNotification(table);
-    return false;
-  }
-  auto &rec = *record;
-  rec.m_oper = oper;
-  rec.m_table_id = table_id;
-
-  if (table->part_info &&
-      !resolve_change_partitions(table, oper, pre, post ? post : pre, rec.m_part_key, rec.m_old_part_key)) {
-    ShannonBase::Populate::QuarantinePropagationTable(table_id);
-    sql_print_warning("Rapid COPY_INFO could not resolve the %s on table %llu", partition_role,
-                      static_cast<unsigned long long>(table_id));
-    return false;
-  }
-
-  // read_off_page_data() is a no-op for tables without blob-like columns.
-  std::memcpy(rec.m_buff0.get(), pre, table->s->rec_buff_length);
-  if (!read_off_page_data(table, pre, rec.m_offpage_data0)) {
-    ShannonBase::Populate::QuarantinePropagationTable(table_id);
-    sql_print_warning("Rapid COPY_INFO could not copy the off-page columns of table %llu",
-                      static_cast<unsigned long long>(table_id));
-    return false;
-  }
-  if (post) {
-    std::memcpy(rec.m_buff1.get(), post, table->s->rec_buff_length);
-    if (!read_off_page_data(table, post, rec.m_offpage_data1)) {
-      ShannonBase::Populate::QuarantinePropagationTable(table_id);
-      sql_print_warning("Rapid COPY_INFO could not copy the off-page columns of table %llu",
-                        static_cast<unsigned long long>(table_id));
-      return false;
-    }
-  }
-
-  return true;
-}
-
-void EnqueueRowChange(THD *thd, TABLE *table, ShannonBase::Populate::change_record_buff_t::OperType oper,
-                      const uchar *pre, const uchar *post, const char *partition_role) {
-  auto loaded = ShannonBase::Imcs::Imcs::instance()->get_rpd_table_by_name(table->s->db.str, table->s->table_name.str);
-  if (!loaded) {
-    ShannonBase::Recovery::note_unregistered_source_change(table->s->db.str, table->s->table_name.str);
-    return;
-  }
-
-  std::optional<ShannonBase::Populate::change_record_buff_t> record;
-  if (!BuildRowChange(table, loaded->meta().table_id, oper, pre, post, partition_role, record)) return;
-  ShannonBase::Populate::RegisterCopyInfoParticipant(thd);
-  if (ShannonBase::Populate::EnqueueCopyInfo(thd, std::move(*record)) != ShannonBase::SHANNON_SUCCESS) {
-    ShannonBase::Populate::QuarantinePropagationTable(loaded->meta().table_id);
-    sql_print_warning("Rapid COPY_INFO could not enqueue row change for table %llu; reload required",
-                      static_cast<unsigned long long>(loaded->meta().table_id));
-  }
-}
-}  // namespace
-
-bool ShannonBase::Populate::FinalizeBinlogRow(TABLE *table, change_record_buff_t &record) {
-#ifndef NDEBUG
-  record.m_schema_name = table->s->db.str;
-  record.m_table_name = table->s->table_name.str;
-#endif
-  // The decoder leaves the current/after image in record[0]. MySQL's update
-  // partition resolver requires that exact buffer as new_data.
-  return !table->part_info || resolve_change_partitions(table, record.m_oper, record.m_buff0.get(), table->record[0],
-                                                        record.m_part_key, record.m_old_part_key);
-}
-
-using RowChangeOper = ShannonBase::Populate::change_record_buff_t::OperType;
 void NotifyAfterInsert(THD *thd, void *args) {
   if (!thd || !args) return;
   struct comb_args {
-    TABLE *arg1;
-    COPY_INFO *arg2;
-    COPY_INFO *arg3;
+    TABLE *table;
+    COPY_INFO *insert;
+    COPY_INFO *update;
   };
-
-  auto *params = static_cast<comb_args *>(args);
-  if (!params->arg1 || !params->arg2 || !params->arg3) return;
-
-  TABLE *table = params->arg1;
-  if (ShannonBase::Populate::configured_change_propagation_mode.load() ==
-      ShannonBase::Populate::CopyInfoMode::COMMITTED_BINLOG) {
-    ShannonBase::Populate::CommittedBinlog::notify_dml(thd, table);
-    return;
-  }
-  if (thd->lex->is_ignore() || params->arg2->get_duplicate_handling() != DUP_ERROR) {
-    // This server hook reports successful write_record(), not a successful
-    // physical INSERT. IGNORE can report a rejected row; REPLACE can remove
-    // several unique-key conflicts; ON DUPLICATE KEY can perform an UPDATE.
-    // Its cumulative counters and final record buffer do not describe every
-    // affected pre-image. Never certify the attempted INSERT in the WAL.
-    // Keep this guard engine-local until a complete row outcome is available.
-    if (params->arg2->get_duplicate_handling() == DUP_REPLACE) QuarantineCascadeChildren(table, true);
-    if (params->arg2->get_duplicate_handling() == DUP_UPDATE) QuarantineCascadeChildren(table, false);
-    auto loaded =
-        ShannonBase::Imcs::Imcs::instance()->get_rpd_table_by_name(table->s->db.str, table->s->table_name.str);
-    if (loaded) ShannonBase::Populate::QuarantinePropagationTable(loaded->meta().table_id);
-    return;
-  }
-  EnqueueRowChange(thd, table, RowChangeOper::INSERT, table->record[0], nullptr, "target partition of an INSERT");
+  const auto *params = static_cast<comb_args *>(args);
+  if (!params->table || !params->insert || !params->update) return;
+  ShannonBase::Service::notify_insert(thd, params->table, params->insert);
 }
 
-// old_row = table->record[1], new_row = table->record[0]
 void NotifyAfterUpdate(THD *thd, void *args) {
   if (!thd || !args) return;
   struct comb_args {
-    TABLE *arg1;
-    const uchar *arg2;
-    const uchar *arg3;
+    TABLE *table;
+    const uchar *old_row;
+    const uchar *new_row;
   };
-
-  auto *params = static_cast<comb_args *>(args);
-  TABLE *table = params->arg1;
-  const uchar *old_row = params->arg2;
-  const uchar *new_row = params->arg3;
-  if (!table || !old_row || !new_row) return;
-  if (ShannonBase::Populate::configured_change_propagation_mode.load() ==
-      ShannonBase::Populate::CopyInfoMode::COMMITTED_BINLOG) {
-    ShannonBase::Populate::CommittedBinlog::notify_dml(thd, table);
-    return;
-  }
-
-  // Runs whether or not this table is itself loaded: the parent may live only
-  // in InnoDB while the child it cascades into is loaded in Rapid.  Only an
-  // UPDATE that moves a referenced unique key can cascade.
-  if (table->s->foreign_key_parents != 0 && ParentUniqueKeyChanged(table, old_row, new_row))
-    QuarantineCascadeChildren(table, /*for_delete=*/false);
-
-  EnqueueRowChange(thd, table, RowChangeOper::UPDATE, old_row, new_row, "target partition of an UPDATE");
+  const auto *params = static_cast<comb_args *>(args);
+  if (!params->table || !params->old_row || !params->new_row) return;
+  ShannonBase::Service::notify_update(thd, params->table, params->old_row, params->new_row);
 }
 
 void NotifyAfterDelete(THD *thd, void *args) {
   if (!thd || !args) return;
   struct comb_args {
-    TABLE *arg1;
-    const uchar *old_rec;
+    TABLE *table;
+    const uchar *old_row;
   };
-
-  auto *params = static_cast<comb_args *>(args);
-  TABLE *table = params->arg1;
-  const uchar *old_row = params->old_rec;
-  if (!table || !old_row) return;
-  if (ShannonBase::Populate::configured_change_propagation_mode.load() ==
-      ShannonBase::Populate::CopyInfoMode::COMMITTED_BINLOG) {
-    ShannonBase::Populate::CommittedBinlog::notify_dml(thd, table);
-    return;
-  }
-
-  // Runs whether or not this table is itself loaded: the parent may live only
-  // in InnoDB while the child it cascades into is loaded in Rapid.
-  QuarantineCascadeChildren(table, /*for_delete=*/true);
-
-  EnqueueRowChange(thd, table, RowChangeOper::DELETE, old_row, nullptr, "source partition of a DELETE");
+  const auto *params = static_cast<comb_args *>(args);
+  if (!params->table || !params->old_row) return;
+  ShannonBase::Service::notify_delete(thd, params->table, params->old_row);
 }
 
 void NotifyAfterSelect(THD *thd, SelectExecutedIn executed_in) {
@@ -1696,6 +1283,7 @@ static bool PrepareSecondaryEngine(THD *thd, LEX *lex) {
   auto context = new (thd->mem_root) ShannonBase::Rapid_execution_context;
   if (context == nullptr) return true;
   lex->set_secondary_engine_execution_context(context);
+  if (RapidPrepareEstimateQueryCosts(thd, lex)) return true;
   if (ShannonBase::Populate::configured_change_propagation_mode.load() ==
       ShannonBase::Populate::CopyInfoMode::COMMITTED_BINLOG) {
     if (const char *error =
@@ -1704,6 +1292,12 @@ static bool PrepareSecondaryEngine(THD *thd, LEX *lex) {
       return true;
     }
     context->m_committed_binlog_view = true;
+    DEBUG_SYNC(thd, "rapid_committed_view_pinned");
+    DBUG_EXECUTE_IF("rapid_committed_gc_before_scan", {
+      ShannonBase::Imcs::Imcs::instance()->for_each_table([](ShannonBase::Imcs::RpdTable *table) {
+        table->garbage_collect(ShannonBase::TransactionCoordinator::instance().get_gc_safe_scn());
+      });
+    });
   }
 
   if (const char *error = context->m_resource_scope.enter(thd, ShannonBase::ResMgmt::WorkClass::AP, false)) {
@@ -1717,7 +1311,7 @@ static bool PrepareSecondaryEngine(THD *thd, LEX *lex) {
                      ? OPTION_NO_CONST_TABLES | OPTION_NO_SUBQUERY_DURING_OPTIMIZATION
                      : OPTION_NO_SUBQUERY_DURING_OPTIMIZATION;
   lex->add_statement_options(options);
-  return RapidPrepareEstimateQueryCosts(thd, lex);
+  return false;
 }
 
 static bool RapidCachePrimaryInfoAtPrimaryTentativelyStep(THD *thd) {
@@ -2009,7 +1603,7 @@ static void rapid_pre_dd_shutdown(handlerton *) {
   // while the dictionary and native resource group manager are still alive.
   ShannonBase::Populate::CommittedBinlog::shutdown();
   ShannonBase::Populate::Populator::shutdown();
-  ShannonBase::Recovery::rapid_recovery_shutdown();
+  ShannonBase::Service::rapid_recovery_shutdown();
   ShannonBase::Imcs::BkgWorkerPool::shutdown_all(true);
   ShannonBase::ResMgmt::shutdown_auto_resources();
 }
@@ -2037,7 +1631,7 @@ static int rapid_shutdown(handlerton *, ha_panic_function) {
   ShannonBase::Imcs::BkgWorkerPool::shutdown_all(true);
 
   // recovery worker
-  ShannonBase::Recovery::rapid_recovery_shutdown();
+  ShannonBase::Service::rapid_recovery_shutdown();
   return ShannonBase::SHANNON_SUCCESS;
 }
 
@@ -3136,7 +2730,7 @@ static int RapidInitAbort() {
   // self-load both reach into recovery.
   ShannonBase::Populate::CommittedBinlog::shutdown();
   ShannonBase::Populate::Populator::shutdown();
-  ShannonBase::Recovery::rapid_recovery_shutdown();
+  ShannonBase::Service::rapid_recovery_shutdown();
 
   if (ShannonBase::shannon_loaded_tables) {
     delete ShannonBase::shannon_loaded_tables;
@@ -3252,7 +2846,7 @@ static int Shannonbase_Rapid_Init(MYSQL_PLUGIN p) {
 
   if (!srv_is_upgrade_mode /**not in upgrade stage */) {
     // Establish restart-recovery ownership before a self-load worker can run.
-    ShannonBase::Recovery::rapid_recovery_startup();
+    ShannonBase::Service::rapid_recovery_startup();
     // self-loader worker
     ShannonBase::Autopilot::SelfLoadManager::m_accept_requests.store(true);
     ShannonBase::shannon_self_load_mgr_inst = ShannonBase::Autopilot::SelfLoadManager::instance();
@@ -3280,7 +2874,7 @@ static int Shannonbase_Rapid_Deinit(MYSQL_PLUGIN) {
   ShannonBase::Populate::Populator::shutdown();
 
   // recovery worker (symmetric with rapid_recovery_startup in Init)
-  ShannonBase::Recovery::rapid_recovery_shutdown();
+  ShannonBase::Service::rapid_recovery_shutdown();
 
   if (ShannonBase::shannon_loaded_tables) {
     delete ShannonBase::shannon_loaded_tables;

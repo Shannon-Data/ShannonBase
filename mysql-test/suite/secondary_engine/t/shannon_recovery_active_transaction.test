@@ -17,8 +17,8 @@ USE sh_recovery_active;
 
 # Do not let the regression pass merely because there was no checkpoint.
 --let $datadir = `SELECT @@datadir`
---let $manifest = $datadir/rapid_snapshots/sh_recovery_active/t/checkpoints/checkpoint-1.manifest
---file_exists $manifest 60
+--let $checkpoint_dir = $datadir/rapid_snapshots/sh_recovery_active/t/checkpoints
+--source suite/secondary_engine/include/wait_native_checkpoint.inc
 
 # A separate reader's query barrier drains the committed changes first.
 INSERT INTO t VALUES (4,40);

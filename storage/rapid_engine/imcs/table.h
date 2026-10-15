@@ -781,7 +781,7 @@ class PartTable : public Table {
   // table MDL exclusively, so no session can scan a half-populated partition.
   // Change propagation would be able to see it, which is what the sub-table's
   // load watermark is for.
-  inline std::shared_ptr<RpdTable> get_partition(const std::string &part_key) {
+  inline std::shared_ptr<ShannonBase::Imcs::RpdTable> get_partition(const std::string &part_key) {
     std::shared_lock lock(m_partitions_mutex);
     auto it = m_partitions.find(part_key);
     return it == m_partitions.end() ? nullptr : it->second;
@@ -843,7 +843,7 @@ class PartTable : public Table {
    * optimizer cost model when per-partition stats are not available.
    * Returns nullptr if there are no loaded partitions.
    */
-  std::shared_ptr<RpdTable> representative_partition() const {
+  std::shared_ptr<ShannonBase::Imcs::RpdTable> representative_partition() const {
     std::shared_lock lock(m_partitions_mutex);
     if (m_partitions.empty()) return nullptr;
     return m_partitions.begin()->second;
@@ -851,7 +851,7 @@ class PartTable : public Table {
 
  private:
   // all the partition sub-tables.
-  std::unordered_map<std::string, std::shared_ptr<RpdTable>> m_partitions;
+  std::unordered_map<std::string, std::shared_ptr<ShannonBase::Imcs::RpdTable>> m_partitions;
 
   mutable std::shared_mutex m_partitions_mutex;
 

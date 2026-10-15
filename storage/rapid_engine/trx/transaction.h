@@ -69,6 +69,7 @@ class TransactionSubscriber {
   virtual void on_transaction_rollback(THD *) {}
   virtual void on_statement_commit(THD *) {}
   virtual void on_statement_rollback(THD *) {}
+  virtual void on_savepoint_rollback(THD *, const char *reason = nullptr) {}
   virtual void on_transaction_detach(THD *) {}
 };
 
@@ -182,7 +183,7 @@ class Transaction : public MemoryObject {
   virtual int begin_stmt();
   virtual int commit_stmt();
   virtual int rollback_stmt();
-  virtual int rollback_to_savepoint(void *const) { return SHANNON_SUCCESS; }
+  virtual int rollback_to_savepoint(void *const savepoint);
 
   // The constructor binds this facade to the THD's primary InnoDB trx_t.
   // The pointer is strictly non-owning; InnoDB owns the transaction and its
@@ -289,6 +290,8 @@ class TransactionCoordinator {
   // diagnostics/future optimization; SQL visibility remains ReadView-driven.
   void register_snapshot(Transaction *trx, uint64_t snapshot_scn);
   void unregister_snapshot(Transaction *trx);
+  // Exact SCN lifetime fence for committed-binlog publication and queries.
+  std::shared_ptr<void> pin_scn(uint64_t scn);
 
   inline uint64_t get_current_scn() const { return m_max_observed_commit_scn.load(std::memory_order_acquire); }
 
@@ -332,6 +335,7 @@ class TransactionCoordinator {
   mutable std::shared_mutex m_txns_mutex;
   std::unordered_map<Transaction::ID, TransactionInfo> m_active_txns;
   std::unordered_map<Transaction *, uint64_t> m_active_snapshots;
+  std::unordered_map<const void *, uint64_t> m_scn_pins;
 
   std::atomic<size_t> m_total_committed{0};
   std::atomic<size_t> m_total_aborted{0};

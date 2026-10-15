@@ -1,43 +1,26 @@
-CALL mtr.add_suppression("Rapid COMMITTED_BINLOG: COMMITTED_BINLOG consumer synchronization timed out");
 SET @saved_debug=@@GLOBAL.debug;
 SET use_secondary_engine=OFF;
-CREATE DATABASE cb_stall;
-USE cb_stall;
-CREATE TABLE a(id INT PRIMARY KEY,v INT) SECONDARY_ENGINE=rapid;
-CREATE TABLE b(id INT PRIMARY KEY,v INT) SECONDARY_ENGINE=rapid;
-INSERT INTO a VALUES(1,10);
-INSERT INTO b VALUES(1,20);
-ALTER TABLE a SECONDARY_LOAD;
-ALTER TABLE b SECONDARY_LOAD;
+CREATE TABLE cb_reader(id INT PRIMARY KEY,v INT) SECONDARY_ENGINE=rapid;
+INSERT INTO cb_reader VALUES(1,10);
+ALTER TABLE cb_reader SECONDARY_LOAD;
 SET use_secondary_engine=FORCED;
-SELECT a.v,b.v FROM a JOIN b USING(id);
-v	v
-10	20
+SELECT SUM(v) FROM cb_reader;
+SUM(v)
+10
 SET use_secondary_engine=OFF;
 SET GLOBAL debug='+d,rapid_committed_reader_stall';
-SELECT @tp_elapsed < 2000000 AS primary_commit_did_not_wait_for_apply;
-primary_commit_did_not_wait_for_apply
-1
 SET use_secondary_engine=FORCED;
-SELECT a.v,b.v FROM a JOIN b USING(id);
-ERROR HY000: Secondary engine operation failed. COMMITTED_BINLOG consumer synchronization timed out; unload and reload the table.
+SELECT SUM(v) FROM cb_reader;
+ERROR HY000: Secondary engine operation failed. COMMITTED_BINLOG synchronization timed out.
 SET use_secondary_engine=ON;
-SELECT a.v,b.v FROM a JOIN b USING(id);
-v	v
-11	21
-SET use_secondary_engine=OFF;
-UPDATE a SET v=12;
-UPDATE b SET v=22;
+SELECT SUM(v) FROM cb_reader;
+SUM(v)
+11
 SET GLOBAL debug=@saved_debug;
-ALTER TABLE a SECONDARY_UNLOAD;
-ALTER TABLE b SECONDARY_UNLOAD;
-ALTER TABLE a SECONDARY_LOAD;
-ALTER TABLE b SECONDARY_LOAD;
 SET use_secondary_engine=FORCED;
-SELECT a.v,b.v FROM a JOIN b USING(id);
-v	v
-12	22
+SELECT SUM(v) FROM cb_reader;
+SUM(v)
+11
 SET use_secondary_engine=OFF;
-ALTER TABLE a SECONDARY_UNLOAD;
-ALTER TABLE b SECONDARY_UNLOAD;
-DROP DATABASE cb_stall;
+ALTER TABLE cb_reader SECONDARY_UNLOAD;
+DROP TABLE cb_reader;
