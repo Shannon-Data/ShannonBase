@@ -26,6 +26,7 @@ TEST(RapidResourcesTest, SystemPoolPolicyUsesActualRootCapacity) {
   EXPECT_EQ(0u, system_memory_limits(1).pool);
   EXPECT_LE(system_memory_limits(SIZE_MAX).pool, SIZE_MAX / 8);
 }
+
 class RapidSystemPoolTest : public ::testing::Test {
  protected:
   std::shared_ptr<Utils::MemoryPool> root;
@@ -38,6 +39,20 @@ class RapidSystemPoolTest : public ::testing::Test {
   }
   void TearDown() override { shutdown_system_pool(); }
 };
+TEST_F(RapidSystemPoolTest, QueryMemoryBudgetExplicitlyListsSupportedOperators) {
+  EXPECT_STREQ("sort", query_memory_operator_name(QueryMemoryOperator::kSort));
+  EXPECT_STREQ("hash_aggregate", query_memory_operator_name(QueryMemoryOperator::kHashAggregate));
+  EXPECT_STREQ("hash_join", query_memory_operator_name(QueryMemoryOperator::kHashJoin));
+  EXPECT_STREQ("window", query_memory_operator_name(QueryMemoryOperator::kWindow));
+  EXPECT_STREQ("invalid", query_memory_operator_name(QueryMemoryOperator::kCount));
+
+  int query = 0;
+  auto grant = reserve_query_memory(&query, QueryMemoryOperator::kSort,
+                                   system_memory_limits().operation / 2);
+  EXPECT_TRUE(grant);
+  EXPECT_GT(grant.bytes(), 0u);
+}
+
 TEST_F(RapidSystemPoolTest, QueryBuffersAllocateFromPoolAndReturnCapacity) {
   const auto root_used = root->stats().used_bytes;
   EXPECT_EQ(system_memory_limits().pool, root_used);
@@ -69,7 +84,7 @@ TEST_F(RapidSystemPoolTest, ExhaustionHasNoHeapFallbackAndFreeAllowsReuse) {
 }
 TEST_F(RapidSystemPoolTest, LiveGrantPreventsResizeAndBufferRetainsParent) {
   int query = 0;
-  auto grant = reserve_query_memory(&query, system_memory_limits().operation);
+  auto grant = reserve_query_memory(&query, QueryMemoryOperator::kSort, system_memory_limits().operation);
   ASSERT_TRUE(grant);
   EXPECT_FALSE(initialize_system_pool(root));
   grant.reset();

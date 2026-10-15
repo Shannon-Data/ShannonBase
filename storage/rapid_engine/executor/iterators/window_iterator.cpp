@@ -305,7 +305,8 @@ VectorizedWindowIterator::VectorizedWindowIterator(THD *thd, unique_ptr_destroy_
                                                    Temp_table_param *temp_table_param, JOIN *join, int output_slice,
                                                    size_t buffer_memory_limit)
     : RowIterator(thd),
-      m_memory_reservation(ResMgmt::reserve_query_memory(thd, buffer_memory_limit)),
+      m_memory_reservation(
+          ResMgmt::reserve_query_memory(thd, ResMgmt::QueryMemoryOperator::kWindow, buffer_memory_limit)),
       m_memory(m_memory_reservation.bytes()),
       m_source(std::move(source)),
       m_temp_table_param(temp_table_param),
