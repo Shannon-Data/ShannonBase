@@ -106,7 +106,7 @@ VectorizedSortIterator::VectorizedSortIterator(THD *thd, Filesort *filesort,
                                                pack_rows::TableCollection tables, size_t memory_budget,
                                                ha_rows *examined_rows)
     : RowIterator(thd),
-      m_memory_reservation(ResMgmt::reserve_query_memory(thd, memory_budget)),
+      m_memory_reservation(ResMgmt::reserve_query_memory(thd, ResMgmt::QueryMemoryOperator::kSort, memory_budget)),
       m_sort_memory(m_memory_reservation.bytes() / 2),
       m_aux_memory(m_memory_reservation.bytes() - m_memory_reservation.bytes() / 2),
       m_filesort(filesort),

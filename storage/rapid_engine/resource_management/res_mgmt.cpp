@@ -107,10 +107,15 @@ SystemPoolStats system_pool_stats() {
   return {stats.total_capacity, stats.used_bytes, stats.peak_usage, state->budget.reserved(), stats.failed_allocations};
 }
 
-MemoryBudget::Reservation reserve_query_memory(const void *query, size_t requested) {
-  // Serialize admission with replacement; a live grant prohibits a resize.
+MemoryBudget::Reservation reserve_query_memory(const void *query, QueryMemoryOperator op, size_t requested) {
+  // The operator list is explicit here so that review can audit every budgeted
+  // path. The guarantee remains scoped to the query and operation budget, not to
+  // the entire mysqld RSS footprint.
+  if (op == QueryMemoryOperator::kCount) return {};
+
   std::lock_guard lock(system_pool_mutex);
   if (!system_pool) return {};
+
   requested = PlanningMemoryScope::limit_request(query, requested);
   requested = std::min(requested, system_pool->limits.operation);
   DBUG_EXECUTE_IF("rapid_operator_tiny_budget", { requested = std::min<size_t>(requested, 64 * 1024); });

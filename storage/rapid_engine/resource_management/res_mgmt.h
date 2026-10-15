@@ -386,7 +386,34 @@ class MemoryBudget {
   std::unordered_map<const void *, size_t> m_queries;
 };
 
-MemoryBudget::Reservation reserve_query_memory(const void *query, size_t requested);
+enum class QueryMemoryOperator : uint8_t {
+  kSort,
+  kHashAggregate,
+  kHashJoin,
+  kWindow,
+  kCount,
+};
+
+inline const char *query_memory_operator_name(QueryMemoryOperator op) {
+  switch (op) {
+    case QueryMemoryOperator::kSort:
+      return "sort";
+    case QueryMemoryOperator::kHashAggregate:
+      return "hash_aggregate";
+    case QueryMemoryOperator::kHashJoin:
+      return "hash_join";
+    case QueryMemoryOperator::kWindow:
+      return "window";
+    case QueryMemoryOperator::kCount:
+      return "invalid";
+  }
+  return "unknown";
+}
+
+// Query-side memory is budgeted only for the operators below. This is not a
+// whole-mysqld RSS cap: it is a bounded per-query reservation enforced by the
+// operation/query/query_total guards in the system pool.
+MemoryBudget::Reservation reserve_query_memory(const void *query, QueryMemoryOperator op, size_t requested);
 
 // Internal policy, derived from the actual root pool capacity. These are not
 // user variables. Reserve part of sys_pool for scans/checkpoint alongside AP.

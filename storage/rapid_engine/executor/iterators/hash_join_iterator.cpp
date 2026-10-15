@@ -98,7 +98,8 @@ VectorizedHashJoinIterator::VectorizedHashJoinIterator(
     : RowIterator(thd),
       // Recursive 16-way partitions need workspace independently of the build
       // buffer. This is a request; global/query/operator caps still take precedence.
-      m_memory_reservation(ResMgmt::reserve_query_memory(thd, std::max<size_t>(max_memory_available, 4 * 1024 * 1024))),
+      m_memory_reservation(ResMgmt::reserve_query_memory(thd, ResMgmt::QueryMemoryOperator::kHashJoin,
+                                                         std::max<size_t>(max_memory_available, 4 * 1024 * 1024))),
       m_spill_memory(m_memory_reservation.bytes() -
                          RetainedBuildLimit(max_memory_available, m_memory_reservation.bytes()) -
                          m_memory_reservation.bytes() / 4,

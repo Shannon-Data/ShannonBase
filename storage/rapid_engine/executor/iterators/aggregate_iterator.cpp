@@ -237,7 +237,8 @@ VectorizedAggregateIterator::VectorizedAggregateIterator(THD *thd, unique_ptr_de
                                                          AggregateStrategy strategy, ORDER *hash_output_order,
                                                          double expected_rows, size_t hash_memory_limit)
     : RowIterator(thd),
-      m_memory_reservation(ResMgmt::reserve_query_memory(thd, std::max<size_t>(hash_memory_limit, 4 * 1024 * 1024))),
+      m_memory_reservation(ResMgmt::reserve_query_memory(thd, ResMgmt::QueryMemoryOperator::kHashAggregate,
+                                                         std::max<size_t>(hash_memory_limit, 4 * 1024 * 1024))),
       m_aux_memory(m_memory_reservation.bytes() - std::min(hash_memory_limit, m_memory_reservation.bytes() / 2)),
       m_source(std::move(source)),
       m_join(join),
