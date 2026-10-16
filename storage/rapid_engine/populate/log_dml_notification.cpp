@@ -540,14 +540,14 @@ ChangeApplyResult CopyInfoParser::apply_change(Rapid_load_context &context, chan
 
   const Transaction::ID source_txn_id = static_cast<Transaction::ID>(record.m_source_trx_id);
   uint64_t terminal_scn = 0;
-  const auto outcome = TransactionManager::instance().get_outcome(source_txn_id, &terminal_scn);
+  const auto outcome = SourceTxnTracker::instance().get_outcome(source_txn_id, &terminal_scn);
 
-  if (outcome == TransactionManager::Outcome::ABORTED) {
+  if (outcome == SourceTxnTracker::Outcome::ABORTED) {
     // The primary rollback won the race before this record reached Rapid. Do not
     // manufacture an ABORTED physical version only to undo it again.
     result.status = ChangeApplyResult::Status::APPLIED;
     result.parsed_bytes = record.m_size;
-    if (!replay) TransactionManager::instance().on_change_applied(source_txn_id, record.m_table_id);
+    if (!replay) SourceTxnTracker::instance().on_change_applied(source_txn_id, record.m_table_id);
     return result;
   }
 
@@ -557,7 +557,7 @@ ChangeApplyResult CopyInfoParser::apply_change(Rapid_load_context &context, chan
   // A commit can also win the race before this record is applied. In that case
   // create the version as COMMITTED directly; otherwise 0 deliberately means
   // ACTIVE until the primary outcome arrives.
-  context.m_extra_info.m_scn = (outcome == TransactionManager::Outcome::COMMITTED) ? terminal_scn : record.m_commit_scn;
+  context.m_extra_info.m_scn = (outcome == SourceTxnTracker::Outcome::COMMITTED) ? terminal_scn : record.m_commit_scn;
 #ifndef NDEBUG
   context.m_schema_name = record.m_schema_name;
   context.m_table_name = record.m_table_name;
@@ -589,7 +589,7 @@ ChangeApplyResult CopyInfoParser::apply_change(Rapid_load_context &context, chan
     // asynchronous apply. Finalize this source transaction (if terminal) before
     // the worker drops inflight_size; once inflight reaches zero the table is
     // eligible for Rapid offload again.
-    if (!replay) TransactionManager::instance().on_change_applied(source_txn_id, record.m_table_id);
+    if (!replay) SourceTxnTracker::instance().on_change_applied(source_txn_id, record.m_table_id);
   } else {
     result.status = ChangeApplyResult::Status::RETRYABLE;
   }
@@ -622,7 +622,7 @@ int EnqueueCopyInfo(THD *thd, change_record_buff_t &&record) {
   if (ShannonBase::Transaction::get_or_create_trx(thd) == nullptr)
     return static_cast<int>(PROPAGATION_FAILED::WRITE_REJECTED);
 
-  auto registration = ShannonBase::Populate::TransactionManager::instance().register_change(thd, record.m_table_id);
+  auto registration = ShannonBase::Populate::SourceTxnTracker::instance().register_change(thd, record.m_table_id);
   if (!registration) return static_cast<int>(PROPAGATION_FAILED::WRITE_REJECTED);
 
   record.m_source_trx_id = registration.source_trx_id;
@@ -687,13 +687,14 @@ Trans_observer rapid_transaction_observer{sizeof(Trans_observer),
                                           nullptr};
 Binlog_transmit_observer rapid_binlog_observer{
     sizeof(Binlog_transmit_observer), nullptr, nullptr, nullptr, nullptr, nullptr, [](Binlog_transmit_param *) -> int {
+      Recovery::NotificationTracker::source_reset();
       if (configured_change_propagation_mode.load() == CopyInfoMode::COMMITTED_BINLOG)
         CommittedBinlog::notify_source_reset();
       return 0;
     }};
 }  // namespace
 
-void TransactionManager::ensure_subscribed() {
+void SourceTxnTracker::ensure_subscribed() {
   if (m_subscribed.load(std::memory_order_acquire)) return;
 
   std::lock_guard<std::mutex> lock(m_subscription_mutex);
@@ -716,7 +717,7 @@ void TransactionManager::ensure_subscribed() {
   m_subscribed.store(true, std::memory_order_release);
 }
 
-TransactionManager::Registration TransactionManager::register_change(THD *thd, table_id_t table_id) try {
+SourceTxnTracker::Registration SourceTxnTracker::register_change(THD *thd, table_id_t table_id) try {
   ensure_subscribed();
   if (!m_subscribed.load(std::memory_order_acquire) || thd == nullptr || table_id == 0) return {};
 
@@ -755,7 +756,7 @@ TransactionManager::Registration TransactionManager::register_change(THD *thd, t
   return {};
 }
 
-void TransactionManager::quarantine_participant(THD *thd, bool require_statement_change, const char *reason) {
+void SourceTxnTracker::quarantine_participant(THD *thd, bool require_statement_change, const char *reason) {
   if (thd == nullptr) return;
 
   std::vector<table_id_t> tables;
@@ -788,11 +789,11 @@ void TransactionManager::quarantine_participant(THD *thd, bool require_statement
       tables.size(), reason != nullptr ? reason : "partial rollback after DML was already propagated");
 }
 
-void TransactionManager::quarantine_partial_rollback(THD *thd, const char *reason) {
+void SourceTxnTracker::quarantine_partial_rollback(THD *thd, const char *reason) {
   quarantine_participant(thd, false, reason);
 }
 
-void TransactionManager::quarantine_failed_transaction(THD *thd) noexcept {
+void SourceTxnTracker::quarantine_failed_transaction(THD *thd) noexcept {
   // Walk the already-owned set without allocating a snapshot. Do not hold the
   // participant mutex across notification gates (apply takes the reverse order).
   table_id_t previous = 0;
@@ -821,7 +822,7 @@ void TransactionManager::quarantine_failed_transaction(THD *thd) noexcept {
   sql_print_error("Rapid transaction callback failed; affected loaded tables require reload");
 }
 
-void TransactionManager::on_statement_commit(THD *thd) {
+void SourceTxnTracker::on_statement_commit(THD *thd) {
   if (thd == nullptr) return;
 
   std::lock_guard<std::mutex> lock(m_mutex);
@@ -829,11 +830,11 @@ void TransactionManager::on_statement_commit(THD *thd) {
   if (it != m_participants.end()) it->second.statement_has_changes = false;
 }
 
-void TransactionManager::on_statement_rollback(THD *thd) {
+void SourceTxnTracker::on_statement_rollback(THD *thd) {
   quarantine_participant(thd, true, "statement rollback after DML was already propagated");
 }
 
-void TransactionManager::on_transaction_commit(THD *thd, const Recovery::BinlogPosition &position) {
+void SourceTxnTracker::on_transaction_commit(THD *thd, const Recovery::BinlogPosition &position) {
   if (thd == nullptr) return;
 
   Transaction::ID source_trx_id = 0;
@@ -889,7 +890,7 @@ void TransactionManager::on_transaction_commit(THD *thd, const Recovery::BinlogP
   m_participants.erase(thd);
 }
 
-void TransactionManager::on_transaction_rollback(THD *thd) {
+void SourceTxnTracker::on_transaction_rollback(THD *thd) {
   if (thd == nullptr) return;
 
   Transaction::ID source_trx_id = 0;
@@ -908,7 +909,7 @@ void TransactionManager::on_transaction_rollback(THD *thd) {
   m_participants.erase(thd);
 }
 
-void TransactionManager::record_source_abort(THD *thd) {
+void SourceTxnTracker::record_source_abort(THD *thd) {
   Transaction::ID source_trx_id = 0;
   std::vector<table_id_t> tables;
   try {
@@ -931,15 +932,15 @@ void TransactionManager::record_source_abort(THD *thd) {
   }
 }
 
-void TransactionManager::on_transaction_detach(THD *thd) {
+void SourceTxnTracker::on_transaction_detach(THD *thd) {
   // Defensive teardown: unresolved COPY_INFO participation must not survive a
   // THD facade. Normal COMMIT/ROLLBACK has already erased the participant, so
   // this is idempotent.
   on_transaction_rollback(thd);
 }
 
-bool TransactionManager::finalize_imcu(Transaction::ID txn_id, table_id_t table_id, Outcome outcome,
-                                       uint64_t commit_scn, const std::shared_ptr<Imcs::Imcu> &imcu) {
+bool SourceTxnTracker::finalize_imcu(Transaction::ID txn_id, table_id_t table_id, Outcome outcome, uint64_t commit_scn,
+                                     const std::shared_ptr<Imcs::Imcu> &imcu) {
   if (!imcu) return true;
   DBUG_EXECUTE_IF("rapid_finalize_imcu_failure", {
     sql_print_error("Rapid transaction callback failed; affected loaded tables require reload");
@@ -959,8 +960,8 @@ bool TransactionManager::finalize_imcu(Transaction::ID txn_id, table_id_t table_
   return true;
 }
 
-bool TransactionManager::on_imcu_applied(Transaction::ID txn_id, table_id_t table_id,
-                                         const std::shared_ptr<Imcs::Imcu> &imcu) {
+bool SourceTxnTracker::on_imcu_applied(Transaction::ID txn_id, table_id_t table_id,
+                                       const std::shared_ptr<Imcs::Imcu> &imcu) {
   Outcome outcome{Outcome::ACTIVE};
   uint64_t commit_scn{0};
   bool recorded{true};
@@ -987,8 +988,8 @@ bool TransactionManager::on_imcu_applied(Transaction::ID txn_id, table_id_t tabl
   return false;
 }
 
-void TransactionManager::finalize_table(Transaction::ID txn_id, table_id_t table_id, Outcome outcome,
-                                        uint64_t commit_scn) {
+void SourceTxnTracker::finalize_table(Transaction::ID txn_id, table_id_t table_id, Outcome outcome,
+                                      uint64_t commit_scn) {
   // Keep the logical table (and its partition owners) alive across unload.
   auto rpd_table = Imcs::Imcs::instance()->get_rpd_table_shared(table_id);
   if (!rpd_table) return;
@@ -997,7 +998,7 @@ void TransactionManager::finalize_table(Transaction::ID txn_id, table_id_t table
     sql_print_error("Rapid transaction callback failed; affected loaded tables require reload");
     return;
   });
-  TransactionImcuParticipants<Imcs::Imcu>::Set imcus;
+  TableParticipantSet<Imcs::Imcu>::Set imcus;
   {
     std::lock_guard<std::mutex> lock(m_mutex);
     auto txn = m_transactions.find(txn_id);
@@ -1051,7 +1052,7 @@ void TransactionManager::finalize_table(Transaction::ID txn_id, table_id_t table
   if (!finalized) QuarantinePropagationTable(table_id);
 }
 
-void TransactionManager::erase_if_complete_locked(Transaction::ID txn_id) {
+void SourceTxnTracker::erase_if_complete_locked(Transaction::ID txn_id) {
   auto it = m_transactions.find(txn_id);
   if (it == m_transactions.end() || it->second.outcome == Outcome::ACTIVE) return;
 
@@ -1066,7 +1067,7 @@ void TransactionManager::erase_if_complete_locked(Transaction::ID txn_id) {
   m_transactions.erase(it);
 }
 
-TransactionManager::Outcome TransactionManager::get_outcome(Transaction::ID txn_id, uint64_t *commit_scn) {
+SourceTxnTracker::Outcome SourceTxnTracker::get_outcome(Transaction::ID txn_id, uint64_t *commit_scn) {
   if (commit_scn != nullptr) *commit_scn = 0;
   if (txn_id == 0) return Outcome::ACTIVE;
 
@@ -1077,7 +1078,7 @@ TransactionManager::Outcome TransactionManager::get_outcome(Transaction::ID txn_
   return it->second.outcome;
 }
 
-void TransactionManager::on_change_applied(Transaction::ID txn_id, table_id_t table_id) {
+void SourceTxnTracker::on_change_applied(Transaction::ID txn_id, table_id_t table_id) {
   if (txn_id == 0 || table_id == 0) return;
   uint64_t commit_scn{0};
   auto outcome = get_outcome(txn_id, &commit_scn);
@@ -1100,7 +1101,7 @@ void TransactionManager::on_change_applied(Transaction::ID txn_id, table_id_t ta
   erase_if_complete_locked(txn_id);
 }
 
-void TransactionManager::publish_commit(Transaction::ID txn_id, uint64_t commit_scn) {
+void SourceTxnTracker::publish_commit(Transaction::ID txn_id, uint64_t commit_scn) {
   if (txn_id == 0 || commit_scn == 0) return;
   DBUG_EXECUTE_IF("rapid_transaction_publish_bad_alloc", {
     quarantine_failed_transaction(current_thd);
@@ -1127,7 +1128,7 @@ void TransactionManager::publish_commit(Transaction::ID txn_id, uint64_t commit_
   // an event for every commit.
 }
 
-void TransactionManager::finalize_committed() {
+void SourceTxnTracker::finalize_committed() {
   DBUG_EXECUTE_IF("rapid_finalize_commits_stall", { return; });
   if (!m_commits_pending.exchange(false, std::memory_order_acq_rel)) return;
   struct Work {
@@ -1171,7 +1172,7 @@ void TransactionManager::finalize_committed() {
   }
 }
 
-void TransactionManager::publish_rollback(Transaction::ID txn_id) {
+void SourceTxnTracker::publish_rollback(Transaction::ID txn_id) {
   if (txn_id == 0) return;
 
   DBUG_EXECUTE_IF("rapid_transaction_rollback_bad_alloc", {
@@ -1202,7 +1203,7 @@ void TransactionManager::publish_rollback(Transaction::ID txn_id) {
   erase_if_complete_locked(txn_id);
 }
 
-void TransactionManager::forget_table(table_id_t table_id) {
+void SourceTxnTracker::forget_table(table_id_t table_id) {
   if (table_id == 0) return;
 
   std::lock_guard<std::mutex> lock(m_mutex);
@@ -1224,7 +1225,7 @@ void TransactionManager::forget_table(table_id_t table_id) {
   }
 }
 
-void TransactionManager::clear() {
+void SourceTxnTracker::clear() {
   std::lock_guard<std::mutex> lock(m_mutex);
   m_participants.clear();
   m_transactions.clear();
@@ -1233,9 +1234,9 @@ void TransactionManager::clear() {
   m_commits_pending.store(false, std::memory_order_release);
 }
 
-void TransactionManager::start() { ensure_subscribed(); }
+void SourceTxnTracker::start() { ensure_subscribed(); }
 
-void TransactionManager::shutdown() {
+void SourceTxnTracker::shutdown() {
   {
     std::lock_guard<std::mutex> lock(m_subscription_mutex);
     if (m_subscribed.exchange(false, std::memory_order_acq_rel)) {
@@ -1256,15 +1257,15 @@ void rapid_after_commit(void *arg) {
   // Keep this implementation engine-local: certify an outcome only when the
   // callback's current THD matches that identity. An unidentifiable callback
   // leaves the durable outcome unresolved, requiring primary reload.
-  THD *thd = current_thd;
-  if (!thd || thd->thread_id() != param->thread_id || thd->lex->sql_command == SQLCOM_XA_PREPARE) return;
   if (configured_change_propagation_mode.load() == CopyInfoMode::COMMITTED_BINLOG) {
     CommittedBinlog::publish_commit(param->log_file, static_cast<uint64_t>(param->log_pos));
     return;
   }
+  THD *thd = current_thd;
+  if (!thd || thd->thread_id() != param->thread_id || thd->lex->sql_command == SQLCOM_XA_PREPARE) return;
   auto *trx = thd ? ShannonBase::Transaction::find_trx(thd) : nullptr;
   if (trx != nullptr) {
-    TransactionManager::instance().on_transaction_commit(
+    SourceTxnTracker::instance().on_transaction_commit(
         thd,
         Recovery::BinlogPosition{param->log_file ? param->log_file : "", static_cast<uint64_t>(param->log_pos), {}});
   }
@@ -1278,7 +1279,7 @@ void rapid_before_rollback(void *arg) {
   auto *trx = thd ? ShannonBase::Transaction::find_trx(thd) : nullptr;
   if (!thd || thd->thread_id() != param->thread_id) return;
   if (trx != nullptr) {
-    TransactionManager::instance().record_source_abort(thd);
+    SourceTxnTracker::instance().record_source_abort(thd);
     trx->rollback();
   }
 }

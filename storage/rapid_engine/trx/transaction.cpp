@@ -374,6 +374,16 @@ int Transaction::rollback_stmt() {
   return SHANNON_SUCCESS;
 }
 
+int Transaction::rollback_to_savepoint(void *const savepoint) {
+  if (m_thd != nullptr) {
+    notify_transaction_subscribers([this](TransactionSubscriber &subscriber) {
+      subscriber.on_savepoint_rollback(m_thd, "ROLLBACK TO SAVEPOINT after DML was already propagated");
+    });
+  }
+  (void)savepoint;
+  return SHANNON_SUCCESS;
+}
+
 void Transaction::reconcile_on_external_abort() {
   if (m_coord_state == CoordState::ACTIVE) {
     if (!TransactionCoordinator::instance().rollback_transaction(this)) {
@@ -647,6 +657,23 @@ void TransactionCoordinator::register_imcu_modification(Transaction::ID txn_id,
   if (std::find(modified.begin(), modified.end(), imcu) == modified.end()) modified.push_back(std::move(imcu));
 }
 
+std::shared_ptr<void> TransactionCoordinator::pin_scn(uint64_t scn) {
+  auto pin = std::shared_ptr<uint64_t>(new uint64_t(scn), [this](uint64_t *value) {
+    {
+      std::unique_lock lock(m_txns_mutex);
+      m_scn_pins.erase(value);
+      update_min_active_scn();
+    }
+    delete value;
+  });
+  {
+    std::unique_lock lock(m_txns_mutex);
+    m_scn_pins.emplace(pin.get(), scn);
+    update_min_active_scn();
+  }
+  return pin;
+}
+
 void TransactionCoordinator::register_snapshot(Transaction *trx, uint64_t snapshot_scn) {
   if (trx == nullptr) return;
   std::unique_lock lock(m_txns_mutex);
@@ -690,20 +717,24 @@ void TransactionCoordinator::update_min_active_scn() {
   // Rapid publication SCN and InnoDB ReadView are deliberately NOT treated as
   // the same clock. Therefore an arbitrary Rapid snapshot_scn is not a safe
   // purge boundary for an active primary ReadView. Until we plumb InnoDB's
-  // native purge low-limit into Rapid, retain all MVCC history while any SQL
-  // ReadView is active.
-  if (!m_active_snapshots.empty()) {
+  // native purge low-limit into Rapid, CAPTURE retains all MVCC history while
+  // any SQL ReadView is active. COMMITTED_BINLOG uses exact published SCNs.
+  const bool committed =
+      Populate::configured_change_propagation_mode.load() == Populate::CopyInfoMode::COMMITTED_BINLOG;
+  if (!committed && !m_active_snapshots.empty()) {
     Transaction::VersionManager::instance().set_min_active_scn(0);
     return;
   }
 
-  uint64_t min_scn = UINT64_MAX;
+  uint64_t min_scn = get_current_scn();
+  for (const auto &[owner, scn] : m_scn_pins) min_scn = std::min(min_scn, scn);
+  if (committed)
+    for (const auto &[trx, scn] : m_active_snapshots) min_scn = std::min(min_scn, scn);
   for (const auto &[tid, info] : m_active_txns) {
     (void)tid;
     min_scn = std::min(min_scn, info.start_scn);
   }
 
-  if (min_scn == UINT64_MAX) min_scn = get_current_scn();
   Transaction::VersionManager::instance().set_min_active_scn(min_scn);
 }
 
@@ -742,7 +773,9 @@ TransactionCoordinator::Statistics TransactionCoordinator::get_statistics() cons
 uint64_t TransactionCoordinator::get_gc_safe_scn() const {
   // Include primary-only RR snapshots that have not entered Rapid yet. A view
   // opened after this check cannot need already-finalized source history.
-  if (trx_sys && trx_sys->mvcc && trx_sys->mvcc->size() != 0) return 0;
+  if (Populate::configured_change_propagation_mode.load() != Populate::CopyInfoMode::COMMITTED_BINLOG && trx_sys &&
+      trx_sys->mvcc && trx_sys->mvcc->size() != 0)
+    return 0;
   return get_min_active_scn();
 }
 
@@ -1038,7 +1071,7 @@ size_t TransactionJournal::purge(uint64_t min_active_scn, size_t limit) {
           continue;
         }
 
-        if (committed) found_floor = true;
+        if (committed && current->scn <= min_active_scn) found_floor = true;
         prev_kept = current;
         current = current->prev;
       }
@@ -1050,7 +1083,8 @@ size_t TransactionJournal::purge(uint64_t min_active_scn, size_t limit) {
 
       if (head == nullptr ||
           (purged < limit && head->prev == nullptr && head->status == COMMITTED && head->scn < min_active_scn &&
-           static_cast<ShannonBase::OPER_TYPE>(head->operation) == ShannonBase::OPER_TYPE::OPER_INSERT)) {
+           (static_cast<ShannonBase::OPER_TYPE>(head->operation) == ShannonBase::OPER_TYPE::OPER_INSERT ||
+            static_cast<ShannonBase::OPER_TYPE>(head->operation) == ShannonBase::OPER_TYPE::OPER_DELETE))) {
         if (head) {
           ++purged;
           m_entry_count.fetch_sub(1);

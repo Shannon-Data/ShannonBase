@@ -28,6 +28,7 @@
 */
 #ifndef __SHANNONBASE_MPMC_RINGBUFFER_H__
 #define __SHANNONBASE_MPMC_RINGBUFFER_H__
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cstddef>
@@ -54,6 +55,7 @@ class RowImageBufferPool {
     thread_local auto pool = std::make_shared<RowImageBufferPool>();
     size_t capacity = 256;
     while (capacity < bytes) capacity *= 2;
+    // Reused bytes are not zeroed: callers must initialize and track the valid length.
     auto buffer = pool->take(capacity);
     if (!buffer) buffer = std::make_unique<Buffer>(capacity);
     return std::shared_ptr<Buffer>(buffer.release(), [owner = pool, capacity](unsigned char *data) {
@@ -97,7 +99,7 @@ class RowImageBufferPool {
 };
 
 /**
- * MPMC (multi-producer, multi-consumer) lock-free ring buffer.
+ * Multi-producer ring buffer with an exclusive consumer interface.
  *
  * Concurrency model:
  *   - try_put()  : any number of producers may call concurrently.
@@ -122,9 +124,27 @@ class Ringbuffer {
                 "T must be move constructible and move assignable");
 
  private:
-  using Storage = typename std::aligned_storage<sizeof(T), alignof(T)>::type;
-  T *slot_ptr(size_t pos) noexcept { return reinterpret_cast<T *>(&buffer_[pos]); }
-  const T *slot_ptr(size_t pos) const noexcept { return reinterpret_cast<const T *>(&buffer_[pos]); }
+  struct alignas(T) Storage {
+    std::byte bytes[sizeof(T)];
+  };
+  static constexpr size_t chunk_size = BufferSize < 256 ? BufferSize : 256;
+  static constexpr size_t chunk_count = BufferSize / chunk_size;
+  bool ensure_chunk(size_t pos) noexcept {
+    auto &slot = chunks_[pos / chunk_size];
+    if (slot.load(std::memory_order_acquire)) return true;
+    auto *chunk = new (std::nothrow) Storage[chunk_size];
+    if (!chunk) return false;
+    Storage *expected = nullptr;
+    if (!slot.compare_exchange_strong(expected, chunk, std::memory_order_release, std::memory_order_acquire))
+      delete[] chunk;
+    return true;
+  }
+  T *slot_ptr(size_t pos) noexcept {
+    return reinterpret_cast<T *>(&chunks_[pos / chunk_size].load(std::memory_order_acquire)[pos % chunk_size]);
+  }
+  const T *slot_ptr(size_t pos) const noexcept {
+    return reinterpret_cast<const T *>(&chunks_[pos / chunk_size].load(std::memory_order_acquire)[pos % chunk_size]);
+  }
 
  public:
   constexpr static size_t capacity = BufferSize;
@@ -134,7 +154,10 @@ class Ringbuffer {
     }
   }
 
-  ~Ringbuffer() noexcept { clear(); }
+  ~Ringbuffer() noexcept {
+    clear();
+    for (auto &chunk : chunks_) delete[] chunk.load(std::memory_order_relaxed);
+  }
 
   Ringbuffer(const Ringbuffer &) = delete;
   Ringbuffer &operator=(const Ringbuffer &) = delete;
@@ -200,16 +223,19 @@ class Ringbuffer {
     tail_.store(tail + n, std::memory_order_release);
   }
 
+  // Occupancy includes reserved, not-yet-published slots. Use try_pop()/peek()
+  // to check readiness; a nonempty ring does not guarantee peek() is non-null.
   bool empty() const noexcept { return head_.load(std::memory_order_acquire) == tail_.load(std::memory_order_acquire); }
   bool full() const noexcept {
     uint64_t head = head_.load(std::memory_order_acquire);
     uint64_t tail = tail_.load(std::memory_order_acquire);
     return (head - tail) >= BufferSize;
   }
+  // Advisory only while producers/consumer are active.
   size_t size() const noexcept {
     uint64_t h = head_.load(std::memory_order_acquire);
     uint64_t t = tail_.load(std::memory_order_acquire);
-    return static_cast<size_t>(h - t);
+    return h >= t ? std::min<size_t>(h - t, BufferSize) : 0;
   }
   size_t available() const noexcept { return capacity - size(); }
   void clear() noexcept {
@@ -236,6 +262,7 @@ class Ringbuffer {
       uint64_t seq = seqs_[pos].load(std::memory_order_acquire);
       int64_t diff = static_cast<int64_t>(seq - head);
       if (diff == 0) {
+        if (!ensure_chunk(pos)) return false;
         if (head_.compare_exchange_weak(head, head + 1, std::memory_order_relaxed)) {
           new (slot_ptr(pos)) T(std::forward<U>(item));
           seqs_[pos].store(head + 1, std::memory_order_release);
@@ -252,7 +279,9 @@ class Ringbuffer {
   alignas(CacheLine) std::atomic<uint64_t> head_{0};
   alignas(CacheLine) std::atomic<uint64_t> tail_{0};
   alignas(CacheLine) std::atomic<uint64_t> seqs_[BufferSize]{};
-  alignas(CacheLine) Storage buffer_[BufferSize];
+  // Allocate row storage only as occupancy grows; cold tables retain only
+  // sequence metadata rather than reserving all 256K heavyweight records.
+  alignas(CacheLine) std::atomic<Storage *> chunks_[chunk_count]{};
 };
 }  // namespace Populate
 }  // namespace ShannonBase

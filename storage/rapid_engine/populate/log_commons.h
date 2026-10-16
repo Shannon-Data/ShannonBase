@@ -125,6 +125,9 @@
 #include "storage/rapid_engine/include/rapid_table_info.h"  // stale_reason_t
 #include "storage/rapid_engine/populate/log_buffer.h"
 
+class THD;
+struct TABLE;
+
 namespace ShannonBase {
 namespace Populate {
 
@@ -165,13 +168,14 @@ typedef struct SHANNON_ALIGNAS change_record_buff_t {
   Source m_source;                                                    // data source
   CopyInfoMode m_copy_info_mode{CopyInfoMode::NOTIFICATION};
   size_t m_size;
+  size_t m_accounted_bytes{0};
   enum class OperType : uint8 { UNSET = 0, INSERT, DELETE, UPDATE } m_oper{OperType::UNSET};  // oper type
   table_id_t m_table_id{0};
 
   // COPY_INFO transaction metadata. Row notifications are queued immediately
   // with the real primary InnoDB creator id and commit_scn == 0, which means
   // ACTIVE in Rapid MVCC. Primary COMMIT/ROLLBACK publishes only the outcome;
-  // TransactionManager later finalizes the version to a Rapid commit
+  // SourceTxnTracker later finalizes the version to a Rapid commit
   // SCN or aborts it. SQL visibility always uses the primary InnoDB ReadView.
   uint64_t m_source_trx_id{0};
   uint64_t m_notification_sequence{0};  // volatile notification identity
@@ -212,6 +216,17 @@ typedef struct SHANNON_ALIGNAS change_record_buff_t {
   change_record_buff_t(change_record_buff_t &&other) noexcept = default;
   change_record_buff_t &operator=(change_record_buff_t &&other) noexcept = default;
   ~change_record_buff_t() = default;
+
+  size_t payload_bytes() const noexcept {
+    if (m_accounted_bytes) return m_accounted_bytes;
+    size_t bytes = 2 * m_size;
+    for (const auto *image : {&m_offpage_data0, &m_offpage_data1})
+      for (const auto &entry : *image) {
+        if (entry.second.first > std::numeric_limits<size_t>::max() - bytes) return std::numeric_limits<size_t>::max();
+        bytes += entry.second.first;
+      }
+    return bytes;
+  }
 
   inline bool is_committed_binlog() const noexcept {
     return m_source == Source::COPY_INFO && m_copy_info_mode == CopyInfoMode::COMMITTED_BINLOG;
@@ -334,6 +349,14 @@ class Populator {
    * To launch log pop main thread.
    */
   static void start();
+
+  struct LoadState;
+
+  // Call before copying rows, then start(state) after publishing the loaded table.
+  // Keep propagation_mode_mutex shared and the source MDL until start returns;
+  // the state borrows THD/TABLE and must not outlive the load operation.
+  static const char *prepare_load(THD *thd, TABLE *table, LoadState &state, bool partial_load = false);
+  static const char *start(const LoadState &state);
 
   /**
    * To stop log pop main thread.

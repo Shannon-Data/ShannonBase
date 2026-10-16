@@ -68,9 +68,7 @@
 #include "storage/rapid_engine/include/rapid_config.h"
 #include "storage/rapid_engine/include/rapid_const.h"
 #include "storage/rapid_engine/include/rapid_context.h"
-#include "storage/rapid_engine/populate/log_binlog_parser.h"
 #include "storage/rapid_engine/populate/log_populate.h"
-#include "storage/rapid_engine/recovery/binlog_recovery.h"
 #include "storage/rapid_engine/recovery/recovery.h"
 #include "storage/rapid_engine/utils/memory_pool.h"
 #include "storage/rapid_engine/utils/utils.h"
@@ -1103,8 +1101,6 @@ int SelfLoadManager::perform_self_load(const std::string &schema, const std::str
   // Memory admission can evict tables through perform_self_unload(); take the
   // mode guard afterwards so that path does not recursively lock it.
   std::shared_lock mode_lock(Populate::propagation_mode_mutex);
-  if (!Populate::propagation_backend_available(Populate::configured_change_propagation_mode.load()))
-    return HA_ERR_GENERIC;
 
   Rapid_load_context context;
   context.m_schema_name = schema;
@@ -1125,19 +1121,10 @@ int SelfLoadManager::perform_self_load(const std::string &schema, const std::str
   TABLE *source_table = Utils::Util::open_table_by_name(current_thd, schema, table, TL_READ_WITH_SHARED_LOCKS);
   if (!source_table) return HA_ERR_GENERIC;
 
-  const bool committed_binlog =
-      Populate::configured_change_propagation_mode.load() == Populate::CopyInfoMode::COMMITTED_BINLOG;
-  Recovery::BinlogPosition baseline;
-  if (committed_binlog) {
-    MDL_request fence;
-    MDL_REQUEST_INIT(&fence, MDL_key::TABLE, schema.c_str(), table.c_str(), MDL_SHARED_NO_WRITE, MDL_TRANSACTION);
-    if (Populate::CommittedBinlog::check_configuration(current_thd) ||
-        !Populate::BinlogParser::supports(source_table) ||
-        current_thd->mdl_context.acquire_lock(&fence, current_thd->variables.lock_wait_timeout)) {
-      Utils::Util::close_table(current_thd, source_table);
-      return HA_ERR_GENERIC;
-    }
-    baseline = Recovery::BinlogRecovery::current_position();
+  Populate::Populator::LoadState propagation;
+  if (Populate::Populator::prepare_load(current_thd, source_table, propagation)) {
+    Utils::Util::close_table(current_thd, source_table);
+    return HA_ERR_GENERIC;
   }
   context.m_table = source_table;
   context.m_table_id = source_table->file->get_table_id();
@@ -1164,14 +1151,12 @@ int SelfLoadManager::perform_self_load(const std::string &schema, const std::str
                  ? Imcs::Imcs::instance()->load_parttable(&context, source_table)
                  : Imcs::Imcs::instance()->load_table(&context, source_table);
   }
-  if (result == SHANNON_SUCCESS && committed_binlog) {
+  if (result == SHANNON_SUCCESS) {
     auto share = std::make_shared<RapidShare>(*source_table);
     share->m_tableid = context.m_table_id;
     share->is_partitioned = source_table->part_info != nullptr;
     shannon_loaded_tables->add(schema.c_str(), table.c_str(), share);
-    Populate::Populator::start();
-    if (!Populate::CommittedBinlog::attach(current_thd, source_table, baseline)) {
-      Populate::QuarantinePropagationTable(context.m_table_id);
+    if (Populate::Populator::start(propagation)) {
       result = HA_ERR_GENERIC;
     }
   }
@@ -1239,7 +1224,6 @@ int SelfLoadManager::perform_self_unload(const std::string &schema, const std::s
   if (injected_unload_failure) return HA_ERR_GENERIC;
 #endif
 
-  Populate::CommittedBinlog::detach(context.m_table_id);
   ShannonBase::Populate::Populator::unload(context.m_table_id);
 
   // The fourth parameter is error_if_not_loaded, not is_partition. Passing the

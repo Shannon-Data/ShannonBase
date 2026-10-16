@@ -353,12 +353,20 @@ int ha_rapid::records(ha_rows *num_rows) {
     scan_context.m_trx = trx;
     scan_context.m_extra_info.m_trxid = trx->get_id();
     scan_context.m_extra_info.m_scn = ShannonBase::Populate::CommittedBinlog::query_scn(thd);
+    if (thd->is_error()) return false;
 
     ::ReadView *read_view = trx->acquire_snapshot();
     return !(trx->isolation_level() > ShannonBase::Transaction::ISOLATION_LEVEL::READ_UNCOMMITTED &&
              read_view == nullptr);
   };
   if (rpd_tb == nullptr || !prepare_count_scan()) return HA_ERR_GENERIC;
+  auto *execution = dynamic_cast<Rapid_execution_context *>(current_thd->lex->secondary_engine_execution_context());
+  if (execution && execution->m_committed_binlog_view) {
+    if (Populate::IsPropagationBroken(share->m_tableid))
+      return secondary_error(RapidErrMsg[BROKEN_INITIAL], HA_ERR_GENERIC);
+    *num_rows = static_cast<ha_rows>(rpd_tb->count_visible_rows(&scan_context));
+    return ShannonBase::SHANNON_SUCCESS;
+  }
 
   // nullptr when the barrier state permits proceeding. GONE means the buffer owning this
   // table's changes was detached, so there is no live watermark a read could wait for.
@@ -461,20 +469,10 @@ int ha_rapid::load_table(const TABLE &table_arg, bool *skip_metadata_update [[ma
   std::shared_lock mode_lock(ShannonBase::Populate::propagation_mode_mutex);
   DEBUG_SYNC(m_thd, "rapid_change_propagation_load_admitted");
 
-  const auto propagation_mode = ShannonBase::Populate::configured_change_propagation_mode.load();
-  if (!ShannonBase::Populate::propagation_backend_available(propagation_mode))
-    return secondary_error("COMMITTED_BINLOG change propagation backend is not implemented", HA_ERR_GENERIC);
   if (auto err = check_loadable(table_arg)) return secondary_error(*err, HA_ERR_KEY_NOT_FOUND);
-
-  ShannonBase::Recovery::BinlogPosition binlog_baseline;
-  if (propagation_mode == Populate::CopyInfoMode::COMMITTED_BINLOG) {
-    if (const char *error = Populate::CommittedBinlog::check_configuration(m_thd))
-      return secondary_error(error, HA_ERR_GENERIC);
-    if (!Populate::BinlogParser::supports(table))
-      return secondary_error("COMMITTED_BINLOG requires a primary key and no foreign keys or generated columns",
-                             HA_ERR_GENERIC);
-    binlog_baseline = Recovery::BinlogRecovery::current_position();
-  }
+  Populate::Populator::LoadState propagation;
+  if (const char *error = Populate::Populator::prepare_load(m_thd, table, propagation))
+    return secondary_error(error, HA_ERR_GENERIC);
 
   m_thd->set_sent_row_count(0);
 
@@ -515,12 +513,7 @@ int ha_rapid::load_table(const TABLE &table_arg, bool *skip_metadata_update [[ma
     return secondary_error("Failed to load table", HA_ERR_KEY_NOT_FOUND);
 
   // Start the population thread now that a table is loaded.
-  ShannonBase::Populate::Populator::start();
-  if (propagation_mode == Populate::CopyInfoMode::COMMITTED_BINLOG &&
-      !Populate::CommittedBinlog::attach(m_thd, table, binlog_baseline)) {
-    Populate::QuarantinePropagationTable(context.m_table_id);
-    return secondary_error("cannot start COMMITTED_BINLOG propagation; unload and retry", HA_ERR_GENERIC);
-  }
+  if (const char *error = Populate::Populator::start(propagation)) return secondary_error(error, HA_ERR_GENERIC);
   return ShannonBase::SHANNON_SUCCESS;
 }
 
@@ -535,7 +528,6 @@ int ha_rapid::unload_table(const char *db_name, const char *table_name, bool err
   const auto table_id = share ? share->m_tableid : 0;
 
   // Stop change propagation for this table before tearing down its data.
-  ShannonBase::Populate::CommittedBinlog::detach(table_id);
   ShannonBase::Populate::Populator::unload(table_id);
 
   // The unload path works from the table id and names only and never reads context.m_table,
@@ -858,12 +850,8 @@ static int rapid_rollback(handlerton *hton,    /*!< in: handlerton */
                                               transaction false - rollback the
                                               current statement only */
   if (thd->lex->sql_command == SQLCOM_ROLLBACK_TO_SAVEPOINT) {
-    // MySQL also invokes full rollback for engines first registered AFTER the
-    // savepoint. The source transaction is still alive: do not publish ABORTED
-    // for its writer id, which would discard subsequent valid notifications.
-    ShannonBase::Populate::TransactionManager::instance().quarantine_partial_rollback(
-        thd, "ROLLBACK TO SAVEPOINT for a newly registered Rapid participant");
-    return ShannonBase::SHANNON_SUCCESS;
+    auto *trx = ShannonBase::Transaction::find_trx(thd);
+    return trx ? trx->rollback_to_savepoint(nullptr) : ShannonBase::SHANNON_SUCCESS;
   }
   const bool final_rollback = rollback_trx || rpd_thd_trx_is_auto_commit(thd);
 
@@ -927,8 +915,6 @@ static int rapid_start_trx_and_assign_read_view(handlerton *hton, /* in: Rapid h
 static int rapid_savepoint(handlerton *const, THD *const, void *const) { return 0; }
 
 static int rapid_rollback_to_savepoint(handlerton *const hton, THD *const thd, void *const savepoint) {
-  ShannonBase::Populate::TransactionManager::instance().quarantine_partial_rollback(
-      thd, "ROLLBACK TO SAVEPOINT after DML was already propagated");
   auto *trx = ShannonBase::Transaction::find_trx(thd);
   return trx ? trx->rollback_to_savepoint(savepoint) : ShannonBase::SHANNON_SUCCESS;
 }
@@ -1473,13 +1459,10 @@ bool BuildRowChange(TABLE *table, ShannonBase::table_id_t table_id,
   return true;
 }
 
-void EnqueueRowChange(THD *thd, TABLE *table, ShannonBase::Populate::change_record_buff_t::OperType oper,
-                      const uchar *pre, const uchar *post, const char *partition_role) {
-  auto loaded = ShannonBase::Imcs::Imcs::instance()->get_rpd_table_by_name(table->s->db.str, table->s->table_name.str);
-  if (!loaded) {
-    ShannonBase::Recovery::note_unregistered_source_change(table->s->db.str, table->s->table_name.str);
-    return;
-  }
+void EnqueueRowChange(THD *thd, TABLE *table, const std::shared_ptr<ShannonBase::Imcs::RpdTable> &loaded,
+                      ShannonBase::Populate::change_record_buff_t::OperType oper, const uchar *pre, const uchar *post,
+                      const char *partition_role) {
+  if (!loaded) return;
 
   std::optional<ShannonBase::Populate::change_record_buff_t> record;
   if (!BuildRowChange(table, loaded->meta().table_id, oper, pre, post, partition_role, record)) return;
@@ -1516,11 +1499,15 @@ void NotifyAfterInsert(THD *thd, void *args) {
   if (!params->arg1 || !params->arg2 || !params->arg3) return;
 
   TABLE *table = params->arg1;
+  auto loaded = ShannonBase::Imcs::Imcs::instance()->get_rpd_table_by_name(table->s->db.str, table->s->table_name.str);
+  if (!loaded) ShannonBase::Recovery::note_unregistered_source_change(table->s->db.str, table->s->table_name.str);
+
   if (ShannonBase::Populate::configured_change_propagation_mode.load() ==
       ShannonBase::Populate::CopyInfoMode::COMMITTED_BINLOG) {
-    ShannonBase::Populate::CommittedBinlog::notify_dml(thd, table);
+    if (loaded) ShannonBase::Populate::CommittedBinlog::notify_dml(thd, table);
     return;
   }
+
   if (thd->lex->is_ignore() || params->arg2->get_duplicate_handling() != DUP_ERROR) {
     // This server hook reports successful write_record(), not a successful
     // physical INSERT. IGNORE can report a rejected row; REPLACE can remove
@@ -1530,12 +1517,11 @@ void NotifyAfterInsert(THD *thd, void *args) {
     // Keep this guard engine-local until a complete row outcome is available.
     if (params->arg2->get_duplicate_handling() == DUP_REPLACE) QuarantineCascadeChildren(table, true);
     if (params->arg2->get_duplicate_handling() == DUP_UPDATE) QuarantineCascadeChildren(table, false);
-    auto loaded =
-        ShannonBase::Imcs::Imcs::instance()->get_rpd_table_by_name(table->s->db.str, table->s->table_name.str);
     if (loaded) ShannonBase::Populate::QuarantinePropagationTable(loaded->meta().table_id);
     return;
   }
-  EnqueueRowChange(thd, table, RowChangeOper::INSERT, table->record[0], nullptr, "target partition of an INSERT");
+  EnqueueRowChange(thd, table, loaded, RowChangeOper::INSERT, table->record[0], nullptr,
+                   "target partition of an INSERT");
 }
 
 // old_row = table->record[1], new_row = table->record[0]
@@ -1552,9 +1538,11 @@ void NotifyAfterUpdate(THD *thd, void *args) {
   const uchar *old_row = params->arg2;
   const uchar *new_row = params->arg3;
   if (!table || !old_row || !new_row) return;
+  auto loaded = ShannonBase::Imcs::Imcs::instance()->get_rpd_table_by_name(table->s->db.str, table->s->table_name.str);
+  if (!loaded) ShannonBase::Recovery::note_unregistered_source_change(table->s->db.str, table->s->table_name.str);
   if (ShannonBase::Populate::configured_change_propagation_mode.load() ==
       ShannonBase::Populate::CopyInfoMode::COMMITTED_BINLOG) {
-    ShannonBase::Populate::CommittedBinlog::notify_dml(thd, table);
+    if (loaded) ShannonBase::Populate::CommittedBinlog::notify_dml(thd, table);
     return;
   }
 
@@ -1564,7 +1552,7 @@ void NotifyAfterUpdate(THD *thd, void *args) {
   if (table->s->foreign_key_parents != 0 && ParentUniqueKeyChanged(table, old_row, new_row))
     QuarantineCascadeChildren(table, /*for_delete=*/false);
 
-  EnqueueRowChange(thd, table, RowChangeOper::UPDATE, old_row, new_row, "target partition of an UPDATE");
+  EnqueueRowChange(thd, table, loaded, RowChangeOper::UPDATE, old_row, new_row, "target partition of an UPDATE");
 }
 
 void NotifyAfterDelete(THD *thd, void *args) {
@@ -1578,9 +1566,11 @@ void NotifyAfterDelete(THD *thd, void *args) {
   TABLE *table = params->arg1;
   const uchar *old_row = params->old_rec;
   if (!table || !old_row) return;
+  auto loaded = ShannonBase::Imcs::Imcs::instance()->get_rpd_table_by_name(table->s->db.str, table->s->table_name.str);
+  if (!loaded) ShannonBase::Recovery::note_unregistered_source_change(table->s->db.str, table->s->table_name.str);
   if (ShannonBase::Populate::configured_change_propagation_mode.load() ==
       ShannonBase::Populate::CopyInfoMode::COMMITTED_BINLOG) {
-    ShannonBase::Populate::CommittedBinlog::notify_dml(thd, table);
+    if (loaded) ShannonBase::Populate::CommittedBinlog::notify_dml(thd, table);
     return;
   }
 
@@ -1588,7 +1578,7 @@ void NotifyAfterDelete(THD *thd, void *args) {
   // in InnoDB while the child it cascades into is loaded in Rapid.
   QuarantineCascadeChildren(table, /*for_delete=*/true);
 
-  EnqueueRowChange(thd, table, RowChangeOper::DELETE, old_row, nullptr, "source partition of a DELETE");
+  EnqueueRowChange(thd, table, loaded, RowChangeOper::DELETE, old_row, nullptr, "source partition of a DELETE");
 }
 
 void NotifyAfterSelect(THD *thd, SelectExecutedIn executed_in) {
@@ -1696,6 +1686,7 @@ static bool PrepareSecondaryEngine(THD *thd, LEX *lex) {
   auto context = new (thd->mem_root) ShannonBase::Rapid_execution_context;
   if (context == nullptr) return true;
   lex->set_secondary_engine_execution_context(context);
+  if (RapidPrepareEstimateQueryCosts(thd, lex)) return true;
   if (ShannonBase::Populate::configured_change_propagation_mode.load() ==
       ShannonBase::Populate::CopyInfoMode::COMMITTED_BINLOG) {
     if (const char *error =
@@ -1704,6 +1695,12 @@ static bool PrepareSecondaryEngine(THD *thd, LEX *lex) {
       return true;
     }
     context->m_committed_binlog_view = true;
+    DEBUG_SYNC(thd, "rapid_committed_view_pinned");
+    DBUG_EXECUTE_IF("rapid_committed_gc_before_scan", {
+      ShannonBase::Imcs::Imcs::instance()->for_each_table([](ShannonBase::Imcs::RpdTable *table) {
+        table->garbage_collect(ShannonBase::TransactionCoordinator::instance().get_gc_safe_scn());
+      });
+    });
   }
 
   if (const char *error = context->m_resource_scope.enter(thd, ShannonBase::ResMgmt::WorkClass::AP, false)) {
@@ -1717,7 +1714,7 @@ static bool PrepareSecondaryEngine(THD *thd, LEX *lex) {
                      ? OPTION_NO_CONST_TABLES | OPTION_NO_SUBQUERY_DURING_OPTIMIZATION
                      : OPTION_NO_SUBQUERY_DURING_OPTIMIZATION;
   lex->add_statement_options(options);
-  return RapidPrepareEstimateQueryCosts(thd, lex);
+  return false;
 }
 
 static bool RapidCachePrimaryInfoAtPrimaryTentativelyStep(THD *thd) {

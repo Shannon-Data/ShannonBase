@@ -1,0 +1,49 @@
+--source include/have_debug_sync.inc
+--source include/no_ps_protocol.inc
+SET use_secondary_engine=OFF;
+SET GLOBAL rapid_change_propagation_mode=COMMITTED_BINLOG;
+SET GLOBAL rapid_min_versions_for_purge=10;
+CREATE TABLE cb_gc(id INT PRIMARY KEY,v INT) SECONDARY_ENGINE=rapid;
+INSERT INTO cb_gc VALUES(1,10);
+ALTER TABLE cb_gc SECONDARY_LOAD;
+--connect (reader,localhost,root,,test)
+SET use_secondary_engine=FORCED;
+SET debug='+d,rapid_committed_gc_before_scan';
+SET DEBUG_SYNC='rapid_committed_view_pinned SIGNAL view_pinned WAIT_FOR resume_view';
+--send SELECT id,v FROM cb_gc ORDER BY id
+--connection default
+SET DEBUG_SYNC='now WAIT_FOR view_pinned';
+INSERT INTO cb_gc VALUES(2,20);
+--disable_query_log
+--let $updates=12
+while ($updates) {
+  UPDATE cb_gc SET v=v+1 WHERE id=1;
+  --dec $updates
+}
+--enable_query_log
+UPDATE cb_gc SET v=11 WHERE id=1;
+SET use_secondary_engine=FORCED;
+SELECT id,v FROM cb_gc ORDER BY id;
+SET DEBUG_SYNC='now SIGNAL resume_view';
+--connection reader
+--reap
+--disable_warnings
+SET optimizer_switch='hypergraph_optimizer=on';
+--enable_warnings
+SET DEBUG_SYNC='rapid_committed_view_pinned SIGNAL count_pinned WAIT_FOR resume_count';
+--send SELECT COUNT(*) FROM cb_gc
+--connection default
+SET DEBUG_SYNC='now WAIT_FOR count_pinned';
+INSERT INTO cb_gc VALUES(3,30);
+SELECT COUNT(*) FROM cb_gc;
+SET DEBUG_SYNC='now SIGNAL resume_count';
+--connection reader
+--reap
+SET debug='-d,rapid_committed_gc_before_scan';
+--disconnect reader
+--connection default
+SET use_secondary_engine=OFF;
+ALTER TABLE cb_gc SECONDARY_UNLOAD;
+DROP TABLE cb_gc;
+SET GLOBAL rapid_change_propagation_mode=CAPTURE;
+SET DEBUG_SYNC='RESET';

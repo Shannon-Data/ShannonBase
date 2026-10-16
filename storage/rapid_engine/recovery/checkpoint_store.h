@@ -36,6 +36,10 @@ namespace Recovery {
  * restore() stages complete generations locally; normal CRC/schema validation
  * still applies. Missing data/network errors return false and cause source reload.
  * invalidate() must fence all old generations durably, including remote copies.
+ * It must serialize with in-flight publish(): no publication started before the
+ * fence may subsequently make an invalidated generation visible. Implementations
+ * must persist a generation/epoch fence and reject stale publication atomically;
+ * deleting objects alone does not satisfy this contract.
  * Incremental implementations may share immutable objects between generations;
  * publish() success always represents a complete recoverable logical state.
  */

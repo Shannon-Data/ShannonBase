@@ -32,6 +32,7 @@
 #include <vector>
 #include "include/scope_guard.h"
 #include "sql/binlog.h"
+#include "sql/binlog/decompressing_event_object_istream.h"
 #include "sql/binlog_reader.h"
 #include "sql/field.h"
 #include "sql/log_event.h"
@@ -53,8 +54,7 @@ std::string basename(const std::string &name) { return std::filesystem::path(nam
 // Hash the immutable prefix, including FDE and all bytes up to the exact cut.
 // Reused filenames after RESET and truncated/replaced files cannot certify a
 // checkpoint merely by carrying the same server UUID and filename.
-bool prefix_digest(const char *path, uint64_t offset, std::string &digest) {
-  std::ifstream in(path, std::ios::binary);
+bool prefix_digest(std::istream &in, uint64_t offset, std::string &digest) {
   char magic[4];
   if (offset < 4 || !in.read(magic, 4) ||
       std::memcmp(magic,
@@ -88,6 +88,11 @@ bool prefix_digest(const char *path, uint64_t offset, std::string &digest) {
     digest += hex[hash[i] & 15];
   }
   return true;
+}
+
+bool prefix_digest(const char *path, uint64_t offset, std::string &digest) {
+  std::ifstream in(path, std::ios::binary);
+  return prefix_digest(in, offset, digest);
 }
 
 // The initial recovery lane accepts only an exact schema and FULL row images.
@@ -160,6 +165,10 @@ bool BinlogRecovery::certify(BinlogPosition &position) {
   return prefix_digest(info.log_file_name, position.offset, position.prefix_digest);
 }
 
+bool BinlogRecovery::certify_stream(std::istream &stream, BinlogPosition &position) {
+  return position.valid() && prefix_digest(stream, position.offset, position.prefix_digest);
+}
+
 bool BinlogRecovery::certify_file(const char *path, BinlogPosition &position) {
   return position.valid() && prefix_digest(path, position.offset, position.prefix_digest);
 }
@@ -167,65 +176,87 @@ bool BinlogRecovery::certify_file(const char *path, BinlogPosition &position) {
 bool BinlogRecovery::replay(THD *thd, TABLE *table, const BinlogPosition &start,
                             const std::function<bool(Record &)> &apply) {
   if (!thd || !supported(table) || !mysql_bin_log.is_open()) return false;
-  BinlogPosition verified = start;
-  if (!certify(verified) || verified.prefix_digest != start.prefix_digest) return false;
+  if (!start.valid() || start.prefix_digest.empty()) return false;
+  // Recovery holds source MDL_SHARED_NO_WRITE through replay and attachment.
+  // The target table therefore cannot gain rows between these physical cuts;
+  // unrelated commits may advance the log. A live-consumer watermark can be
+  // absent at startup or lag behind the checkpoint, so it is not a safe cut here.
   LOG_INFO current, info;
   if (mysql_bin_log.get_current_log(&current) || current.encrypted_header_size) return false;
   const std::string stop_file = basename(current.log_file_name);
   const uint64_t stop_offset = current.pos;
-  // Pin from the oldest indexed file for this bounded replay. This avoids a
-  // mutable pin while rotations are traversed; it is released on every exit.
-  mysql_mutex_lock(mysql_bin_log.get_index_lock());
-  const bool missing = mysql_bin_log.find_log_pos(&info, nullptr, false) != 0;
-  if (!missing) mysql_bin_log.register_log_info(&info);
-  auto unlock_index = create_scope_guard([&] { mysql_mutex_unlock(mysql_bin_log.get_index_lock()); });
-  if (missing) return false;
-  auto unpin = create_scope_guard([&] { mysql_bin_log.unregister_log_info(&info); });
-  LOG_INFO scan = info;
-  while (basename(scan.log_file_name) != basename(start.file))
-    if (mysql_bin_log.find_next_log(&scan, false)) return false;
+  // Open the bounded input under LOCK_index, then release it before hashing,
+  // decoding or applying rows. Keeping the file handles open also preserves
+  // their identity across RESET (a purge pin alone does not protect RESET).
+  std::vector<std::unique_ptr<Binlog_file_reader>> readers;
+  std::ifstream prefix;
+  {
+    mysql_mutex_lock(mysql_bin_log.get_index_lock());
+    auto unlock_index = create_scope_guard([&] { mysql_mutex_unlock(mysql_bin_log.get_index_lock()); });
+    if (mysql_bin_log.find_log_pos(&info, nullptr, false)) return false;
+    while (basename(info.log_file_name) != basename(start.file))
+      if (mysql_bin_log.find_next_log(&info, false)) return false;
+    prefix.open(info.log_file_name, std::ios::binary);
+    if (!prefix) return false;
+    uint64_t offset = start.offset;
+    for (;;) {
+      auto reader = std::make_unique<Binlog_file_reader>(true, 64 * 1024 * 1024);
+      if (reader->open(info.log_file_name, offset)) return false;
+      readers.push_back(std::move(reader));
+      if (basename(info.log_file_name) == stop_file) break;
+      if (mysql_bin_log.find_next_log(&info, false)) return false;
+      offset = 4;
+    }
+  }
+  std::string digest;
+  if (!prefix_digest(prefix, start.offset, digest) || digest != start.prefix_digest) return false;
 
-  std::string pinned_digest;
-  if (!prefix_digest(scan.log_file_name, start.offset, pinned_digest) || pinned_digest != start.prefix_digest)
-    return false;
-
-  std::unordered_map<uint64_t, std::unique_ptr<Table_map_log_event>> maps;
-  std::vector<Record> transaction;
+  std::unordered_map<uint64_t, std::shared_ptr<Table_map_log_event>> maps;
+  std::vector<Record> changes;
   size_t buffered = 0;
   const size_t limit = std::min<size_t>(ShannonBase::shannon_rpd_engine_cfg.pop_buff_sz_max, 64 * 1024 * 1024);
   auto commit = [&]() {
-    const uint64_t scn = TransactionCoordinator::instance().allocate_scn();
-    for (auto &record : transaction) {
+    const uint64_t scn = changes.empty() ? 0 : TransactionCoordinator::instance().allocate_scn();
+    for (auto &record : changes) {
       record.m_commit_scn = scn;
       if (!apply(record)) return false;
     }
-    transaction.clear();
+    changes.clear();
     maps.clear();
     buffered = 0;
     return true;
   };
-  uint64_t offset = start.offset;
-  for (;;) {
-    Binlog_file_reader reader(true, 64 * 1024 * 1024);
-    if (reader.open(scan.log_file_name, offset)) return false;
-    const bool last_file = basename(scan.log_file_name) == stop_file;
-    while (!last_file || static_cast<uint64_t>(reader.position()) < stop_offset) {
+  for (size_t file_index = 0; file_index < readers.size(); ++file_index) {
+    auto &reader = *readers[file_index];
+    const bool last_file = file_index + 1 == readers.size();
+    binlog::Decompressing_event_object_istream stream(reader);
+    stream.set_verify_checksum(true);
+    auto grow = stream.get_grow_calculator();
+    grow.set_max_size(limit);
+    stream.set_grow_calculator(grow);
+    auto check_stream = create_scope_guard([&] { (void)stream.has_error(); });
+    bool in_payload = false;
+    while (!last_file || static_cast<uint64_t>(reader.position()) < stop_offset || in_payload) {
       if (thd->killed) return false;
-      std::unique_ptr<Log_event> event(reader.read_event_object());
+      std::shared_ptr<Log_event> event;
+      stream >> event;
       if (!event) {
-        if (reader.has_fatal_error() || last_file) return false;
+        if (stream.has_error() || last_file || in_payload) return false;
         break;
       }
       if (last_file && static_cast<uint64_t>(reader.position()) > stop_offset) return false;
       const auto type = event->get_type_code();
       switch (type) {
+        case TRANSACTION_PAYLOAD_EVENT:
+          in_payload = true;
+          break;
         case TABLE_MAP_EVENT: {
           auto *map = static_cast<Table_map_log_event *>(event.get());
           const uint64_t id = map->get_table_id();
           // Keep only the source table's metadata; all other rows are skipped.
           if (std::strcmp(map->get_db_name(), table->s->db.str) == 0 &&
               std::strcmp(map->get_table_name(), table->s->table_name.str) == 0) {
-            maps[id].reset(static_cast<Table_map_log_event *>(event.release()));
+            maps[id] = std::static_pointer_cast<Table_map_log_event>(event);
           } else
             maps.erase(id);
           break;
@@ -256,24 +287,27 @@ bool BinlogRecovery::replay(THD *thd, TABLE *table, const BinlogPosition &start,
             record.m_schema_name = table->s->db.str;
             record.m_table_name = table->s->table_name.str;
 #endif
-            transaction.push_back(std::move(record));
+            changes.push_back(std::move(record));
             buffered += bytes;
           }
           break;
         }
         case XID_EVENT:
+          in_payload = false;
           if (!commit()) return false;
           break;
         case QUERY_EVENT: {
           auto *query = static_cast<Query_log_event *>(event.get());
           std::string text(query->query, query->q_len);
           if (text == "BEGIN") {
-            if (!transaction.empty()) return false;
+            if (!changes.empty()) return false;
             maps.clear();
           } else if (text == "COMMIT") {
+            in_payload = false;
             if (!commit()) return false;
           } else if (text == "ROLLBACK") {
-            transaction.clear();
+            in_payload = false;
+            changes.clear();
             maps.clear();
             buffered = 0;
           }
@@ -284,7 +318,7 @@ bool BinlogRecovery::replay(THD *thd, TABLE *table, const BinlogPosition &start,
         }
         case GTID_LOG_EVENT:
         case ANONYMOUS_GTID_LOG_EVENT:
-          if (!transaction.empty()) return false;
+          if (!changes.empty()) return false;
           maps.clear();
           break;
         case FORMAT_DESCRIPTION_EVENT:
@@ -294,19 +328,17 @@ bool BinlogRecovery::replay(THD *thd, TABLE *table, const BinlogPosition &start,
         case HEARTBEAT_LOG_EVENT:
         case ROWS_QUERY_LOG_EVENT:
           break;
-        // Partial images/JSON diffs, compressed payloads, XA and unknown events
+        // Partial images/JSON diffs, XA and unknown events
         // are safely rebuilt from InnoDB rather than partially replayed.
         default:
           return false;
       }
     }
     if (last_file) break;
-    if (mysql_bin_log.find_next_log(&scan, false)) return false;
     maps.clear();
-    offset = 4;
   }
   // Relevant rows without a complete transaction outcome never publish.
-  return transaction.empty();
+  return changes.empty();
 }
 }  // namespace Recovery
 }  // namespace ShannonBase

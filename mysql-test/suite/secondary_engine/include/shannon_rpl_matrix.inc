@@ -1,5 +1,6 @@
 # Copyright (c) 2026, Shannon Data AI and/or its affiliates.
 # ON means a loaded Rapid table; OFF means an ordinary InnoDB table.
+--source include/no_ps_protocol.inc
 --source include/have_binlog_format_row.inc
 --source include/rpl/init_source_replica.inc
 --connection master
