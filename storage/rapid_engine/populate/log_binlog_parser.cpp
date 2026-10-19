@@ -206,7 +206,7 @@ bool FinalizeBinlogRow(TABLE *table, change_record_buff_t &record) {
 bool BinlogParser::read_batch(THD *thd, const std::vector<BinlogTableBinding> &bindings, const Position &start,
                               const Position &committed_end, std::vector<BinlogTransaction> &batch,
                               Position &assembled_end, const char **failure_reason, const std::atomic<bool> *cancel,
-                              bool recovery) noexcept try {
+                              bool recovery) noexcept {
   if (failure_reason)
     *failure_reason =
         "Change propagation failed: missing, corrupt or unsupported committed binlog input; unload and reload the "
@@ -214,7 +214,10 @@ bool BinlogParser::read_batch(THD *thd, const std::vector<BinlogTableBinding> &b
 
   if (!thd || !start.valid() || !committed_end.valid() || !mysql_bin_log.is_open()) return false;
 
-  DBUG_EXECUTE_IF("rapid_committed_decode_bad_alloc", { throw std::bad_alloc(); });
+  if (DBUG_EVALUATE_IF("rapid_committed_decode_bad_alloc", true, false)) {
+    if (failure_reason) *failure_reason = "binlog reader allocation or decoding failed; unload and reload the table";
+    return false;
+  }
 
   Position identity = start;
   std::vector<std::pair<std::string, std::unique_ptr<Binlog_file_reader>>> inputs;
@@ -415,19 +418,9 @@ bool BinlogParser::read_batch(THD *thd, const std::vector<BinlogTableBinding> &b
     }
   }
   return false;
-} catch (...) {
-  batch.clear();
-  if (failure_reason) *failure_reason = "binlog reader allocation or decoding failed; unload and reload the table";
-  return false;
 }
 
-int EnqueueRowChange(change_record_buff_t &record) noexcept {
-  try {
-    return Populator::write(nullptr, 0, &record);
-  } catch (...) {
-    return static_cast<int>(PROPAGATION_FAILED::WRITE_REJECTED);
-  }
-}
+int EnqueueRowChange(change_record_buff_t &record) noexcept { return Populator::write(nullptr, 0, &record); }
 }  // namespace Populate
 }  // namespace ShannonBase
 
@@ -566,14 +559,22 @@ TABLE *open_decode_table(THD *thd, const Loaded &entry) {
   return ref->table;
 }
 
-static void committed_binlog_propagation_worker() noexcept try {
+// One propagation pass. Returns a quarantine reason, or nullptr when the pass
+// ended deliberately (stop, retry backoff, or nothing to do).
+static const char *committed_binlog_propagation_pass(Utils::BackgroundSession &session,
+                                                     const std::vector<Loaded> &catalog, const Position &start,
+                                                     const std::string &prefix, CommitPosition target);
+
+// Returns false when the consumer must be fenced for every query.
+static bool committed_binlog_propagation_loop() {
   while (!consumer.stop.load()) {
     consumer.demand.wait(false);
     consumer.demand.store(false);
-    if (consumer.stop.load()) return;
+    if (consumer.stop.load()) return true;
     // Initialize MySQL thread-local state before catalog allocation or DBUG hooks.
     Utils::BackgroundSession session;
-    DBUG_EXECUTE_IF("rapid_committed_catalog_bad_alloc", { throw std::bad_alloc(); });
+    // A failed catalog allocation leaves no table to quarantine.
+    if (DBUG_EVALUATE_IF("rapid_committed_catalog_bad_alloc", true, false)) return false;
     std::vector<Loaded> catalog;
     Position start;
     std::string prefix;
@@ -594,240 +595,245 @@ static void committed_binlog_propagation_worker() noexcept try {
       continue;
     }
     if (target <= commit_position(start)) continue;
-    try {
-      // Source metadata is opened BEFORE any apply/queue lock. Never block DDL
-      // or unload while holding those locks. Each batch closes its TABLEs.
-      if (DBUG_EVALUATE_IF("rapid_committed_reader_stall", true, false)) continue;
-      THD *thd = session.thd();
-      if (!thd) {
-        quarantine(catalog, "cannot create reader session");
-        continue;
-      }
-      auto close_metadata = [&] {
-        if (thd->open_tables) close_thread_tables(thd);
-        thd->mdl_context.release_statement_locks();
-        thd->mdl_context.release_transactional_locks();
-      };
-      auto metadata_guard = create_scope_guard(close_metadata);
-      thd->variables.lock_wait_timeout = 1;
-      thd->variables.use_secondary_engine = SECONDARY_ENGINE_OFF;
-      std::vector<BinlogTableBinding> bindings;
-      bool retry = false;
-      for (const auto &entry : catalog) {
-        TABLE *source = open_decode_table(thd, entry);
-        if (!source) {
-          bool expired = false;
-          {
-            std::lock_guard lock(consumer.mutex);
-            auto found = consumer.loaded.find(entry.id);
-            if (found == consumer.loaded.end() || found->second.generation != entry.generation) continue;
-            auto &since = found->second.open_failed_since;
-            if (since == Clock::time_point{}) since = Clock::now();
-            expired = Clock::now() - since >= std::chrono::milliseconds(shannon_rpd_engine_cfg.query_sync_timeout_ms);
-          }
-          const auto error = thd->get_stmt_da()->mysql_errno();
-          if (expired || error == ER_NO_SUCH_TABLE || error == ER_BAD_DB_ERROR) {
-            quarantine({entry}, "source table is missing or unavailable; unload and reload the table");
-            thd->clear_error();
-            continue;
-          }
-          retry = true;
-          break;
-        }
-        {
-          std::lock_guard lock(consumer.mutex);
-          auto found = consumer.loaded.find(entry.id);
-          if (found != consumer.loaded.end() && found->second.generation == entry.generation)
-            found->second.open_failed_since = {};
-        }
-        if (source->file->get_table_id() != entry.id || !BinlogParser::supports(source) ||
-            schema_signature(source) != entry.schema) {
-          quarantine({entry}, "source schema or table identity changed");
-          continue;
-        }
-        bitmap_set_all(source->read_set);
-        bitmap_set_all(source->write_set);
-        bindings.push_back({source, entry.id, entry.floor});
-      }
-      if (retry) {
-        // Unfinished input remains work even without a new commit. Back off
-        // transient metadata failures, then retry with fresh TABLE handles.
-        std::unique_lock lock(consumer.mutex);
-        consumer.cv.wait_for(lock, std::chrono::milliseconds(20), [] { return consumer.stop.load(); });
-        consumer.request_work();
-        continue;
-      }
-      std::vector<BinlogTransaction> batch;
-      Position assembled;
-      const char *failure_reason = nullptr;
-      if (!BinlogParser::read_batch(thd, bindings, start, position(target, prefix), batch, assembled, &failure_reason,
-                                    &consumer.stop)) {
-        if (consumer.stop.load()) return;
-        quarantine(catalog, failure_reason);
-        continue;
-      }
-      // Stamp a bounded batch, enqueue it in source order, and wait once per
-      // table. All versions remain behind the publication fence until every
-      // participant has applied its entire portion.
-      uint64_t last_scn = 0;
-      std::vector<table_id_t> touched;
-      for (auto &transaction : batch) {
-        const uint64_t scn = TransactionCoordinator::instance().allocate_scn();
-        last_scn = scn;
-        std::vector<table_id_t> transaction_tables;
-        for (auto &record : transaction.changes) {
-          auto found =
-              std::find_if(catalog.begin(), catalog.end(), [&](const Loaded &t) { return t.id == record.m_table_id; });
-          if (found == catalog.end() || !still_loaded(*found) || IsPropagationBroken(record.m_table_id)) continue;
-          if (std::find(touched.begin(), touched.end(), record.m_table_id) == touched.end())
-            touched.push_back(record.m_table_id);
-          if (std::find(transaction_tables.begin(), transaction_tables.end(), record.m_table_id) ==
-              transaction_tables.end())
-            transaction_tables.push_back(record.m_table_id);
-          record.m_commit_scn = scn;
-          auto table =
-              Imcs::Imcs::instance()->get_rpd_table<std::shared_ptr<ShannonBase::Imcs::RpdTable>>(record.m_table_id);
-          auto *mgr = table ? table->recovery_manager() : nullptr;
-          if (mgr && mgr->notifications()) record.m_notification_sequence = mgr->notifications()->notify(scn);
-        }
-        for (auto id : transaction_tables) {
-          auto table = Imcs::Imcs::instance()->get_rpd_table<std::shared_ptr<ShannonBase::Imcs::RpdTable>>(id);
-          auto *mgr = table ? table->recovery_manager() : nullptr;
-          if (mgr && mgr->notifications()) mgr->notifications()->committed(scn, transaction.end);
-        }
-      }
-      if (DBUG_EVALUATE_IF("rapid_committed_prepare_failure", true, false) && !touched.empty()) {
-        quarantine(catalog, "committed batch propagation failed; reload required");
-        continue;
-      }
-      BeginCommittedTransactionPublish(touched);
-      // Caller holds consumer.mutex. Pair every post-decode queue operation
-      // with the attachment generation: unload/reload can reuse the table id.
-      auto current_entry = [&](table_id_t id) {
-        auto old = std::find_if(catalog.begin(), catalog.end(), [id](const Loaded &t) { return t.id == id; });
-        auto now = consumer.loaded.find(id);
-        return old != catalog.end() && now != consumer.loaded.end() && old->generation == now->second.generation;
-      };
-      bool fenced = true;
-      auto finish_publish = [&] {
-        std::lock_guard lock(consumer.mutex);
-        std::erase_if(touched, [&](table_id_t id) { return !current_entry(id); });
-        EndCommittedTransactionPublish(touched);
-      };
-      auto release_fence = create_scope_guard([&] {
-        if (fenced) finish_publish();
-      });
-      // Records own detached row images. Release source metadata before queue
-      // admission or apply waits, so SECONDARY_UNLOAD cannot deadlock with them.
-      close_metadata();
-      if (!touched.empty())
-        DBUG_SIGNAL_WAIT_FOR(thd, "rapid_pause_committed_enqueue", "rapid_batch_decoded", "rapid_enqueue_continue");
-      auto enqueue_current = [&](change_record_buff_t &record) {
-        std::lock_guard lock(consumer.mutex);
-        return current_entry(record.m_table_id) ? EnqueueRowChange(record) : SHANNON_SUCCESS;
-      };
-      const auto stall_timeout = std::chrono::milliseconds(shannon_rpd_engine_cfg.query_sync_timeout_ms);
-      auto last_progress = Clock::now();
-      bool success = true;
-      for (auto &transaction : batch) {
-        for (auto &record : transaction.changes) {
-          if (!record.m_commit_scn) continue;
-          int result;
-          uint64_t progress = 0;
-          while ((result = enqueue_current(record)) == static_cast<int>(PROPAGATION_FAILED::BUFFER_FULL)) {
-            if (consumer.stop.load()) return;
-            const auto current = Populator::request_table_barrier(record.m_table_id).applied_change_id;
-            if (current != progress) {
-              progress = current;
-              last_progress = Clock::now();
-            }
-            if (Clock::now() - last_progress >= stall_timeout) {
-              success = false;
-              break;
-            }
-            std::unique_lock lock(consumer.mutex);
-            consumer.cv.wait_for(lock, std::chrono::milliseconds(20));
-          }
-          if (!success || result != SHANNON_SUCCESS) {
-            success = false;
-            break;
-          }
-          last_progress = Clock::now();
-        }
-        if (!success) break;
-      }
-      finish_publish();
-      fenced = false;
-      for (auto id : touched) {
-        PropagationBarrier barrier;
-        {
-          std::lock_guard lock(consumer.mutex);
-          if (!current_entry(id)) continue;
-          barrier = Populator::request_table_barrier(id);
-        }
-        last_progress = Clock::now();
-        auto progress = barrier.applied_change_id;
-        while (success && barrier.needs_wait()) {
-          if (consumer.stop.load()) return;
-          const auto result = Populator::wait_table_applied_for(
-              id, barrier.required_change_id, QUERY_PROPAGATION_WAIT_SLICE_MS, barrier.buffer_generation);
-          if (result == TablePropagationWaitResult::APPLIED) break;
-          if (result == TablePropagationWaitResult::BROKEN || result == TablePropagationWaitResult::GONE) {
-            std::lock_guard lock(consumer.mutex);
-            // Deliberate unload retires this participant, not the other tables.
-            if (current_entry(id)) success = false;
-            break;
-          }
-          const auto current = Populator::request_table_barrier(id).applied_change_id;
-          if (current != progress) {
-            progress = current;
-            last_progress = Clock::now();
-          }
-          if (Clock::now() - last_progress >= stall_timeout) {
-            success = false;
-            break;
-          }
-        }
-        if (barrier.state == TablePropagationState::BROKEN) success = false;
-      }
-      if (!success) {
-        std::lock_guard lock(consumer.mutex);
-        for (auto id : touched)
-          if (current_entry(id)) QuarantinePropagationTable(id);
-      }
-      if (last_scn) {
-        TransactionCoordinator::instance().observe_commit_scn(last_scn);
-        std::lock_guard lock(consumer.mutex);
-        consumer.publication_pin = TransactionCoordinator::instance().pin_scn(last_scn);
-        consumer.view_scn = last_scn;
-      }
-#ifndef SHANNON_POSIX_PLATFORM
-      // Platforms without a stable inode identifier retain full certification.
-      if (!Utils::BinlogPositionReader::certify(assembled)) {
-        quarantine(catalog, "assembled source position was lost");
-        continue;
-      }
-#endif
+    if (const char *failure = committed_binlog_propagation_pass(session, catalog, start, prefix, target))
+      quarantine(catalog, failure);
+  }
+  return true;
+}
+
+static const char *committed_binlog_propagation_pass(Utils::BackgroundSession &session,
+                                                     const std::vector<Loaded> &catalog, const Position &start,
+                                                     const std::string &prefix, CommitPosition target) {
+  // Source metadata is opened BEFORE any apply/queue lock. Never block DDL
+  // or unload while holding those locks. Each batch closes its TABLEs.
+  if (DBUG_EVALUATE_IF("rapid_committed_reader_stall", true, false)) return nullptr;
+  THD *thd = session.thd();
+  if (!thd) {
+    quarantine(catalog, "cannot create reader session");
+    return nullptr;
+  }
+  auto close_metadata = [&] {
+    if (thd->open_tables) close_thread_tables(thd);
+    thd->mdl_context.release_statement_locks();
+    thd->mdl_context.release_transactional_locks();
+  };
+  auto metadata_guard = create_scope_guard(close_metadata);
+  thd->variables.lock_wait_timeout = 1;
+  thd->variables.use_secondary_engine = SECONDARY_ENGINE_OFF;
+  std::vector<BinlogTableBinding> bindings;
+  bool retry = false;
+  for (const auto &entry : catalog) {
+    TABLE *source = open_decode_table(thd, entry);
+    if (!source) {
+      bool expired = false;
       {
         std::lock_guard lock(consumer.mutex);
-        consumer.cursor = assembled;
-        consumer.assembled.store(commit_position(assembled));
-        consumer.visible = commit_position(assembled);
-        if (consumer.committed.load() > consumer.visible) consumer.request_work();
+        auto found = consumer.loaded.find(entry.id);
+        if (found == consumer.loaded.end() || found->second.generation != entry.generation) continue;
+        auto &since = found->second.open_failed_since;
+        if (since == Clock::time_point{}) since = Clock::now();
+        expired = Clock::now() - since >= std::chrono::milliseconds(shannon_rpd_engine_cfg.query_sync_timeout_ms);
       }
-      for (const auto &entry : catalog) {
-        std::lock_guard lock(consumer.mutex);
-        if (!current_entry(entry.id) || IsPropagationBroken(entry.id)) continue;
-        auto table = Imcs::Imcs::instance()->get_rpd_table<std::shared_ptr<ShannonBase::Imcs::RpdTable>>(entry.id);
-        auto *mgr = table ? table->recovery_manager() : nullptr;
-        if (mgr && mgr->notifications()) mgr->notifications()->advance_quiescent(assembled);
+      const auto error = thd->get_stmt_da()->mysql_errno();
+      if (expired || error == ER_NO_SUCH_TABLE || error == ER_BAD_DB_ERROR) {
+        quarantine({entry}, "source table is missing or unavailable; unload and reload the table");
+        thd->clear_error();
+        continue;
       }
-      consumer.cv.notify_all();
-    } catch (...) {
-      quarantine(catalog, "binlog reader allocation or decoding failed");
+      retry = true;
+      break;
+    }
+    {
+      std::lock_guard lock(consumer.mutex);
+      auto found = consumer.loaded.find(entry.id);
+      if (found != consumer.loaded.end() && found->second.generation == entry.generation)
+        found->second.open_failed_since = {};
+    }
+    if (source->file->get_table_id() != entry.id || !BinlogParser::supports(source) ||
+        schema_signature(source) != entry.schema) {
+      quarantine({entry}, "source schema or table identity changed");
+      continue;
+    }
+    bitmap_set_all(source->read_set);
+    bitmap_set_all(source->write_set);
+    bindings.push_back({source, entry.id, entry.floor});
+  }
+  if (retry) {
+    // Unfinished input remains work even without a new commit. Back off
+    // transient metadata failures, then retry with fresh TABLE handles.
+    std::unique_lock lock(consumer.mutex);
+    consumer.cv.wait_for(lock, std::chrono::milliseconds(20), [] { return consumer.stop.load(); });
+    consumer.request_work();
+    return nullptr;
+  }
+  std::vector<BinlogTransaction> batch;
+  Position assembled;
+  const char *failure_reason = nullptr;
+  if (!BinlogParser::read_batch(thd, bindings, start, position(target, prefix), batch, assembled, &failure_reason,
+                                &consumer.stop)) {
+    if (consumer.stop.load()) return nullptr;
+    return failure_reason ? failure_reason : "binlog reader allocation or decoding failed";
+  }
+  // Stamp a bounded batch, enqueue it in source order, and wait once per
+  // table. All versions remain behind the publication fence until every
+  // participant has applied its entire portion.
+  uint64_t last_scn = 0;
+  std::vector<table_id_t> touched;
+  for (auto &transaction : batch) {
+    const uint64_t scn = TransactionCoordinator::instance().allocate_scn();
+    last_scn = scn;
+    std::vector<table_id_t> transaction_tables;
+    for (auto &record : transaction.changes) {
+      auto found =
+          std::find_if(catalog.begin(), catalog.end(), [&](const Loaded &t) { return t.id == record.m_table_id; });
+      if (found == catalog.end() || !still_loaded(*found) || IsPropagationBroken(record.m_table_id)) continue;
+      if (std::find(touched.begin(), touched.end(), record.m_table_id) == touched.end())
+        touched.push_back(record.m_table_id);
+      if (std::find(transaction_tables.begin(), transaction_tables.end(), record.m_table_id) ==
+          transaction_tables.end())
+        transaction_tables.push_back(record.m_table_id);
+      record.m_commit_scn = scn;
+      auto table =
+          Imcs::Imcs::instance()->get_rpd_table<std::shared_ptr<ShannonBase::Imcs::RpdTable>>(record.m_table_id);
+      auto *mgr = table ? table->recovery_manager() : nullptr;
+      if (mgr && mgr->notifications()) record.m_notification_sequence = mgr->notifications()->notify(scn);
+    }
+    for (auto id : transaction_tables) {
+      auto table = Imcs::Imcs::instance()->get_rpd_table<std::shared_ptr<ShannonBase::Imcs::RpdTable>>(id);
+      auto *mgr = table ? table->recovery_manager() : nullptr;
+      if (mgr && mgr->notifications()) mgr->notifications()->committed(scn, transaction.end);
     }
   }
-} catch (...) {
+  if (DBUG_EVALUATE_IF("rapid_committed_prepare_failure", true, false) && !touched.empty()) {
+    quarantine(catalog, "committed batch propagation failed; reload required");
+    return nullptr;
+  }
+  BeginCommittedTransactionPublish(touched);
+  // Caller holds consumer.mutex. Pair every post-decode queue operation
+  // with the attachment generation: unload/reload can reuse the table id.
+  auto current_entry = [&](table_id_t id) {
+    auto old = std::find_if(catalog.begin(), catalog.end(), [id](const Loaded &t) { return t.id == id; });
+    auto now = consumer.loaded.find(id);
+    return old != catalog.end() && now != consumer.loaded.end() && old->generation == now->second.generation;
+  };
+  bool fenced = true;
+  auto finish_publish = [&] {
+    std::lock_guard lock(consumer.mutex);
+    std::erase_if(touched, [&](table_id_t id) { return !current_entry(id); });
+    EndCommittedTransactionPublish(touched);
+  };
+  auto release_fence = create_scope_guard([&] {
+    if (fenced) finish_publish();
+  });
+  // Records own detached row images. Release source metadata before queue
+  // admission or apply waits, so SECONDARY_UNLOAD cannot deadlock with them.
+  close_metadata();
+  if (!touched.empty())
+    DBUG_SIGNAL_WAIT_FOR(thd, "rapid_pause_committed_enqueue", "rapid_batch_decoded", "rapid_enqueue_continue");
+  auto enqueue_current = [&](change_record_buff_t &record) {
+    std::lock_guard lock(consumer.mutex);
+    return current_entry(record.m_table_id) ? EnqueueRowChange(record) : SHANNON_SUCCESS;
+  };
+  const auto stall_timeout = std::chrono::milliseconds(shannon_rpd_engine_cfg.query_sync_timeout_ms);
+  auto last_progress = Clock::now();
+  bool success = true;
+  for (auto &transaction : batch) {
+    for (auto &record : transaction.changes) {
+      if (!record.m_commit_scn) continue;
+      int result;
+      uint64_t progress = 0;
+      while ((result = enqueue_current(record)) == static_cast<int>(PROPAGATION_FAILED::BUFFER_FULL)) {
+        if (consumer.stop.load()) return nullptr;
+        const auto current = Populator::request_table_barrier(record.m_table_id).applied_change_id;
+        if (current != progress) {
+          progress = current;
+          last_progress = Clock::now();
+        }
+        if (Clock::now() - last_progress >= stall_timeout) {
+          success = false;
+          break;
+        }
+        std::unique_lock lock(consumer.mutex);
+        consumer.cv.wait_for(lock, std::chrono::milliseconds(20));
+      }
+      if (!success || result != SHANNON_SUCCESS) {
+        success = false;
+        break;
+      }
+      last_progress = Clock::now();
+    }
+    if (!success) break;
+  }
+  finish_publish();
+  fenced = false;
+  for (auto id : touched) {
+    PropagationBarrier barrier;
+    {
+      std::lock_guard lock(consumer.mutex);
+      if (!current_entry(id)) continue;
+      barrier = Populator::request_table_barrier(id);
+    }
+    last_progress = Clock::now();
+    auto progress = barrier.applied_change_id;
+    while (success && barrier.needs_wait()) {
+      if (consumer.stop.load()) return nullptr;
+      const auto result = Populator::wait_table_applied_for(id, barrier.required_change_id,
+                                                            QUERY_PROPAGATION_WAIT_SLICE_MS, barrier.buffer_generation);
+      if (result == TablePropagationWaitResult::APPLIED) break;
+      if (result == TablePropagationWaitResult::BROKEN || result == TablePropagationWaitResult::GONE) {
+        std::lock_guard lock(consumer.mutex);
+        // Deliberate unload retires this participant, not the other tables.
+        if (current_entry(id)) success = false;
+        break;
+      }
+      const auto current = Populator::request_table_barrier(id).applied_change_id;
+      if (current != progress) {
+        progress = current;
+        last_progress = Clock::now();
+      }
+      if (Clock::now() - last_progress >= stall_timeout) {
+        success = false;
+        break;
+      }
+    }
+    if (barrier.state == TablePropagationState::BROKEN) success = false;
+  }
+  if (!success) {
+    std::lock_guard lock(consumer.mutex);
+    for (auto id : touched)
+      if (current_entry(id)) QuarantinePropagationTable(id);
+  }
+  if (last_scn) {
+    TransactionCoordinator::instance().observe_commit_scn(last_scn);
+    std::lock_guard lock(consumer.mutex);
+    consumer.publication_pin = TransactionCoordinator::instance().pin_scn(last_scn);
+    consumer.view_scn = last_scn;
+  }
+#ifndef SHANNON_POSIX_PLATFORM
+  // Platforms without a stable inode identifier retain full certification.
+  if (!Utils::BinlogPositionReader::certify(assembled)) return "assembled source position was lost";
+#endif
+  {
+    std::lock_guard lock(consumer.mutex);
+    consumer.cursor = assembled;
+    consumer.assembled.store(commit_position(assembled));
+    consumer.visible = commit_position(assembled);
+    if (consumer.committed.load() > consumer.visible) consumer.request_work();
+  }
+  for (const auto &entry : catalog) {
+    std::lock_guard lock(consumer.mutex);
+    if (!current_entry(entry.id) || IsPropagationBroken(entry.id)) continue;
+    auto table = Imcs::Imcs::instance()->get_rpd_table<std::shared_ptr<ShannonBase::Imcs::RpdTable>>(entry.id);
+    auto *mgr = table ? table->recovery_manager() : nullptr;
+    if (mgr && mgr->notifications()) mgr->notifications()->advance_quiescent(assembled);
+  }
+  consumer.cv.notify_all();
+  return nullptr;
+}
+
+// Thread entry: the loop reports failures through its return value.
+static void committed_binlog_propagation_worker() noexcept {
+  if (committed_binlog_propagation_loop()) return;
   consumer.fault.store(true);
   consumer.cv.notify_all();
   // No allocation is required to fence every query after thread setup failure.

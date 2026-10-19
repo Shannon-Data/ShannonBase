@@ -57,6 +57,14 @@ namespace Index {
  * This matches the range semantics previously implemented by scanning from the
  * left and applying prefix_compare(), but does so in O(tree height).
  *
+ * Stability across lock releases: Art_Iterator drops the shared lock between
+ * rows, so writers can run mid-scan.  Nodes are kept alive by shared_ptr, but
+ * a writer may orphan a node on our path (Node4 -> Node16 growth, collapse)
+ * and clear() leaves reachable only through that orphan.  Walking such a path
+ * used to end the scan early.  Every mutation bumps Art_tree::version; if it
+ * moved since the last step, the cursor re-seeks by the last key it emitted
+ * (restoring the value slot within the leaf) instead of trusting its path.
+ *
  * Locking: this class takes no locks of its own.  It reads internal nodes and
  * leaf payloads directly and holds shared_ptr references to them across calls,
  * so every call must be made with ART::tree()->tree_mutex held at least
@@ -88,12 +96,17 @@ class ARTIterator {
   };
 
  public:
-  explicit ARTIterator(ART *art) : m_art(art) {}
+  // art->tree() takes ART::m_node_mutex, so it is read here, once, while the
+  // caller holds no tree_mutex.  Taking it later, under tree_mutex, inverts the
+  // lock order ART_tree_destroy() uses and can deadlock.
+  explicit ARTIterator(ART *art) : m_art(art), m_tree(art ? art->tree() : nullptr) {}
 
   /** Configure a forward range and position on its first physical candidate. */
   void init_scan(const key_t *startkey, int startkey_len, bool start_inclusive, const key_t *endkey, int endkey_len,
                  bool end_inclusive) {
     set_range(startkey, startkey_len, start_inclusive, endkey, endkey_len, end_inclusive);
+    m_reverse = false;
+    m_has_last = false;
     clear_position();
 
     if (!tree_root_ref().get()) return;
@@ -108,6 +121,8 @@ class ARTIterator {
   void init_reverse_scan(const key_t *startkey, int startkey_len, bool start_inclusive, const key_t *endkey,
                          int endkey_len, bool end_inclusive) {
     set_range(startkey, startkey_len, start_inclusive, endkey, endkey_len, end_inclusive);
+    m_reverse = true;
+    m_has_last = false;
     clear_position();
 
     if (!tree_root_ref().get()) return;
@@ -232,6 +247,7 @@ class ARTIterator {
   /** Emit current on the first call after positioning, then advance forward. */
   bool next(const key_t **key_out, uint32_t *key_len_out, value_t *value_out) {
     if (!key_out || !key_len_out || !value_out || !m_leaf) return false;
+    if (!resync_if_changed(/*forward=*/true)) return false;
 
     for (;;) {
       if (m_pending_current) {
@@ -239,19 +255,22 @@ class ARTIterator {
       } else if (!advance_forward()) {
         return false;
       }
+      if (!m_leaf) return false;
+      // An emptied leaf (deleted while we held it) has no key: skip it in BOTH
+      // directions rather than letting key_in_range() misread it as BELOW_START.
+      if (m_leaf->key_length() == 0) continue;
 
       const RangeCheckResult rc = key_in_range(m_leaf->key(), m_leaf->key_length());
       if (rc == RangeCheckResult::ABOVE_END) return false;
       if (rc == RangeCheckResult::BELOW_START) continue;
       if (emit_current(key_out, key_len_out, value_out)) return true;
-      // A concurrent value deletion may leave the saved value slot invalid.
-      // Keep walking the ordered tree instead of turning that into EOF.
     }
   }
 
   /** Emit current on the first call after positioning, then advance backward. */
   bool prev(const key_t **key_out, uint32_t *key_len_out, value_t *value_out) {
     if (!key_out || !key_len_out || !value_out || !m_leaf) return false;
+    if (!resync_if_changed(/*forward=*/false)) return false;
 
     for (;;) {
       if (m_pending_current) {
@@ -259,6 +278,8 @@ class ARTIterator {
       } else if (!advance_backward()) {
         return false;
       }
+      if (!m_leaf) return false;
+      if (m_leaf->key_length() == 0) continue;
 
       const RangeCheckResult rc = key_in_range(m_leaf->key(), m_leaf->key_length());
       if (rc == RangeCheckResult::BELOW_START) return false;
@@ -292,6 +313,7 @@ class ARTIterator {
   }
 
   void clear_position() {
+    m_seen_version = m_tree ? m_tree->version.load(std::memory_order_acquire) : 0;
     m_path.clear();
     m_leaf.reset();
     m_value_idx = -1;
@@ -300,9 +322,87 @@ class ARTIterator {
 
   const ART::ArtNodePtr &tree_root_ref() const {
     static const ART::ArtNodePtr kNull;
-    if (!m_art) return kNull;
-    ART::Art_tree *tree = m_art->tree();
-    return tree ? tree->root : kNull;
+    return m_tree ? m_tree->root : kNull;  // m_tree cached at construction: see ctor
+  }
+
+  // Re-run the positioning the scan started with (no key has been emitted yet).
+  void reseek_initial() {
+    if (m_reverse) {
+      if (!m_end_key.empty())
+        (void)seek_le(m_end_key.data(), static_cast<uint32_t>(m_end_key.size()), m_end_incl);
+      else
+        (void)last();
+    } else {
+      if (!m_start_key.empty())
+        (void)seek_ge(m_start_key.data(), static_cast<uint32_t>(m_start_key.size()), m_start_incl);
+      else
+        (void)first();
+    }
+  }
+
+  /**
+   * If a writer ran since the last step, rebuild the position from the last
+   * emitted (key, value) rather than from the retained path.  Returns false
+   * when that leaves the cursor at EOF.  Caller holds tree_mutex shared.
+   */
+  bool resync_if_changed(bool forward) {
+    if (!m_tree) return m_leaf != nullptr;
+    const uint64_t v = m_tree->version.load(std::memory_order_acquire);
+    if (v == m_seen_version) return true;
+
+    if (!m_has_last) {
+      reseek_initial();  // positioned but nothing emitted yet
+      m_seen_version = v;
+      return m_leaf != nullptr;
+    }
+
+    const std::vector<unsigned char> key = m_last_key;  // seeks clear our state
+    const value_t val = m_last_val;
+    const int64_t idx = m_last_idx;
+
+    if (forward)
+      (void)seek_ge(key.data(), static_cast<uint32_t>(key.size()), true);
+    else
+      (void)seek_le(key.data(), static_cast<uint32_t>(key.size()), true);
+    m_seen_version = v;
+    if (!m_leaf) return false;
+
+    // Landed on a neighbouring key (ours was deleted): the seek left it pending,
+    // so it is emitted next.  Landed on our own key: continue after our value.
+    const bool same = m_leaf->key_length() == key.size() && std::memcmp(m_leaf->key(), key.data(), key.size()) == 0;
+    if (!same) return true;
+
+    const int64_t cnt = static_cast<int64_t>(m_leaf->value_count());
+    int64_t pos = -1;
+    if (m_leaf->value_length() == sizeof(value_t)) {
+      for (int64_t i = 0; i < cnt; ++i)
+        if (std::memcmp(m_leaf->value_at(static_cast<uint32_t>(i)), &val, sizeof(value_t)) == 0) {
+          pos = i;
+          break;
+        }
+    }
+    if (pos >= 0) {
+      m_value_idx = pos;
+      m_pending_current = false;
+    } else if (forward) {  // our value was removed: its successor slid into idx
+      if (idx < cnt) {
+        m_value_idx = idx;
+        m_pending_current = true;
+      } else {
+        m_value_idx = cnt - 1;
+        m_pending_current = false;
+      }
+    } else {  // unemitted values are the ones below idx, which did not move
+      const int64_t i = std::min(idx, cnt) - 1;
+      if (i >= 0) {
+        m_value_idx = i;
+        m_pending_current = true;
+      } else {
+        m_value_idx = 0;
+        m_pending_current = false;
+      }
+    }
+    return true;
   }
 
   ART::ArtNodePtr tree_root() const { return tree_root_ref(); }
@@ -534,7 +634,7 @@ class ARTIterator {
     return move_to_predecessor_subtree(false);
   }
 
-  bool emit_current(const key_t **key_out, uint32_t *key_len_out, value_t *value_out) const {
+  bool emit_current(const key_t **key_out, uint32_t *key_len_out, value_t *value_out) {
     if (!m_leaf || m_value_idx < 0) return false;
     if (static_cast<uint32_t>(m_value_idx) >= m_leaf->value_count()) return false;
     if (m_leaf->value_length() < sizeof(value_t)) return false;
@@ -542,14 +642,29 @@ class ARTIterator {
     *key_out = reinterpret_cast<const key_t *>(m_leaf->key());
     *key_len_out = m_leaf->key_length();
     std::memcpy(value_out, m_leaf->value_at(static_cast<uint32_t>(m_value_idx)), sizeof(value_t));
+
+    // Remember where we are so a later step can recover if the path goes stale.
+    m_last_key.assign(m_leaf->key(), m_leaf->key() + m_leaf->key_length());
+    std::memcpy(&m_last_val, value_out, sizeof(value_t));
+    m_last_idx = m_value_idx;
+    m_has_last = true;
     return true;
   }
 
   ART *m_art{nullptr};
+  ART::Art_tree *m_tree{nullptr};
   std::vector<PathEntry> m_path;
   std::shared_ptr<ART::Art_leaf> m_leaf;
   int64_t m_value_idx{-1};
   bool m_pending_current{false};
+
+  // Resynchronisation state (see resync_if_changed).
+  uint64_t m_seen_version{0};
+  bool m_reverse{false};
+  bool m_has_last{false};
+  std::vector<unsigned char> m_last_key;
+  value_t m_last_val{};
+  int64_t m_last_idx{-1};
 
   std::vector<unsigned char> m_start_key;
   bool m_start_incl{false};

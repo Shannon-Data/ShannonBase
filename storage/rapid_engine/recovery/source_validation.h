@@ -30,7 +30,6 @@
 #include <memory>
 #include <mutex>
 #include <utility>
-#include "storage/rapid_engine/utils/try_operation.h"
 
 class THD;
 class TABLE;
@@ -77,9 +76,7 @@ struct SourceValidationPolicy {
     // FAST deliberately avoids even calling a registered full-scan validator.
     if (mode == SourceValidationMode::FAST) return SourceValidationResult::SKIPPED;
     if (!validator || std::chrono::steady_clock::now() >= context.deadline) return SourceValidationResult::UNAVAILABLE;
-    SourceValidationResult result = SourceValidationResult::UNAVAILABLE;
-    if (!Utils::try_operation([&] { result = validator->validate(context); }))
-      return SourceValidationResult::UNAVAILABLE;
+    const SourceValidationResult result = validator->validate(context);
     if (std::chrono::steady_clock::now() >= context.deadline) return SourceValidationResult::UNAVAILABLE;
     if (result != SourceValidationResult::VERIFIED && result != SourceValidationResult::MISMATCH)
       return SourceValidationResult::UNAVAILABLE;

@@ -45,7 +45,6 @@
 #include "storage/rapid_engine/imcs/table.h"
 #include "storage/rapid_engine/trx/transaction.h"
 #include "storage/rapid_engine/utils/crc.h"
-#include "storage/rapid_engine/utils/try_operation.h"
 #include "storage/rapid_engine/utils/utils.h"
 /*
    1. Compression (compress / decompress)
@@ -1105,10 +1104,12 @@ void CU::update_statistics(const uchar *data, size_t len) {
 }
 
 int CU::serialize(std::ostream &out, size_t snapshot_row_count, bool checkpoint) const {
-  int result = HA_ERR_GENERIC;
-  if (!Utils::try_operation([&] { result = serialize_payload(out, snapshot_row_count, checkpoint); }))
+  try {
+    return serialize_payload(out, snapshot_row_count, checkpoint);
+  } catch (...) {
+    // Streams and allocations may throw; persistence callers expect a status.
     return HA_ERR_GENERIC;
-  return result;
+  }
 }
 
 int CU::serialize_payload(std::ostream &out, size_t snapshot_row_count, bool checkpoint) const {
@@ -1303,10 +1304,12 @@ int CU::serialize_payload(std::ostream &out, size_t snapshot_row_count, bool che
 
 int CU::deserialize(DictionaryRestoreContext *dictionaries, std::istream &in, size_t expected_rows) {
   if (dictionaries && expected_rows == SIZE_MAX) return HA_ERR_GENERIC;
-  int result = HA_ERR_GENERIC;
-  if (!Utils::try_operation([&] { result = deserialize_payload(dictionaries, in, expected_rows); }))
+  try {
+    return deserialize_payload(dictionaries, in, expected_rows);
+  } catch (...) {
+    // Keep the same status-based contract as serialize(), including stream errors.
     return HA_ERR_GENERIC;
-  return result;
+  }
 }
 
 struct CU::DictionaryRestoreContext::State {
