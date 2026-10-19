@@ -23,6 +23,7 @@
 */
 #ifndef SHANNON_RECOVERY_SERVICE_H
 #define SHANNON_RECOVERY_SERVICE_H
+#include <set>
 #include "storage/rapid_engine/recovery/recovery.h"
 #include "storage/rapid_engine/recovery/recovery_load.h"
 #include "storage/rapid_engine/recovery/source_validation.h"
@@ -110,6 +111,10 @@ class RecoveryFramework {
   void startup();
   void shutdown();
 
+  // Keep THDs alive under this registry while shutdown wakes blocked jobs.
+  bool register_session(THD *thd);
+  void unregister_session(THD *thd);
+
   bool global_state_was_empty() const { return m_global_state_empty.load(); }
   size_t reloaded_count() const { return m_reloaded_count.load(); }
   bool restart_in_progress() const { return m_restart_in_progress.load(std::memory_order_acquire); }
@@ -133,6 +138,9 @@ class RecoveryFramework {
 
   std::unique_ptr<DDWorker> m_dd_worker;
   std::unique_ptr<Recovery::CheckpointScheduler> m_checkpoint_scheduler;
+
+  std::mutex m_sessions_mutex;
+  std::set<THD *> m_sessions;
 
   std::mutex m_jobs_mutex;
   std::condition_variable m_jobs_cv;

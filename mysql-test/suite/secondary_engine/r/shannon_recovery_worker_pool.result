@@ -1,0 +1,8 @@
+# restart: --rapid_reload_on_restart=ON
+USE recovery_pool;
+SET use_secondary_engine=FORCED;
+SET use_secondary_engine=OFF;
+SELECT COUNT(*) FROM performance_schema.rpd_table_id WHERE SCHEMA_NAME='recovery_pool';
+COUNT(*)
+12
+DROP DATABASE recovery_pool;

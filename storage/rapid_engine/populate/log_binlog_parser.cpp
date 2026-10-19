@@ -205,8 +205,8 @@ bool FinalizeBinlogRow(TABLE *table, change_record_buff_t &record) {
 
 bool BinlogParser::read_batch(THD *thd, const std::vector<BinlogTableBinding> &bindings, const Position &start,
                               const Position &committed_end, std::vector<BinlogTransaction> &batch,
-                              Position &assembled_end, const char **failure_reason,
-                              const std::atomic<bool> *cancel) noexcept try {
+                              Position &assembled_end, const char **failure_reason, const std::atomic<bool> *cancel,
+                              bool recovery) noexcept try {
   if (failure_reason)
     *failure_reason =
         "Change propagation failed: missing, corrupt or unsupported committed binlog input; unload and reload the "
@@ -297,10 +297,11 @@ bool BinlogParser::read_batch(THD *thd, const std::vector<BinlogTableBinding> &b
               binding = &candidate;
               break;
             }
-          if (binding) {
-            const uint64_t id = static_cast<uint64_t>(map->get_table_id());
+          const uint64_t id = static_cast<uint64_t>(map->get_table_id());
+          if (binding)
             maps[id] = {std::move(map), binding};
-          }
+          else
+            maps.erase(id);  // A reused id supersedes even a previously tracked table.
           break;
         }
         case WRITE_ROWS_EVENT:
@@ -357,6 +358,7 @@ bool BinlogParser::read_batch(THD *thd, const std::vector<BinlogTableBinding> &b
           } else if (text == "COMMIT")
             terminal = true;
           else if (text.starts_with("SAVEPOINT ") || text.starts_with("RELEASE SAVEPOINT ")) {
+            if (recovery) return false;
             // InnoDB rollback-to-savepoint truncates the transaction cache;
             // surviving savepoint markers do not end a committed transaction.
           } else if (text == "ROLLBACK") {
@@ -366,7 +368,7 @@ bool BinlogParser::read_batch(THD *thd, const std::vector<BinlogTableBinding> &b
             // Source DDL is serialized by MDL and current schema/id validation
             // on every batch. Statement-logged DML is caught by sentinels.
             // XA and mixed-engine savepoint streams have no supported lifecycle.
-            if (!transaction.changes.empty() || text.starts_with("XA ") || text.starts_with("ROLLBACK TO "))
+            if (recovery || !transaction.changes.empty() || text.starts_with("XA ") || text.starts_with("ROLLBACK TO "))
               return false;
             terminal = true;
           }
@@ -383,9 +385,11 @@ bool BinlogParser::read_batch(THD *thd, const std::vector<BinlogTableBinding> &b
         case PREVIOUS_GTIDS_LOG_EVENT:
         case HEARTBEAT_LOG_EVENT:
         case ROWS_QUERY_LOG_EVENT:
+          break;
         case INTVAR_EVENT:
         case RAND_EVENT:
         case USER_VAR_EVENT:
+          if (recovery) return false;
           break;
         default:
           return false;
@@ -919,7 +923,7 @@ void CommittedBinlog::notify_source_reset() noexcept {
   consumer.cv.notify_all();
 }
 
-void CommittedBinlog::notify_dml(THD *thd, TABLE *table) noexcept {
+void CommittedBinlog::notify_dml(THD *thd, TABLE *table, table_id_t table_id) noexcept {
   // Validate logging coverage only. Transaction caches and row-hook positions
   // are not committed boundaries; after_commit publishes the source position.
   struct Seen {
@@ -943,19 +947,16 @@ void CommittedBinlog::notify_dml(THD *thd, TABLE *table) noexcept {
       thd->get_transaction()->xid_state()->get_state() == XID_STATE::XA_NOTR)
     return;
 
-  auto loaded = Imcs::Imcs::instance()->get_rpd_table_by_name(table->s->db.str, table->s->table_name.str);
-  if (!loaded) {
-    ut_a(loaded && "unexpected unloaded table in COMMITTED_BINLOG notify_dml");
-    return;
-  }
+  // The notification caller pins the loaded table; use that identity rather
+  // than looking it up again while a propagation failure may unpublish it.
 
   {
     std::lock_guard lock(consumer.mutex);
-    auto it = consumer.loaded.find(loaded->meta().table_id);
+    auto it = consumer.loaded.find(table_id);
     if (it != consumer.loaded.end())
       it->second.failure_reason = "source DML was not covered by ROW/FULL binlog logging; unload and reload the table";
   }
-  QuarantinePropagationTable(loaded->meta().table_id);
+  QuarantinePropagationTable(table_id);
 }
 
 const char *CommittedBinlog::prepare_query(THD *thd, LEX *lex, uint64_t &view_scn) {

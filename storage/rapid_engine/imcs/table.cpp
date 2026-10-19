@@ -1238,8 +1238,8 @@ size_t Table::delete_rows(const Rapid_load_context *context, const std::vector<r
 int Table::update_row(const Rapid_load_context *context, row_id_t global_row_id,
                       const std::unordered_map<uint32, RowBuffer::ColumnValue> &updates) {
   // This only mutates CU column data (MVCC-versioned per column already).
-  // Callers whose updates touch an indexed column must swap that index's ART
-  // entry (remove old key, insert new key, same rowid) themselves before
+  // Callers whose updates touch an indexed column must retain the old ART
+  // key for older MVCC readers and insert the new key with the same rowid before
   // calling this -- see CopyInfoParser::parse_and_apply_update() -- since
   // that requires the raw old/new row images this function does not have.
 

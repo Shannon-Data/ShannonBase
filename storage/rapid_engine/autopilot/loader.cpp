@@ -1127,6 +1127,8 @@ int SelfLoadManager::perform_self_load(const std::string &schema, const std::str
     Utils::Util::close_table(current_thd, source_table);
     return HA_ERR_GENERIC;
   }
+  DBUG_SIGNAL_WAIT_FOR(current_thd, "rapid_pause_self_load_fenced", "rapid_self_load_fenced",
+                       "rapid_self_load_continue");
   context.m_table = source_table;
   context.m_table_id = source_table->file->get_table_id();
   ha_rows num_rows{0};

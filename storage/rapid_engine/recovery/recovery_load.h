@@ -84,17 +84,6 @@ class LoadFlagManager {
    */
   int query_loaded_tables(THD *thd, std::vector<SecondaryLoadedTable> &out, bool *incomplete = nullptr);
 
-  /**
-   * @brief Check whether the secondary_load flag is set for a specific table.
-   *
-   * @param thd         MySQL thread descriptor.
-   * @param schema_name Database name.
-   * @param table_name  Table name.
-   * @param[out] loaded Set to true if the flag is set.
-   * @return 0 on success, non-zero on failure.
-   */
-  int is_table_flagged(THD *thd, const std::string &schema_name, const std::string &table_name, bool &loaded);
-
  private:
   LoadFlagManager() = default;
   ~LoadFlagManager() = default;

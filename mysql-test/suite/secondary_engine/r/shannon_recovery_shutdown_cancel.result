@@ -1,0 +1,12 @@
+CREATE TABLE cancel_recovery(id INT PRIMARY KEY) SECONDARY_ENGINE=rapid;
+INSERT INTO cancel_recovery VALUES (1);
+ALTER TABLE cancel_recovery SECONDARY_LOAD;
+# restart: --rapid_reload_on_restart=ON --debug=d,rapid_pause_restart_recovery
+SET DEBUG_SYNC='now WAIT_FOR rapid_restart_recovery_paused';
+# restart: --rapid_reload_on_restart=ON
+SET use_secondary_engine=FORCED;
+SELECT * FROM cancel_recovery;
+id
+1
+SET use_secondary_engine=OFF;
+DROP TABLE cancel_recovery;

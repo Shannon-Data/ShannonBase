@@ -780,6 +780,7 @@ uint64_t TransactionCoordinator::get_gc_safe_scn() const {
 }
 
 void TransactionCoordinator::observe_commit_scn(uint64_t commit_scn) {
+  Transaction::VersionManager::instance().observe_scn(commit_scn);
   uint64_t prev = m_max_observed_commit_scn.load(std::memory_order_relaxed);
   while (commit_scn > prev &&
          !m_max_observed_commit_scn.compare_exchange_weak(prev, commit_scn, std::memory_order_acq_rel)) {

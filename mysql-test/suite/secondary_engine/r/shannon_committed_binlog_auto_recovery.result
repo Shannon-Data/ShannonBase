@@ -1,0 +1,27 @@
+CREATE DATABASE cb_restart;
+USE cb_restart;
+CREATE TABLE t(id INT PRIMARY KEY, v INT) SECONDARY_ENGINE=rapid;
+INSERT INTO t VALUES (1,10),(2,20);
+ALTER TABLE t SECONDARY_LOAD;
+# Kill and restart: --rapid_reload_on_restart=ON
+USE cb_restart;
+SET use_secondary_engine=FORCED;
+SELECT * FROM t ORDER BY id;
+id	v
+1	10
+2	20
+SET use_secondary_engine=OFF;
+UPDATE t SET v=11 WHERE id=1;
+INSERT INTO t VALUES (3,30);
+# Kill and restart: --rapid_reload_on_restart=ON
+USE cb_restart;
+SET use_secondary_engine=FORCED;
+SELECT * FROM t ORDER BY id;
+id	v
+1	11
+2	20
+3	30
+SET use_secondary_engine=OFF;
+UPDATE t SET v=31 WHERE id=3;
+DELETE FROM t WHERE id=2;
+DROP DATABASE cb_restart;

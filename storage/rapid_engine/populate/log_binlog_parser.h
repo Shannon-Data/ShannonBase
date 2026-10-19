@@ -81,7 +81,7 @@ class BinlogParser {
   static bool read_batch(THD *, const std::vector<BinlogTableBinding> &, const BinlogPosition &start,
                          const BinlogPosition &committed_end, std::vector<BinlogTransaction> &,
                          BinlogPosition &assembled_end, const char **failure_reason = nullptr,
-                         const std::atomic<bool> *cancel = nullptr) noexcept;
+                         const std::atomic<bool> *cancel = nullptr, bool recovery = false) noexcept;
   static bool supports(const TABLE *);
 };
 
@@ -96,7 +96,7 @@ class CommittedBinlog {
   static bool attach(THD *, TABLE *, const BinlogPosition &baseline);
   static void detach(table_id_t);
   static void shutdown();
-  static void notify_dml(THD *, TABLE *) noexcept;
+  static void notify_dml(THD *, TABLE *, table_id_t) noexcept;
   // Called only from the authoritative after_commit observer. No row capture,
   // allocation, disk I/O, queue-space wait or Rapid transaction participant.
   // after_commit supplies this transaction's end, never get_current_log().

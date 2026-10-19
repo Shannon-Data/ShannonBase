@@ -104,7 +104,8 @@ class TablePersistenceManager {
   NotificationTracker *notifications() { return &m_notifications; }
   // Serialize recovery jobs for this table; source callbacks do not take it.
   std::mutex &recovery_mutex() { return m_recovery_mutex; }
-  bool checkpoint(Imcu *trigger, uint64_t sequence = 0);
+  // deferred is true only for a retryable concurrent source change.
+  bool checkpoint(Imcu *trigger, uint64_t sequence = 0, bool *deferred = nullptr);
   Result<uint64_t> load_snapshot(Imcu *imcu, uint64_t generation);
   Result<size_t> recover(const std::vector<Imcu *> &imcus, uint64_t *restored_generation = nullptr);
   std::filesystem::path snap_path(uint64_t generation, uint32_t imcu_id) const;
