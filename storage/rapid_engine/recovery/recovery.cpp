@@ -31,7 +31,6 @@
 #include "storage/rapid_engine/imcs/imcs.h"
 #include "storage/rapid_engine/imcs/imcu.h"
 #include "storage/rapid_engine/imcs/table.h"
-#include "storage/rapid_engine/utils/try_operation.h"
 
 namespace ShannonBase {
 namespace Recovery {
@@ -399,10 +398,8 @@ void CheckpointScheduler::do_periodic_checkpoint() {
   imcs->for_each_table([this](Imcs::RpdTable *rpd_table) {
     if (!rpd_table) return;
     const auto &metadata = rpd_table->meta();
-    if (!Utils::try_bool_operation([&] {
-          auto state_manager = m_mgr->table_manager(metadata.db_name, metadata.table_name);
-          return state_manager->checkpoint_table_state(metadata.table_id);
-        })) {
+    auto state_manager = m_mgr->table_manager(metadata.db_name, metadata.table_name);
+    if (!state_manager || !state_manager->checkpoint_table_state(metadata.table_id)) {
       const std::string message =
           "CheckpointScheduler: table metadata checkpoint failed " + metadata.db_name + "." + metadata.table_name;
       LogErr(WARNING_LEVEL, ER_LOG_PRINTF_MSG, message.c_str());

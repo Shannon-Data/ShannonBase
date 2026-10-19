@@ -74,19 +74,33 @@ class Index {
    * Insert @a value under @a key.  Returns 0 on success, non-zero when the
    * entry was NOT inserted.
    *
-   * ART_insert() returns the *previous* value stored under the key, so a null
-   * from it means either "the arguments were rejected" or "the key was not
-   * there yet".  A successful fresh insert and a rejected one are therefore
-   * indistinguishable from its return alone.  The rejected case is exactly
-   * ART_insert()'s own guard, so apply the same conditions here: that is the
-   * only failure it reports, and reporting it is what lets a caller notice an
-   * index that never got its entry (see Table::build_index()).
+   * Uses ART_try_insert(), which distinguishes inserted / duplicate (a no-op
+   * that counts as success) / rejected.  Reporting rejection is what lets a
+   * caller notice an index that never got its entry (see Table::build_index()).
    */
   int insert(key_t *key, size_t key_len, value_t *value, size_t value_len) {
     if (!initialized() || key == nullptr || key_len == 0 || value == nullptr || value_len == 0) return 1;
-    m_impl->ART_insert(reinterpret_cast<const unsigned char *>(key), static_cast<int>(key_len), value,
-                       static_cast<uint32_t>(value_len));
-    return 0;
+    // ART_try_insert reports what actually happened.  The old code could not
+    // tell "inserted" from "silently dropped", so a refused insert (value width
+    // mismatch, value too large, key that is a prefix of another) looked like
+    // success.  A repeat of an existing (key, value) is a deliberate no-op.
+    const auto r = m_impl->ART_try_insert(reinterpret_cast<const unsigned char *>(key), static_cast<int>(key_len),
+                                          value, static_cast<uint32_t>(value_len));
+    return r == ART::InsertResult::REJECTED ? 1 : 0;
+  }
+
+  /**
+   * Move one value from old_key to new_key atomically (single exclusive lock),
+   * so concurrent readers never see the row under neither key.  Use this for
+   * index-key updates instead of remove() + insert().  Returns 0 on success,
+   * 1 if the new entry was refused (the old entry is then left in place).
+   */
+  int move(key_t *old_key, size_t old_len, key_t *new_key, size_t new_len, value_t *value, size_t value_len) {
+    if (!initialized() || !old_key || !old_len || !new_key || !new_len || !value || !value_len) return 1;
+    const auto r = m_impl->ART_move_value(reinterpret_cast<const unsigned char *>(old_key), static_cast<int>(old_len),
+                                          reinterpret_cast<const unsigned char *>(new_key), static_cast<int>(new_len),
+                                          value, static_cast<uint32_t>(value_len));
+    return r == ART::InsertResult::REJECTED ? 1 : 0;
   }
 
   int remove(key_t *key, size_t key_len) {

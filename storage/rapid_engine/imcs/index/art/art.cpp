@@ -45,95 +45,131 @@ namespace ShannonBase {
 namespace Imcs {
 namespace Index {
 /*
- * ART_insert
+ * Concurrency model: tree_mutex is acquired exclusively by every mutator for
+ * the whole call and shared by every reader.  Every mutation bumps
+ * Art_tree::version so cursors that dropped the lock between steps can tell
+ * their retained path may be stale and re-seek by key.
  *
- * Concurrency model: tree_mutex is acquired exclusively for the whole call.
- * This serialises all concurrent writers and blocks readers for the duration.
- *
- * Upgrade path (future work): Replace with Optimistic Lock Coupling (OLC).
- * Each inner node would carry a version counter; readers optimistically read
- * then validate; writers lock only the target node.  That counter is 8 bytes
- * on Art_inner_node, which is why no per-node lock word is reserved today.
+ * Upgrade path (future work): Optimistic Lock Coupling.  Note that it needs
+ * epoch-based reclamation; shared_ptr nodes make readers write the refcount
+ * of every node they touch, which is what OLC is meant to avoid.
  */
-void *ART::ART_insert(const unsigned char *key, int key_len, void *value, uint value_len) {
-  if (!key || key_len <= 0 || !value || value_len == 0 || !m_inited) return nullptr;
+ART::InsertResult ART::Insert_locked(const unsigned char *key, int key_len, void *value, uint32_t value_len,
+                                     void **old_out) {
+  if (old_out) *old_out = nullptr;
+  if (!key || key_len <= 0 || !value || value_len == 0 || value_len > UINT16_MAX) return InsertResult::REJECTED;
 
+  InsertResult res = InsertResult::REJECTED;
+  void *old = Recursive_insert(m_tree->root, key, key_len, value, value_len, 0, &res, 0);
+  if (old_out) *old_out = old;
+
+  if (res == InsertResult::INSERTED) m_tree->size.fetch_add(1, std::memory_order_acq_rel);
+  if (res == InsertResult::INSERTED || res == InsertResult::REPLACED)
+    m_tree->version.fetch_add(1, std::memory_order_release);
+  return res;
+}
+
+ART::InsertResult ART::ART_try_insert(const unsigned char *key, int key_len, const void *value, uint32_t value_len) {
+  if (!m_inited.load(std::memory_order_acquire)) return InsertResult::REJECTED;
   std::unique_lock tree_lock(m_tree->tree_mutex);
-  int old_val = 0;
-  ArtNodePtr &root_ref = m_tree->root;
-  void *old = Recursive_insert(root_ref, key, key_len, value, value_len, 0, &old_val, 0);
+  return Insert_locked(key, key_len, const_cast<void *>(value), value_len, nullptr);
+}
 
-  if (!old_val) m_tree->size.fetch_add(1, std::memory_order_acq_rel);
-
+void *ART::ART_insert(const unsigned char *key, int key_len, void *value, uint value_len) {
+  if (!m_inited.load(std::memory_order_acquire)) return nullptr;
+  std::unique_lock tree_lock(m_tree->tree_mutex);
+  void *old = nullptr;
+  Insert_locked(key, key_len, value, value_len, &old);
   return old;
 }
 
 /*
- * ART_delete
+ * ART_delete: removes the leaf with every value under it.  The size counter
+ * drops by the number of values the leaf held, matching how insert counts.
  */
 void *ART::ART_delete(const unsigned char *key, int key_len) {
-  if (!key || key_len <= 0 || !m_inited) return nullptr;
+  if (!key || key_len <= 0 || !m_inited.load(std::memory_order_acquire)) return nullptr;
 
   std::unique_lock<std::shared_mutex> tree_lock(m_tree->tree_mutex);
 
   void *result = nullptr;
-  ArtNodePtr leaf = Recursive_delete(m_tree->root, key, key_len, 0, result);
+  uint32_t removed = 0;
+  ArtNodePtr leaf = Recursive_delete(m_tree->root, key, key_len, 0, result, &removed);
   if (!leaf) return nullptr;
 
-  // If the deleted leaf was the root itself (tree had exactly one entry),
-  // nullify the root so that the next insert does not encounter a zombie
-  // leaf with cleared key/values (which would UB on leaf->key[0] access).
-  if (leaf.get() == m_tree->root.get() && is_leaf(leaf.get())) {
-    m_tree->root = nullptr;
-  }
+  // The deleted leaf was the root itself: null the root so the next insert
+  // does not meet a zombie leaf with cleared key/values.
+  if (leaf.get() == m_tree->root.get() && is_leaf(leaf.get())) m_tree->root = nullptr;
+
+  m_tree->size.fetch_sub(removed, std::memory_order_acq_rel);
+  m_tree->version.fetch_add(1, std::memory_order_release);
+  return result;  // non-null marker only; the leaf it points at is already dead
+}
+
+bool ART::Delete_value_locked(const unsigned char *key, int key_len, const void *value, uint32_t value_len) {
+  if (!key || key_len <= 0 || !value || value_len == 0) return false;
+
+  Art_leaf *leaf = Find_leaf(key, key_len);
+  if (!leaf || !leaf->remove_value(value, value_len)) return false;
 
   m_tree->size.fetch_sub(1, std::memory_order_acq_rel);
-  return result;
+  // The leaf keeps its other duplicate values; it leaves the tree only with its last one.
+  if (leaf->value_count() == 0) {
+    void *dummy = nullptr;
+    uint32_t removed = 0;
+    ArtNodePtr res = Recursive_delete(m_tree->root, key, key_len, 0, dummy, &removed);
+    if (res && res.get() == m_tree->root.get() && is_leaf(res.get())) m_tree->root = nullptr;
+  }
+  m_tree->version.fetch_add(1, std::memory_order_release);
+  return true;
 }
 
 void *ART::ART_delete_value(const unsigned char *key, int key_len, const void *value, uint32_t value_len) {
-  if (!key || key_len <= 0 || !value || value_len == 0 || !m_inited) return nullptr;
+  if (!key || key_len <= 0 || !value || value_len == 0 || !m_inited.load(std::memory_order_acquire)) return nullptr;
 
   std::unique_lock<std::shared_mutex> tree_lock(m_tree->tree_mutex);
+  if (!Delete_value_locked(key, key_len, value, value_len)) return nullptr;
+  return const_cast<void *>(value);  // non-null marker: caller only needs found/not-found
+}
 
-  Art_leaf *leaf = Find_leaf(key, key_len);
-  if (!leaf || !leaf->remove_value(value, value_len)) return nullptr;
+ART::InsertResult ART::ART_move_value(const unsigned char *old_key, int old_len, const unsigned char *new_key,
+                                      int new_len, const void *value, uint32_t value_len) {
+  if (!old_key || old_len <= 0 || !new_key || new_len <= 0 || !value || value_len == 0 ||
+      !m_inited.load(std::memory_order_acquire))
+    return InsertResult::REJECTED;
 
-  // The leaf keeps its other duplicate values; remove it from the tree only
-  // when this was its last value.
-  if (leaf->value_count() == 0) {
-    void *dummy = nullptr;
-    ArtNodePtr res = Recursive_delete(m_tree->root, key, key_len, 0, dummy);
-    if (res) {
-      if (res.get() == m_tree->root.get() && is_leaf(res.get())) m_tree->root = nullptr;
-      m_tree->size.fetch_sub(1, std::memory_order_acq_rel);
-    }
-  }
+  std::unique_lock<std::shared_mutex> tree_lock(m_tree->tree_mutex);
+  if (old_len == new_len && std::memcmp(old_key, new_key, old_len) == 0) return InsertResult::DUPLICATE;
 
-  // Non-null marker: caller only needs found/not-found.
-  return const_cast<void *>(value);
+  // Insert first: if the new entry is refused the old one must survive.
+  const InsertResult r = Insert_locked(new_key, new_len, const_cast<void *>(value), value_len, nullptr);
+  if (r == InsertResult::REJECTED) return r;
+  Delete_value_locked(old_key, old_len, value, value_len);  // absent on replay: fine
+  return r;
 }
 
 /*
  * Find_leaf
  *
- * The descent every point operation shares: follow the compressed prefixes and
- * the per-byte edges, then confirm the leaf really holds this key -- reaching a
- * leaf only means its key agrees on the bytes the descent looked at.
+ * The descent every point operation shares.  Read paths use raw pointers: the
+ * caller holds tree_mutex, which already pins every node, and copying
+ * shared_ptrs would make all reader threads hammer the refcount of the root.
+ * Reaching a leaf only means its key agrees on the bytes the descent looked
+ * at, so the full key is compared.
  *
  * Caller holds tree_mutex; the returned leaf is only valid while it does.
  */
 ART::Art_leaf *ART::Find_leaf(const unsigned char *key, int key_len) {
-  ArtNodePtr n = m_tree->root;
+  Art_node *n = m_tree->root.get();
   int depth = 0;
 
   while (n) {
-    if (is_leaf(n.get())) {
-      Art_leaf *leaf = to_leaf(n.get());
-      return Leaf_matches(leaf, key, key_len, depth) ? nullptr : leaf;
+    if (is_leaf(n)) {
+      Art_leaf *leaf = to_leaf(n);
+      return Leaf_compare(leaf, key, key_len, depth) ? nullptr : leaf;
     }
 
-    const Art_inner_node *inner = to_inner(n.get());
+    const Art_inner_node *inner = to_inner(n);
     if (inner->partial_len) {
       const int prefix_len = Check_prefix(inner, key, key_len, depth);
       if (static_cast<uint32_t>(prefix_len) != std::min(MAX_PREFIX_LEN, inner->partial_len)) return nullptr;
@@ -142,17 +178,14 @@ ART::Art_leaf *ART::Find_leaf(const unsigned char *key, int key_len) {
 
     if (depth >= key_len) return nullptr;
 
-    ArtNodePtr child = Find_child(n, key[depth]);
-    if (!child) return nullptr;
-
-    n = child;
+    n = Find_child_raw(n, key[depth]);
     depth++;
   }
   return nullptr;
 }
 
 void *ART::ART_search(const unsigned char *key, int key_len) {
-  if (!key || key_len <= 0 || !m_inited) return nullptr;
+  if (!key || key_len <= 0 || !m_inited.load(std::memory_order_acquire)) return nullptr;
 
   std::shared_lock<std::shared_mutex> tree_lock(m_tree->tree_mutex);
   Art_leaf *leaf = Find_leaf(key, key_len);
@@ -161,7 +194,7 @@ void *ART::ART_search(const unsigned char *key, int key_len) {
 }
 
 bool ART::ART_search_copy(const unsigned char *key, int key_len, void *out, uint32_t out_len) {
-  if (!key || key_len <= 0 || !out || out_len == 0 || !m_inited) return false;
+  if (!key || key_len <= 0 || !out || out_len == 0 || !m_inited.load(std::memory_order_acquire)) return false;
 
   std::shared_lock<std::shared_mutex> tree_lock(m_tree->tree_mutex);
   Art_leaf *leaf = Find_leaf(key, key_len);
@@ -172,7 +205,7 @@ bool ART::ART_search_copy(const unsigned char *key, int key_len, void *out, uint
 
 std::vector<std::vector<uint8_t>> ART::ART_search_all(const unsigned char *key, int key_len) {
   std::vector<std::vector<uint8_t>> results;
-  if (!key || key_len <= 0 || !m_inited) return results;
+  if (!key || key_len <= 0 || !m_inited.load(std::memory_order_acquire)) return results;
 
   std::shared_lock<std::shared_mutex> tree_lock(m_tree->tree_mutex);
   const Art_leaf *leaf = Find_leaf(key, key_len);
@@ -187,10 +220,11 @@ std::vector<std::vector<uint8_t>> ART::ART_search_all(const unsigned char *key, 
 }
 
 /*
- * ART_iter, acquire shared lock before iterating.
+ * ART_iter, acquire shared lock before iterating.  The callback runs under
+ * that lock: it must not write to this tree (self-deadlock).
  */
 int ART::ART_iter(ART_Func cb, void *data) {
-  if (!m_inited || !m_tree) return 0;
+  if (!m_inited.load(std::memory_order_acquire) || !m_tree) return 0;
   std::shared_lock<std::shared_mutex> tree_lock(m_tree->tree_mutex);
   return Recursive_iter(m_tree->root.get(), cb, data);
 }
@@ -207,35 +241,45 @@ bool copy_leaf_value(const ART::Art_leaf *leaf, void *out, uint32_t out_len, uin
 }  // namespace
 
 bool ART::ART_minimum_copy(void *out, uint32_t out_len, uint32_t idx) {
-  if (!m_inited) return false;
+  if (!m_inited.load(std::memory_order_acquire)) return false;
   std::shared_lock lk(m_tree->tree_mutex);
   return copy_leaf_value(Minimum(m_tree->root.get()), out, out_len, idx);
 }
 
 bool ART::ART_maximum_copy(void *out, uint32_t out_len, uint32_t idx) {
-  if (!m_inited) return false;
+  if (!m_inited.load(std::memory_order_acquire)) return false;
   std::shared_lock lk(m_tree->tree_mutex);
   return copy_leaf_value(Maximum(m_tree->root.get()), out, out_len, idx);
 }
 
 ART::Art_leaf *ART::ART_minimum() {
-  if (!m_inited) return nullptr;
+  if (!m_inited.load(std::memory_order_acquire)) return nullptr;
   std::shared_lock lk(m_tree->tree_mutex);
   return Minimum(m_tree->root.get());
 }
 
 ART::Art_leaf *ART::ART_maximum() {
-  if (!m_inited) return nullptr;
+  if (!m_inited.load(std::memory_order_acquire)) return nullptr;
   std::shared_lock lk(m_tree->tree_mutex);
   return Maximum(m_tree->root.get());
 }
 
+/*
+ * Recursive_insert
+ *
+ * Reports its outcome through *res on EVERY path (nothing falls through
+ * leaving the caller to guess).  Everything that can throw (node and leaf
+ * allocation) happens before the first mutation of an existing node, so a
+ * bad_alloc cannot leave an inner node with a rewritten prefix and no parent.
+ */
 void *ART::Recursive_insert(ArtNodePtr &node, const unsigned char *key, int key_len, void *value, uint32_t value_len,
-                            int depth, int *old, int replace) {
+                            int depth, InsertResult *res, int replace) {
+  *res = InsertResult::REJECTED;
+
   // 1. Empty slot: insert a new leaf
   if (!node) {
     node = make_art_node<Art_leaf>(key, key_len, value, value_len);
-    *old = 0;
+    *res = InsertResult::INSERTED;
     return nullptr;
   }
 
@@ -243,35 +287,37 @@ void *ART::Recursive_insert(ArtNodePtr &node, const unsigned char *key, int key_
   if (is_leaf(node.get())) {
     auto leaf = to_leaf(node.get());
 
-    if (!Leaf_matches(leaf, key, key_len, depth)) {
-      // Same key — append or replace value.
+    if (!Leaf_compare(leaf, key, key_len, depth)) {
+      // Same key -- append or replace value.
       if (replace && leaf->value_count()) {
-        if (!leaf->replace_first_value(value, value_len)) return nullptr;
-        *old = 1;
+        if (!leaf->replace_first_value(value, value_len)) return nullptr;  // REJECTED
+        *res = InsertResult::REPLACED;
         return leaf->mutable_value_at(0);
       }
-      // Appending a (key, value) pair the leaf already holds makes an index scan
-      // return the same physical row twice.  Replaying an index swap does
-      // exactly that: the remove(old_key) half is a no-op once the key is gone,
-      // while insert(new_key) runs again. Treat a repeat as the no-op it is
-      // meant to be, and do not count it towards the tree size.
+      // A (key, value) the leaf already holds would make a scan return the same
+      // physical row twice; a replayed index swap does exactly that.  Treat the
+      // repeat as the no-op it is meant to be.
       if (leaf->has_value(value, value_len)) {
-        *old = 1;
+        *res = InsertResult::DUPLICATE;
         return nullptr;
       }
-      leaf->add_value(value, value_len);
-      *old = 0;
+      // add_value refuses a width that differs from the values already stored.
+      if (!leaf->add_value(value, value_len)) return nullptr;  // REJECTED
+      *res = InsertResult::INSERTED;
       return nullptr;
     }
 
-    // Different key — split into a Node4.
-    auto node4 = make_art_node<Art_node4>();
-    if (!node4) return nullptr;
-
+    // Different key -- split into a Node4.
     auto l2 = make_art_node<Art_leaf>(key, key_len, value, value_len);
-    if (!l2) return nullptr;
+    const int longest_prefix = Longest_common_prefix(leaf, l2.get(), depth);
 
-    int longest_prefix = Longest_common_prefix(leaf, l2.get(), depth);
+    // Keys must be prefix-free: if one key ends where the other still has bytes
+    // there is no byte to branch on, and key()[depth + lcp] would read one past
+    // the end of the shorter key.
+    if (depth + longest_prefix >= static_cast<int>(leaf->key_length()) || depth + longest_prefix >= key_len)
+      return nullptr;  // REJECTED
+
+    auto node4 = make_art_node<Art_node4>();
     node4->partial_len = longest_prefix;
     std::memcpy(node4->partial, key + depth, std::min(static_cast<int>(MAX_PREFIX_LEN), longest_prefix));
 
@@ -279,7 +325,7 @@ void *ART::Recursive_insert(ArtNodePtr &node, const unsigned char *key, int key_
     new_node = Add_child4(new_node, leaf->key()[depth + longest_prefix], node);
     new_node = Add_child4(new_node, l2->key()[depth + longest_prefix], l2);
     node = new_node;
-    *old = 0;
+    *res = InsertResult::INSERTED;
     return nullptr;
   }
 
@@ -289,16 +335,18 @@ void *ART::Recursive_insert(ArtNodePtr &node, const unsigned char *key, int key_
     int prefix_diff = Prefix_mismatch(inner, key, key_len, depth);
 
     if (static_cast<uint32_t>(prefix_diff) < inner->partial_len) {
-      // Prefix mismatch — split this node.
+      // Prefix mismatch -- split this node.  A key that ends inside the prefix
+      // has no byte to branch on (and key[depth + prefix_diff] would be OOB).
+      if (depth + prefix_diff >= key_len) return nullptr;  // REJECTED
+
+      // Allocate first; only then touch `inner`.
       auto node4 = make_art_node<Art_node4>();
-      if (!node4) return nullptr;
+      auto new_leaf = make_art_node<Art_leaf>(key, key_len, value, value_len);
 
       // partial_len records the true prefix length, which may exceed
-      // MAX_PREFIX_LEN under optimistic path compression; only the first
-      // MAX_PREFIX_LEN bytes are actually materialised in partial[].
-      // Prefix_mismatch() resumes the comparison from a leaf key past that
-      // bound, so prefix_diff can legitimately come back larger than the
-      // buffer -- clamp the copy the way every other partial[] write does.
+      // MAX_PREFIX_LEN; only the first MAX_PREFIX_LEN bytes live in partial[].
+      // Prefix_mismatch() resumes from a leaf key past that bound, so
+      // prefix_diff can exceed the buffer -- clamp the copy.
       node4->partial_len = prefix_diff;
       std::memcpy(node4->partial, inner->partial, std::min(static_cast<uint32_t>(prefix_diff), MAX_PREFIX_LEN));
 
@@ -316,34 +364,30 @@ void *ART::Recursive_insert(ArtNodePtr &node, const unsigned char *key, int key_
         std::memcpy(inner->partial, leaf->key() + depth + prefix_diff + 1, copy_len);
       }
 
-      auto new_leaf = make_art_node<Art_leaf>(key, key_len, value, value_len);
-      if (!new_leaf) return nullptr;
-
       new_node = Add_child4(new_node, key[depth + prefix_diff], new_leaf);
       node = new_node;
-      *old = 0;
+      *res = InsertResult::INSERTED;
       return nullptr;
     }
 
     depth += inner->partial_len;
   }
 
-  if (depth >= key_len) return nullptr;
+  if (depth >= key_len) return nullptr;  // REJECTED: key is a prefix of existing keys
 
   // Recurse through the parent's actual slot so the callee can replace it
-  // (leaf → Node4, say) — safe because tree_mutex exclusive is still held.
+  // (leaf -> Node4, say) -- safe because tree_mutex exclusive is held.
   ArtNodePtr *child_slot = Find_child_slot(node.get(), key[depth]);
   if (!child_slot || !*child_slot) {
     auto new_leaf = make_art_node<Art_leaf>(key, key_len, value, value_len);
-    if (!new_leaf) return nullptr;
     // Add_child may swap `node` for a wider fan-out, invalidating child_slot;
     // nothing reads it afterwards.
     Add_child(node, node, key[depth], new_leaf);
-    *old = 0;
+    *res = InsertResult::INSERTED;
     return nullptr;
   }
 
-  return Recursive_insert(*child_slot, key, key_len, value, value_len, depth + 1, old, replace);
+  return Recursive_insert(*child_slot, key, key_len, value, value_len, depth + 1, res, replace);
 }
 
 ART::ArtNodePtr *ART::Find_child_slot(Art_node *n, unsigned char c) {
@@ -382,8 +426,9 @@ ART::ArtNodePtr *ART::Find_child_slot(Art_node *n, unsigned char c) {
  * Recursive_delete
  *
  * Returns the leaf that was unhooked (a non-null marker), or nullptr when the
- * key is absent.  `result` is set to that same leaf when it held values; the
- * value bytes are freed with it, so callers may only test it for null.
+ * key is absent.  `result` is set to that same leaf; its value bytes are freed
+ * with it, so callers may only test it for null.  `*removed` is the number of
+ * values it held, for the size counter.
  *
  * The child edge is dropped at the leaf's own parent and nowhere else.  This
  * used to call Remove_child on every frame as the recursion unwound, which
@@ -393,22 +438,22 @@ ART::ArtNodePtr *ART::Find_child_slot(Art_node *n, unsigned char c) {
  * it -- or a node that collapses into its last remaining child (Remove_child4)
  * updates the copy and leaves the parent pointing at the old node.
  */
-ART::ArtNodePtr ART::Recursive_delete(ArtNodePtr &node, const unsigned char *key, int key_len, int depth,
-                                      void *&result) {
+ART::ArtNodePtr ART::Recursive_delete(ArtNodePtr &node, const unsigned char *key, int key_len, int depth, void *&result,
+                                      uint32_t *removed) {
   if (!node) return nullptr;
 
   // A leaf sitting at the root: nothing to unhook, the caller nulls the root.
   if (is_leaf(node.get())) {
     auto leaf = to_leaf(node.get());
-    if (Leaf_matches(leaf, key, key_len, depth)) return nullptr;
-    // The values die with the leaf, so `result` is a found/not-found marker
-    // rather than a pointer to them.
-    if (leaf->value_count()) result = leaf;
+    if (Leaf_compare(leaf, key, key_len, depth)) return nullptr;
+    // The values die with the leaf, so `result` is a found/not-found marker.
+    result = leaf;
+    *removed = leaf->value_count();
     leaf->clear();
     return node;
   }
 
-  // No per-node lock — tree_mutex exclusive covers us.
+  // No per-node lock -- tree_mutex exclusive covers us.
   Art_inner_node *inner = to_inner(node.get());
   if (inner->partial_len) {
     int prefix_len = Check_prefix(inner, key, key_len, depth);
@@ -423,46 +468,45 @@ ART::ArtNodePtr ART::Recursive_delete(ArtNodePtr &node, const unsigned char *key
 
   if (is_leaf(child_slot->get())) {
     auto leaf = to_leaf(child_slot->get());
-    if (Leaf_matches(leaf, key, key_len, depth)) return nullptr;
-    if (leaf->value_count()) result = leaf;
+    if (Leaf_compare(leaf, key, key_len, depth)) return nullptr;
+    result = leaf;
+    *removed = leaf->value_count();
 
     // Keep the leaf alive past Remove_child, which drops the tree's reference.
-    ArtNodePtr removed = *child_slot;
+    ArtNodePtr unhooked = *child_slot;
     leaf->clear();
-    Remove_child(node, key[depth], removed);
-    return removed;
+    Remove_child(node, key[depth], unhooked);
+    return unhooked;
   }
 
-  return Recursive_delete(*child_slot, key, key_len, depth + 1, result);
+  return Recursive_delete(*child_slot, key, key_len, depth + 1, result, removed);
 }
 
-ART::ArtNodePtr ART::Find_child(const ArtNodePtr &n, unsigned char c) {
-  if (!n || is_leaf(n.get())) return nullptr;
+ART::Art_node *ART::Find_child_raw(const Art_node *n, unsigned char c) const {
+  if (!n || is_leaf(n)) return nullptr;
 
-  // No node_mutex lock: callers always hold tree_mutex (exclusive or shared).
+  // Callers hold tree_mutex (exclusive or shared).
   switch (n->type()) {
     case NODE4: {
-      auto *p = static_cast<Art_node4 *>(n.get());
+      auto *p = static_cast<const Art_node4 *>(n);
       for (int i = 0; i < p->num_children; ++i)
-        if (p->keys[i] == c) return p->children[i];
+        if (p->keys[i] == c) return p->children[i].get();
       break;
     }
     case NODE16: {
-      auto *p = static_cast<Art_node16 *>(n.get());
+      auto *p = static_cast<const Art_node16 *>(n);
       for (int i = 0; i < p->num_children; ++i)
-        if (p->keys[i] == c) return p->children[i];
+        if (p->keys[i] == c) return p->children[i].get();
       break;
     }
     case NODE48: {
-      auto *p = static_cast<Art_node48 *>(n.get());
-      int idx = p->keys[c];
-      if (idx) return p->children[idx - 1];
+      auto *p = static_cast<const Art_node48 *>(n);
+      const int idx = p->keys[c];
+      if (idx) return p->children[idx - 1].get();
       break;
     }
-    case NODE256: {
-      auto *p = static_cast<Art_node256 *>(n.get());
-      return p->children[c];  // may be nullptr, that's fine
-    }
+    case NODE256:
+      return static_cast<const Art_node256 *>(n)->children[c].get();  // may be nullptr
     default:
       break;
   }
@@ -904,7 +948,7 @@ int ART::Longest_common_prefix(const Art_leaf *l1, const Art_leaf *l2, int depth
   return max_cmp;
 }
 
-int ART::Leaf_matches(const Art_leaf *n, const unsigned char *key, int key_len, int /*depth*/) {
+int ART::Leaf_compare(const Art_leaf *n, const unsigned char *key, int key_len, int /*depth*/) {
   if (n->key_length() != static_cast<uint32_t>(key_len)) return 1;
   return std::memcmp(n->key(), key, key_len);
 }

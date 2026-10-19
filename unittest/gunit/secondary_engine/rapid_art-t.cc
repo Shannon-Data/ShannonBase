@@ -42,6 +42,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstring>
 #include <map>
 #include <random>
@@ -54,11 +55,15 @@
 #include <gtest/gtest.h>
 
 #include "storage/rapid_engine/imcs/index/art/iterator.h"
+#include "storage/rapid_engine/imcs/index/encoder.h"
+#include "storage/rapid_engine/imcs/index/index.h"
 
 namespace shannon_rapid_art_unittest {
 
 using ShannonBase::Imcs::Index::ART;
 using ShannonBase::Imcs::Index::ARTIterator;
+using ShannonBase::Imcs::Index::Encoder;
+using ShannonBase::Imcs::Index::Index;
 
 // Raw key bytes; embedded NULs are ordinary content.
 using Key = std::string;
@@ -806,6 +811,361 @@ TEST(RapidArtConcurrency, ReadersSeeAConsistentTreeWhileWritersChurn) {
     ASSERT_EQ(RowId(i + 1), got);
   }
   tree.ART_tree_destroy();
+}
+
+// ---------------------------------------------------------- insert contract
+
+Key BeKey(uint64_t v) {
+  Key k(8, '\0');
+  for (int i = 0; i < 8; ++i) k[i] = static_cast<char>((v >> (56 - 8 * i)) & 0xff);
+  return k;
+}
+
+uint64_t KeyAsU64(const unsigned char *p) {
+  uint64_t v = 0;
+  for (int i = 0; i < 8; ++i) v = (v << 8) | p[i];
+  return v;
+}
+
+TEST(RapidArtInsert, ReportsInsertedDuplicateAndRejected) {
+  ART tree;
+  tree.ART_tree_init();
+  const Key k = BeKey(1);
+  RowId v1 = 1, v2 = 2;
+  EXPECT_EQ(ART::InsertResult::INSERTED, tree.ART_try_insert(Bytes(k), KeyLen(k), &v1, sizeof(v1)));
+  EXPECT_EQ(ART::InsertResult::DUPLICATE, tree.ART_try_insert(Bytes(k), KeyLen(k), &v1, sizeof(v1)));
+  EXPECT_EQ(ART::InsertResult::INSERTED, tree.ART_try_insert(Bytes(k), KeyLen(k), &v2, sizeof(v2)));
+  EXPECT_EQ(2u, tree.tree()->size.load());
+
+  EXPECT_NE(nullptr, tree.ART_delete_value(Bytes(k), KeyLen(k), &v1, sizeof(v1)));
+  EXPECT_EQ(1u, tree.tree()->size.load());
+  EXPECT_NE(nullptr, tree.ART_delete_value(Bytes(k), KeyLen(k), &v2, sizeof(v2)));
+  EXPECT_EQ(0u, tree.tree()->size.load());
+
+  // The tree is reusable once it drains.
+  EXPECT_EQ(ART::InsertResult::INSERTED, tree.ART_try_insert(Bytes(k), KeyLen(k), &v1, sizeof(v1)));
+  EXPECT_EQ(ART::InsertResult::INSERTED, tree.ART_try_insert(Bytes(k), KeyLen(k), &v2, sizeof(v2)));
+  EXPECT_NE(nullptr, tree.ART_delete(Bytes(k), KeyLen(k)));
+  EXPECT_EQ(0u, tree.tree()->size.load());
+}
+
+TEST(RapidArtInsert, RefusesKeysThatAreNotPrefixFree) {
+  ART tree;
+  tree.ART_tree_init();
+  const unsigned char k1[3] = {1, 2, 3};
+  const unsigned char k2[2] = {1, 2};
+  const unsigned char k3[4] = {1, 2, 3, 4};
+  RowId v = 7;
+  EXPECT_EQ(ART::InsertResult::INSERTED, tree.ART_try_insert(k1, 3, &v, sizeof(v)));
+  EXPECT_EQ(ART::InsertResult::REJECTED, tree.ART_try_insert(k2, 2, &v, sizeof(v)));  // prefix of k1
+  EXPECT_EQ(ART::InsertResult::REJECTED, tree.ART_try_insert(k3, 4, &v, sizeof(v)));  // extends k1
+  EXPECT_EQ(1u, tree.tree()->size.load());
+  EXPECT_NE(nullptr, tree.ART_search(k1, 3));
+
+  // A different value width would shift every sibling, so it is refused.
+  uint32_t narrow = 1;
+  EXPECT_EQ(ART::InsertResult::REJECTED, tree.ART_try_insert(k1, 3, &narrow, sizeof(narrow)));
+  EXPECT_EQ(1u, tree.tree()->size.load());
+  std::vector<unsigned char> big(70000);
+  EXPECT_EQ(ART::InsertResult::REJECTED, tree.ART_try_insert(k1, 3, big.data(), static_cast<uint32_t>(big.size())));
+  EXPECT_EQ(1u, tree.tree()->size.load());
+
+  // The prefix check also sees bytes inside a compressed inner-node path.
+  ART deep;
+  deep.ART_tree_init();
+  Key a1(20, '\x05'), a2(20, '\x05');
+  a2[19] = '\x06';
+  EXPECT_EQ(ART::InsertResult::INSERTED, deep.ART_try_insert(Bytes(a1), KeyLen(a1), &v, sizeof(v)));
+  EXPECT_EQ(ART::InsertResult::INSERTED, deep.ART_try_insert(Bytes(a2), KeyLen(a2), &v, sizeof(v)));
+  EXPECT_EQ(ART::InsertResult::REJECTED, deep.ART_try_insert(Bytes(a1), 10, &v, sizeof(v)));
+}
+
+TEST(RapidArtIndex, InsertReportsRefusalAndMoveReplays) {
+  Index<unsigned char, RowId> idx;
+  Key key = BeKey(1);
+  Key prefix(key.data(), key.size() - 1);
+  RowId v = 5, out = 0;
+  EXPECT_EQ(0, idx.insert(reinterpret_cast<unsigned char *>(key.data()), key.size(), &v, sizeof(v)));
+  EXPECT_EQ(1, idx.insert(reinterpret_cast<unsigned char *>(prefix.data()), prefix.size(), &v, sizeof(v)));
+  EXPECT_EQ(0, idx.insert(reinterpret_cast<unsigned char *>(key.data()), key.size(), &v, sizeof(v)));
+
+  Key to = BeKey(2);
+  EXPECT_EQ(0, idx.move(reinterpret_cast<unsigned char *>(key.data()), key.size(),
+                        reinterpret_cast<unsigned char *>(to.data()), to.size(), &v, sizeof(v)));
+  EXPECT_FALSE(idx.lookup(reinterpret_cast<unsigned char *>(key.data()), key.size(), &out));
+  ASSERT_TRUE(idx.lookup(reinterpret_cast<unsigned char *>(to.data()), to.size(), &out));
+  EXPECT_EQ(v, out);
+
+  // Replaying the move must not add a second entry.
+  EXPECT_EQ(0, idx.move(reinterpret_cast<unsigned char *>(key.data()), key.size(),
+                        reinterpret_cast<unsigned char *>(to.data()), to.size(), &v, sizeof(v)));
+  ASSERT_TRUE(idx.lookup(reinterpret_cast<unsigned char *>(to.data()), to.size(), &out));
+  EXPECT_EQ(v, out);
+  EXPECT_EQ(1u, idx.impl()->tree()->size.load());
+}
+
+TEST(RapidArtLeaf, WideFanoutNodeCountsEveryChild) {
+  ART tree;
+  tree.ART_tree_init();
+  for (int i = 0; i < 256; ++i) {
+    unsigned char k[2] = {0, static_cast<unsigned char>(i)};
+    RowId v = static_cast<RowId>(i);
+    ASSERT_EQ(ART::InsertResult::INSERTED, tree.ART_try_insert(k, 2, &v, sizeof(v)));
+  }
+  ART::Art_inner_node *root = static_cast<ART::Art_inner_node *>(tree.root());
+  ASSERT_NE(nullptr, root);
+  EXPECT_EQ(ART::NODE256, root->type());
+  EXPECT_EQ(256u, root->num_children);
+
+  for (int i = 0; i < 256; ++i) {
+    unsigned char k[2] = {0, static_cast<unsigned char>(i)};
+    EXPECT_NE(nullptr, tree.ART_delete(k, 2));
+  }
+  EXPECT_EQ(nullptr, tree.root());
+  EXPECT_EQ(0u, tree.tree()->size.load());
+}
+
+// ------------------------------------------------------------ cursor robustness
+
+TEST(RapidArtCursor, PositionSurvivesNodeGrowthAndNeighbourDelete) {
+  // Both operations replace a node on the cursor's cached path.
+  for (bool reverse : {false, true}) {
+    ART tree;
+    tree.ART_tree_init();
+    for (uint64_t i = 1; i <= 4; ++i) {
+      const Key k = BeKey(i);
+      RowId v = i;
+      ASSERT_EQ(ART::InsertResult::INSERTED, tree.ART_try_insert(Bytes(k), KeyLen(k), &v, sizeof(v)));
+    }
+
+    ARTIterator<unsigned char, RowId> it(&tree);
+    const unsigned char *kp = nullptr;
+    uint32_t kl = 0;
+    RowId out = 0;
+    {
+      std::shared_lock<std::shared_mutex> guard(tree.tree()->tree_mutex);
+      if (reverse) {
+        it.init_reverse_scan(nullptr, 0, false, nullptr, 0, false);
+        ASSERT_TRUE(it.prev(&kp, &kl, &out));
+        EXPECT_EQ(RowId{4}, out);
+      } else {
+        it.init_scan(nullptr, 0, false, nullptr, 0, false);
+        ASSERT_TRUE(it.next(&kp, &kl, &out));
+        EXPECT_EQ(RowId{1}, out);
+      }
+    }
+
+    // A fifth child grows the node the cursor sits in.
+    const Key five = BeKey(5);
+    RowId v5 = 5;
+    ASSERT_EQ(ART::InsertResult::INSERTED, tree.ART_try_insert(Bytes(five), KeyLen(five), &v5, sizeof(v5)));
+    // ... and deleting its neighbour shrinks it again.
+    const Key victim = BeKey(reverse ? 3 : 2);
+    ASSERT_NE(nullptr, tree.ART_delete(Bytes(victim), KeyLen(victim)));
+
+    bool got = false;
+    {
+      std::shared_lock<std::shared_mutex> guard(tree.tree()->tree_mutex);
+      got = reverse ? it.prev(&kp, &kl, &out) : it.next(&kp, &kl, &out);
+    }
+    ASSERT_TRUE(got) << (reverse ? "reverse" : "forward");
+    EXPECT_EQ(reverse ? RowId{2} : RowId{3}, out);
+  }
+}
+
+TEST(RapidArtCursor, SurvivesTheValueItEmittedBeingDeleted) {
+  ART tree;
+  tree.ART_tree_init();
+  const Key k7 = BeKey(7);
+  for (RowId v = 10; v < 14; ++v)
+    ASSERT_EQ(ART::InsertResult::INSERTED, tree.ART_try_insert(Bytes(k7), KeyLen(k7), &v, sizeof(v)));
+  const Key k8 = BeKey(8);
+  RowId z = 99;
+  ASSERT_EQ(ART::InsertResult::INSERTED, tree.ART_try_insert(Bytes(k8), KeyLen(k8), &z, sizeof(z)));
+
+  ARTIterator<unsigned char, RowId> it(&tree);
+  const unsigned char *kp = nullptr;
+  uint32_t kl = 0;
+  RowId out = 0;
+  {
+    std::shared_lock<std::shared_mutex> guard(tree.tree()->tree_mutex);
+    it.init_scan(nullptr, 0, false, nullptr, 0, false);
+    ASSERT_TRUE(it.next(&kp, &kl, &out));
+    EXPECT_EQ(RowId{10}, out);
+    ASSERT_TRUE(it.next(&kp, &kl, &out));
+    EXPECT_EQ(RowId{11}, out);
+  }
+
+  // Delete the value just emitted; the leaf shrinks but must not strand the cursor.
+  RowId victim = 11;
+  ASSERT_NE(nullptr, tree.ART_delete_value(Bytes(k7), KeyLen(k7), &victim, sizeof(victim)));
+
+  {
+    std::shared_lock<std::shared_mutex> guard(tree.tree()->tree_mutex);
+    ASSERT_TRUE(it.next(&kp, &kl, &out));
+    EXPECT_EQ(RowId{12}, out);
+    ASSERT_TRUE(it.next(&kp, &kl, &out));
+    EXPECT_EQ(RowId{13}, out);
+    ASSERT_TRUE(it.next(&kp, &kl, &out));
+    EXPECT_EQ(RowId{99}, out);
+    EXPECT_FALSE(it.next(&kp, &kl, &out));
+  }
+}
+
+// ------------------------------------------------------------- random oracle
+
+TEST(RapidArtModel, MatchesStdMapUnderRandomMutations) {
+  ART tree;
+  tree.ART_tree_init();
+  std::map<uint64_t, std::set<RowId>> oracle;
+  std::mt19937_64 rng(1);
+  size_t entries = 0;
+
+  for (int i = 0; i < 200000; ++i) {
+    const uint64_t key = rng() % 3000;
+    const RowId val = rng() % 4;
+    const Key k = BeKey(key);
+    switch (rng() % 3) {
+      case 0:
+      case 1: {
+        const auto r = tree.ART_try_insert(Bytes(k), KeyLen(k), &val, sizeof(val));
+        const bool had = oracle[key].count(val) != 0;
+        EXPECT_EQ(had, r == ART::InsertResult::DUPLICATE);
+        if (!had) {
+          oracle[key].insert(val);
+          ++entries;
+        }
+        break;
+      }
+      default:
+        if (rng() & 1) {
+          const bool had = oracle[key].erase(val) != 0;
+          const bool removed = tree.ART_delete_value(Bytes(k), KeyLen(k), &val, sizeof(val)) != nullptr;
+          EXPECT_EQ(had, removed);
+          if (had) --entries;
+        } else {
+          entries -= oracle[key].size();
+          oracle[key].clear();
+          tree.ART_delete(Bytes(k), KeyLen(k));
+        }
+        break;
+    }
+  }
+  EXPECT_EQ(entries, tree.tree()->size.load());
+
+  std::map<uint64_t, std::set<RowId>> expected;
+  for (const auto &[k, values] : oracle)
+    if (!values.empty()) expected[k] = values;
+
+  for (bool forward : {true, false}) {
+    ARTIterator<unsigned char, RowId> it(&tree);
+    std::shared_lock<std::shared_mutex> guard(tree.tree()->tree_mutex);
+    if (forward)
+      it.init_scan(nullptr, 0, false, nullptr, 0, false);
+    else
+      it.init_reverse_scan(nullptr, 0, false, nullptr, 0, false);
+
+    std::vector<uint64_t> keys;
+    std::map<uint64_t, std::set<RowId>> seen;
+    size_t n = 0;
+    const unsigned char *kp = nullptr;
+    uint32_t kl = 0;
+    RowId out = 0;
+    while (forward ? it.next(&kp, &kl, &out) : it.prev(&kp, &kl, &out)) {
+      ASSERT_EQ(8u, kl);
+      const uint64_t key = KeyAsU64(kp);
+      if (keys.empty() || keys.back() != key) keys.push_back(key);
+      ASSERT_TRUE(seen[key].insert(out).second) << "value emitted twice";
+      ++n;
+    }
+    const bool sorted = forward ? std::is_sorted(keys.begin(), keys.end())
+                                : std::is_sorted(keys.rbegin(), keys.rend());
+    EXPECT_TRUE(sorted) << (forward ? "forward" : "reverse");
+    EXPECT_EQ(expected, seen);
+    EXPECT_EQ(entries, n);
+  }
+}
+
+// ------------------------------------------------------------------ encoder
+
+TEST(RapidArtEncoder, OrderAndRoundTripAgreeWithMemcmp) {
+  std::mt19937_64 rng(7);
+  unsigned char a[8], b[8];
+  for (int i = 0; i < 100000; ++i) {
+    const int64_t x = static_cast<int64_t>(rng() >> (rng() % 60));
+    const int64_t y = static_cast<int64_t>(rng() >> (rng() % 60));
+    Encoder<int64_t>::Encode(x, a);
+    Encoder<int64_t>::Encode(y, b);
+    EXPECT_EQ(x < y, std::memcmp(a, b, 8) < 0);
+    EXPECT_EQ(x, Encoder<int64_t>::Decode(a));
+
+    const uint32_t u = static_cast<uint32_t>(rng()), w = static_cast<uint32_t>(rng());
+    Encoder<uint32_t>::Encode(u, a);
+    Encoder<uint32_t>::Encode(w, b);
+    EXPECT_EQ(u < w, std::memcmp(a, b, 4) < 0);
+    EXPECT_EQ(u, Encoder<uint32_t>::Decode(a));
+
+    const int16_t s = static_cast<int16_t>(rng()), s2 = static_cast<int16_t>(rng());
+    Encoder<int16_t>::Encode(s, a);
+    Encoder<int16_t>::Encode(s2, b);
+    EXPECT_EQ(s < s2, std::memcmp(a, b, 2) < 0);
+    EXPECT_EQ(s, Encoder<int16_t>::Decode(a));
+
+    const int8_t c = static_cast<int8_t>(rng()), c2 = static_cast<int8_t>(rng());
+    Encoder<int8_t>::Encode(c, a);
+    Encoder<int8_t>::Encode(c2, b);
+    EXPECT_EQ(c < c2, std::memcmp(a, b, 1) < 0);
+    EXPECT_EQ(c, Encoder<int8_t>::Decode(a));
+
+    const double d = std::ldexp(static_cast<double>(static_cast<int64_t>(rng())), static_cast<int>(rng() % 80) - 40);
+    const double d2 = std::ldexp(static_cast<double>(static_cast<int64_t>(rng())), static_cast<int>(rng() % 80) - 40);
+    Encoder<double>::Encode(d, a);
+    Encoder<double>::Encode(d2, b);
+    EXPECT_EQ(d < d2, std::memcmp(a, b, 8) < 0);
+    EXPECT_EQ(d, Encoder<double>::Decode(a));
+
+    const float f = static_cast<float>(d), f2 = static_cast<float>(d2);
+    Encoder<float>::Encode(f, a);
+    Encoder<float>::Encode(f2, b);
+    EXPECT_EQ(f < f2, std::memcmp(a, b, 4) < 0);
+    EXPECT_EQ(f, Encoder<float>::Decode(a));
+  }
+}
+
+TEST(RapidArtEncoder, KnownVectors) {
+  unsigned char a[8] = {};
+  Encoder<int32_t>::Encode(-1, a);
+  EXPECT_EQ(0x7f, static_cast<int>(a[0]));
+  EXPECT_EQ(0xff, static_cast<int>(a[1]));
+  EXPECT_EQ(0xff, static_cast<int>(a[3]));
+  Encoder<int32_t>::Encode(0, a);
+  EXPECT_EQ(0x80, static_cast<int>(a[0]));
+  EXPECT_EQ(0x00, static_cast<int>(a[3]));
+  Encoder<uint16_t>::Encode(0x1234, a);
+  EXPECT_EQ(0x12, static_cast<int>(a[0]));
+  EXPECT_EQ(0x34, static_cast<int>(a[1]));
+
+  // +0 and -0 must share one key; -inf < max finite < +inf < NaN.
+  unsigned char za[8], zb[8];
+  Encoder<double>::Encode(0.0, za);
+  Encoder<double>::Encode(-0.0, zb);
+  EXPECT_EQ(0, std::memcmp(za, zb, 8));
+
+  unsigned char nia[8], ma[8], ia[8], na[8];
+  Encoder<double>::Encode(-INFINITY, nia);
+  Encoder<double>::Encode(1.7e308, ma);
+  Encoder<double>::Encode(INFINITY, ia);
+  Encoder<double>::Encode(NAN, na);
+  EXPECT_LT(std::memcmp(nia, ma, 8), 0);
+  EXPECT_LT(std::memcmp(ma, ia, 8), 0);
+  EXPECT_LT(std::memcmp(ia, na, 8), 0);
+  EXPECT_TRUE(std::isnan(Encoder<double>::Decode(na)));
+
+  // Any integral type links, not just the fixed-width aliases.
+  Encoder<long long>::Encode(5, a);
+  EXPECT_EQ(0x05, static_cast<int>(a[7]));
+  Encoder<unsigned long>::Encode(5, a);
+  EXPECT_EQ(0x05, static_cast<int>(a[7]));
 }
 
 }  // namespace shannon_rapid_art_unittest

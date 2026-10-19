@@ -32,6 +32,7 @@
 #include <assert.h>
 #include <stdint.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cstring>
@@ -75,22 +76,23 @@ class ART {
   ART() : m_tree(nullptr), m_inited(false) {}
 
   ~ART() {
-    if (m_inited) ART_tree_destroy();
+    if (m_inited.load()) ART_tree_destroy();
   }
 
   ART(const ART &) = delete;
   ART &operator=(const ART &) = delete;
 
   ART(ART &&other)
-  noexcept : m_tree(std::move(other.m_tree)), m_inited(other.m_inited), m_allocator(std::move(other.m_allocator)) {
+  noexcept
+      : m_tree(std::move(other.m_tree)), m_inited(other.m_inited.load()), m_allocator(std::move(other.m_allocator)) {
     other.m_inited = false;
   }
 
   ART &operator=(ART &&other) noexcept {
     if (this != &other) {
-      if (m_inited) ART_tree_destroy();
+      if (m_inited.load()) ART_tree_destroy();
       m_tree = std::move(other.m_tree);
-      m_inited = other.m_inited;
+      m_inited = other.m_inited.load();
       m_allocator = std::move(other.m_allocator);
       other.m_inited = false;
     }
@@ -141,7 +143,8 @@ class ART {
   struct Art_inner_node : public Art_node {
     explicit Art_inner_node(NodeType t) : Art_node(t) { std::memset(partial, 0, MAX_PREFIX_LEN); }
 
-    uint8_t num_children{0};
+    // 16 bits: a full Node256 has 256 children, which wrapped a uint8_t to 0.
+    uint16_t num_children{0};
     uint32_t partial_len{0};
     unsigned char partial[MAX_PREFIX_LEN];
   };
@@ -367,7 +370,11 @@ class ART {
 
   struct Art_tree {
     ArtNodePtr root;
-    std::atomic<size_t> size{0};
+    std::atomic<size_t> size{0};  // number of (key, value) entries
+    // Bumped (under the exclusive lock) by every mutation.  A cursor that
+    // released the shared lock between steps compares it to detect that the
+    // path it retained may be stale and re-seeks by key (see ARTIterator).
+    std::atomic<uint64_t> version{0};
     mutable std::shared_mutex tree_mutex;
   };
   using ArtTreePtr = std::unique_ptr<Art_tree>;
@@ -386,12 +393,20 @@ class ART {
     return (node && node->type() != LEAF) ? static_cast<const Art_inner_node *>(node) : nullptr;
   }
 
+  // Lock order is always m_node_mutex -> tree_mutex.  Nothing may take
+  // m_node_mutex while holding tree_mutex (ARTIterator caches the Art_tree*
+  // up front for exactly that reason).
   inline int ART_tree_init() {
     std::unique_lock lk(m_node_mutex);
-    if (!m_tree) m_tree = std::make_unique<Art_tree>();
-    m_tree->root = nullptr;
+    if (!m_tree) {
+      m_tree = std::make_unique<Art_tree>();
+    } else {
+      std::unique_lock tree_lock(m_tree->tree_mutex);
+      m_tree->root = nullptr;
+      m_tree->version.fetch_add(1, std::memory_order_release);
+    }
     m_tree->size.store(0, std::memory_order_release);
-    m_inited = true;
+    m_inited.store(true, std::memory_order_release);
     return 0;
   }
 
@@ -406,7 +421,7 @@ class ART {
     std::unique_ptr<Art_tree> doomed;
     {
       std::unique_lock lk(m_node_mutex);
-      m_inited = false;
+      m_inited.store(false, std::memory_order_release);
       if (m_tree) {
         {
           std::unique_lock tree_lock(m_tree->tree_mutex);
@@ -422,7 +437,7 @@ class ART {
 
   inline bool Art_initialized() const {
     std::shared_lock lk(m_node_mutex);
-    return m_inited;
+    return m_inited.load(std::memory_order_acquire);
   }
 
   inline Art_tree *tree() const {
@@ -435,6 +450,29 @@ class ART {
     return (m_inited && m_tree) ? m_tree->root.get() : nullptr;
   }
 
+  /** Outcome of an insert; REJECTED is the only failure. */
+  enum class InsertResult : uint8_t {
+    INSERTED = 0,  // a new (key, value) entry now exists
+    DUPLICATE,     // that exact (key, value) was already present: no-op
+    REPLACED,      // an existing value was overwritten (replace mode)
+    REJECTED       // bad args, value width mismatch, value > 64KB, or the key is a
+                   // prefix of / has a prefix among existing keys (keys must be
+                   // prefix-free, which RapidKeyCodec's terminators guarantee)
+  };
+
+  /** Insert reporting what happened.  Prefer this over ART_insert(). */
+  InsertResult ART_try_insert(const unsigned char *key, int key_len, const void *value, uint32_t value_len);
+
+  /**
+   * Atomically move `value` from `old_key` to `new_key` under ONE exclusive
+   * lock, so a concurrent reader never observes the row under neither key.
+   * Idempotent for replays (a missing old entry is not an error).  Returns
+   * REJECTED, leaving the old entry untouched, when the new entry is refused.
+   */
+  InsertResult ART_move_value(const unsigned char *old_key, int old_len, const unsigned char *new_key, int new_len,
+                              const void *value, uint32_t value_len);
+
+  /** Legacy form: returns the previous value on replace, else nullptr.  Cannot report REJECTED. */
   void *ART_insert(const unsigned char *key, int key_len, void *value, uint32_t value_len);
   /**
    * Remove the leaf addressed by `key` with every value under it.  Returns a
@@ -487,9 +525,15 @@ class ART {
 
  private:
   void *Recursive_insert(ArtNodePtr &node, const unsigned char *key, int key_len, void *value, uint32_t value_len,
-                         int depth, int *old, int replace);
+                         int depth, InsertResult *res, int replace);
 
-  ArtNodePtr Recursive_delete(ArtNodePtr &node, const unsigned char *key, int key_len, int depth, void *&result);
+  // `removed` receives the number of values the unhooked leaf held.
+  ArtNodePtr Recursive_delete(ArtNodePtr &node, const unsigned char *key, int key_len, int depth, void *&result,
+                              uint32_t *removed);
+
+  // Bodies shared by the public entry points; caller holds tree_mutex exclusive.
+  InsertResult Insert_locked(const unsigned char *key, int key_len, void *value, uint32_t value_len, void **old_out);
+  bool Delete_value_locked(const unsigned char *key, int key_len, const void *value, uint32_t value_len);
 
   ArtLeafPtr Make_leaf(const unsigned char *key, int key_len, const void *value, uint32_t value_len) {
     if (!key || key_len <= 0 || !value || value_len == 0) return nullptr;
@@ -501,7 +545,8 @@ class ART {
   /** Leaf holding exactly `key`, or nullptr. Caller must hold tree_mutex. */
   Art_leaf *Find_leaf(const unsigned char *key, int key_len);
 
-  ArtNodePtr Find_child(const ArtNodePtr &n, unsigned char c);
+  /** Raw child lookup for read paths: no shared_ptr copy, so no refcount traffic. */
+  Art_node *Find_child_raw(const Art_node *n, unsigned char c) const;
 
   /**
    * Address of the slot inside `n` that holds the child labelled `c`, so a
@@ -534,12 +579,12 @@ class ART {
   int Check_prefix(const Art_inner_node *n, const unsigned char *key, int key_len, int depth);
   int Prefix_mismatch(const Art_inner_node *n, const unsigned char *key, int key_len, int depth);
   int Longest_common_prefix(const Art_leaf *l1, const Art_leaf *l2, int depth);
-  int Leaf_matches(const Art_leaf *n, const unsigned char *key, int key_len, int depth);
+  int Leaf_compare(const Art_leaf *n, const unsigned char *key, int key_len, int depth);
   int Leaf_partial_matches(const Art_leaf *n, const unsigned char *key, int key_len, int depth);
 
   mutable std::shared_mutex m_node_mutex;
   std::unique_ptr<Art_tree> m_tree{nullptr};
-  bool m_inited{false};
+  std::atomic<bool> m_inited{false};
   ArtNodeAllocator m_allocator;
 };
 }  // namespace Index

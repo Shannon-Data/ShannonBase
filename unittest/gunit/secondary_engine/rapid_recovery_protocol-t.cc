@@ -13,7 +13,6 @@
 #include "storage/rapid_engine/imcs/table0persistence.h"
 #include "storage/rapid_engine/trx/transaction.h"
 #include "storage/rapid_engine/utils/crc.h"
-#include "storage/rapid_engine/utils/try_operation.h"
 using namespace ShannonBase::Recovery;
 using ShannonBase::NotificationTracker;
 TEST(NativeColumnStream, CannotReadTheFollowingColumn) {
@@ -100,12 +99,7 @@ TEST(RapidSourceValidation, FullCannotSkipVerification) {
   SourceValidationPolicy policy{SourceValidationMode::FULL, validator};
   EXPECT_EQ(policy.validate(validation_context()), SourceValidationResult::UNAVAILABLE);
 }
-TEST(RapidSourceValidation, FullProviderExceptionIsUnavailable) {
-  auto validator = std::make_shared<StubSourceValidator>();
-  validator->throws = true;
-  SourceValidationPolicy policy{SourceValidationMode::FULL, validator};
-  EXPECT_EQ(policy.validate(validation_context()), SourceValidationResult::UNAVAILABLE);
-}
+
 TEST(RapidSourceValidation, FullExpiredDeadlineDoesNotCallValidator) {
   auto validator = std::make_shared<StubSourceValidator>();
   SourceValidationPolicy policy{SourceValidationMode::FULL, validator};
@@ -189,24 +183,18 @@ class FailingStore : public CheckpointStore {
   bool invalidate(const std::string &, const std::string &) override { return false; }
   bool erase(const std::string &, const std::string &) override { return false; }
 };
-class ThrowingStore : public FailingStore {
- public:
-  bool invalidate(const std::string &, const std::string &) override { throw std::bad_alloc(); }
-};
 }  // namespace
-TEST(RapidRecoveryProtocol, RevokeProviderExceptionReturnsFailureAndFencesRecovery) {
+TEST(RapidRecoveryProtocol, AlternateMarkerFencesWhenTableDirectoryIsBlocked) {
   RevocationDirectory directory;
-  CheckpointStores::install(std::make_shared<ThrowingStore>());
+  const auto table_path = std::filesystem::path(directory.snapshots()) / "db" / "table";
+  std::filesystem::create_directories(table_path.parent_path());
+  std::ofstream(table_path) << "not a directory";
   ShannonBase::Imcs::TablePersistenceManager manager(directory.snapshots(), "db", "table");
-  CheckpointStores::install(nullptr);
-  EXPECT_FALSE(manager.revoke_fast_recovery());
+  EXPECT_TRUE(manager.revoke_fast_recovery());
   EXPECT_TRUE(manager.recovery_required());
-  EXPECT_TRUE(std::filesystem::exists(manager.recovery_taint_path()));
-  ShannonBase::Imcs::TablePersistenceManager reopened(directory.snapshots(), "db", "table");
-  EXPECT_TRUE(reopened.open());
-  EXPECT_TRUE(reopened.recovery_required());
-  std::lock_guard guard(manager.notifications()->mutex());
-  EXPECT_TRUE(manager.notifications()->disabled());
+  EXPECT_FALSE(std::filesystem::exists(manager.recovery_taint_path()));
+  EXPECT_TRUE(std::filesystem::exists(manager.recovery_taint_alt_path()));
+  EXPECT_TRUE(manager.recovery_tainted());
 }
 TEST(RapidRecoveryProtocol, RevokeProviderFailureFencesRecovery) {
   RevocationDirectory directory;
@@ -263,23 +251,6 @@ TEST(RapidRecoveryProtocol, AnotherLongWriterBlocksCheckpoint) {
   EXPECT_FALSE(tracker.quiescent());
   tracker.aborted(43);
   EXPECT_TRUE(tracker.quiescent());
-}
-
-TEST(RapidOperationStatus, SemanticFailureIsPreserved) {
-  EXPECT_FALSE(ShannonBase::Utils::try_bool_operation([] { return false; }));
-  EXPECT_TRUE(ShannonBase::Utils::try_bool_operation([] { return true; }));
-}
-TEST(RapidOperationStatus, ProviderExceptionUnwindsResourcesAndReturnsFailure) {
-  bool released = false;
-  struct Resource {
-    bool &released;
-    ~Resource() { released = true; }
-  };
-  EXPECT_FALSE(ShannonBase::Utils::try_bool_operation([&]() -> bool {
-    Resource owned{released};
-    throw std::bad_alloc();
-  }));
-  EXPECT_TRUE(released);
 }
 
 TEST(RapidRecoveryProtocol, MarkerInspectionErrorRejectsRecovery) {

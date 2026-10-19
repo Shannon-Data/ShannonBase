@@ -22,7 +22,6 @@
    Copyright (c) 2023, 2024, Shannon Data AI and/or its affiliates.
 */
 #include "storage/rapid_engine/imcs/table0persistence.h"
-#include "storage/rapid_engine/utils/try_operation.h"
 
 #include <algorithm>
 #include <atomic>
@@ -174,7 +173,7 @@ bool TablePersistenceManager::open() {
     require_recovery();
     return true;
   }
-  bool restored = Utils::try_bool_operation([&] { return m_store->restore(m_db_name, m_tbl_name, m_partition_dir); });
+  bool restored = m_store->restore(m_db_name, m_tbl_name, m_partition_dir);
   DBUG_EXECUTE_IF("rapid_checkpoint_store_restore_error", { restored = false; });
   if (!restored) {
     require_recovery();
@@ -288,9 +287,8 @@ Result<RecoveryTableState> TablePersistenceManager::load_table_state() const {
 bool TablePersistenceManager::revoke_fast_recovery() noexcept {
   // Keep live reads/checkpoints fenced even if invalidation or persistence fails.
   require_recovery();
-  const bool disabled = Utils::try_operation([&] { m_notifications.invalidate(); });
-  const bool durable = mark_recovery_taint();
-  return disabled && durable;
+  m_notifications.invalidate();
+  return mark_recovery_taint();
 }
 
 namespace {
@@ -315,35 +313,32 @@ bool taint_marker_present(const fs::path &path) {
 }  // namespace
 
 bool TablePersistenceManager::mark_recovery_taint() noexcept {
-  const bool invalidated = Utils::try_bool_operation([&] {
+  const bool invalidated = [&] {
     DBUG_EXECUTE_IF("rapid_checkpoint_store_invalidate_error", { return false; });
     return m_store->invalidate(m_db_name, m_tbl_name);
-  });
-  const bool primary = Utils::try_bool_operation([&] {
+  }();
+  const bool primary = [&] {
     DBUG_EXECUTE_IF("rapid_taint_marker_primary_error", { return false; });
     return persist_taint_marker(recovery_taint_path());
-  });
+  }();
   if (primary) return invalidated;
   // The table's own directory could not record it; the separate tree may still
   // be able to, and one readable copy is all recovery needs.
-  const bool alternate = Utils::try_bool_operation([&] {
+  const bool alternate = [&] {
     DBUG_EXECUTE_IF("rapid_taint_marker_alternate_error", { return false; });
     return persist_taint_marker(recovery_taint_alt_path());
-  });
+  }();
   return invalidated && alternate;
 }
 
 bool TablePersistenceManager::recovery_tainted() const {
   bool tainted = true;
-  if (!Utils::try_operation([&] {
-        DBUG_EXECUTE_IF("rapid_taint_marker_inspect_error", { return; });
-        tainted = taint_marker_present(recovery_taint_path()) || taint_marker_present(recovery_taint_alt_path());
-        if (!tainted) {
-          const auto state = load_table_state();
-          tainted = state.ok() ? state.value.state == PersistedLoadState::STALE : state.error != ErrorCode::NOT_FOUND;
-        }
-      }))
-    return true;
+  DBUG_EXECUTE_IF("rapid_taint_marker_inspect_error", { return true; });
+  tainted = taint_marker_present(recovery_taint_path()) || taint_marker_present(recovery_taint_alt_path());
+  if (!tainted) {
+    const auto state = load_table_state();
+    tainted = state.ok() ? state.value.state == PersistedLoadState::STALE : state.error != ErrorCode::NOT_FOUND;
+  }
   return tainted;
 }
 
@@ -868,10 +863,10 @@ bool TablePersistenceManager::checkpoint(Imcu *trigger, uint64_t snapshot_sequen
     return false;
   }
 
-  const bool stored = Utils::try_bool_operation([&] {
+  const bool stored = [&] {
     DBUG_EXECUTE_IF("rapid_checkpoint_store_publish_error", { return false; });
     return m_store->publish(m_db_name, m_tbl_name, gen, m_partition_dir);
-  });
+  }();
   if (!stored) {
     remove_generation(gen);
     return false;
@@ -934,10 +929,7 @@ Result<uint64_t> TablePersistenceManager::load_snapshot(Imcu *imcu, uint64_t gen
 
 Result<uint64_t> TablePersistenceManager::load_snapshot_with_dictionary(CU::DictionaryRestoreContext *dictionaries,
                                                                         Imcu *imcu, uint64_t generation) {
-  Result<uint64_t> result{ErrorCode::IO_ERROR, 0};
-  if (!Utils::try_operation([&] { result = load_snapshot_impl(dictionaries, imcu, generation); }))
-    return {ErrorCode::IO_ERROR, 0};
-  return result;
+  return load_snapshot_impl(dictionaries, imcu, generation);
 }
 
 Result<uint64_t> TablePersistenceManager::load_snapshot_impl(CU::DictionaryRestoreContext *dictionaries, Imcu *imcu,
