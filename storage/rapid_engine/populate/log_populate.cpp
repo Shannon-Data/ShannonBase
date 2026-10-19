@@ -73,7 +73,7 @@ mysql_pfs_key_t rapid_populate_thread_key;
 namespace ShannonBase {
 namespace Populate {
 
-constexpr uint32_t MAX_RETRY_COUNT = 3;
+constexpr uint32_t MAX_RETRY_COUNT{3};
 
 PopBufferShard shannon_pop_shards[POP_SHARD_COUNT];
 
@@ -111,6 +111,8 @@ static std::atomic<uint64_t> shannon_change_id{1};
  */
 static inline void SignalPropagationBarrier(const std::shared_ptr<table_pop_buffer_t> &tbuf) {
   if (!tbuf) return;
+
+  // Bare scope: orders the signal against the waiter's predicate check; notify unlocks first.
   { std::lock_guard<std::mutex> lk(tbuf->barrier_mutex); }
   tbuf->barrier_cv.notify_all();
 }

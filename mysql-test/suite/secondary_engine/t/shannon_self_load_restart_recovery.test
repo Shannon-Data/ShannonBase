@@ -28,6 +28,11 @@ SELECT COUNT(*), SUM(v) FROM t;
 if ($actual != 0) {
   --die Self-load published a table while restart recovery was paused
 }
+# MySQL is available while recovery is paused, but AP must not see the table.
+SET use_secondary_engine=FORCED;
+--error ER_SECONDARY_ENGINE_PLUGIN
+SELECT COUNT(*), SUM(v) FROM t;
+SET use_secondary_engine=OFF;
 SET DEBUG_SYNC='now SIGNAL rapid_self_load_recovery_continue';
 SET DEBUG_SYNC='now SIGNAL rapid_restart_recovery_continue';
 --let $wait_condition = SELECT CAST(VARIABLE_VALUE AS UNSIGNED)=1 FROM performance_schema.global_status WHERE VARIABLE_NAME='rapid_recovery_storage_restores'

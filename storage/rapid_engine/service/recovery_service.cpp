@@ -278,24 +278,22 @@ bool RecoveryJob::try_snapshot_recovery(THD *thd) {
   if (!mgr->has_durable_checkpoint(info.schema_name, info.table_name)) return false;
 
   // Create empty in-memory table structure (schema metadata).
-  TABLE *source = Utils::Util::open_table_by_name(thd, info.schema_name, info.table_name, TL_READ_WITH_SHARED_LOCKS);
+  Utils::TableGuard source_guard(thd, info.schema_name, info.table_name, TL_READ_WITH_SHARED_LOCKS);
+  TABLE *source = source_guard.get();
   if (!source) {
     DBUG_PRINT("recovery",
                ("RecoveryJob(snapshot): cannot open %s.%s", info.schema_name.c_str(), info.table_name.c_str()));
     return false;
   }
 
-  Rapid_load_context ctx;
+  Rapid_load_context ctx{info.schema_name, info.table_name};
   ctx.m_thd = thd;
-  ctx.m_schema_name = info.schema_name;
-  ctx.m_table_name = info.table_name;
-  ctx.m_sch_tb_name = info.schema_name + "." + info.table_name;
   ctx.m_table = source;
   ctx.m_table_id = source->file->get_table_id();
 
   const auto table_id = ctx.m_table_id;
   const int rc = Imcs::Imcs::instance()->create_table_memo(&ctx, source);
-  Utils::Util::close_table(thd, source);
+  source_guard.close();
   source = nullptr;
 
   if (rc != SHANNON_SUCCESS) {
@@ -329,6 +327,7 @@ bool RecoveryJob::try_snapshot_recovery(THD *thd) {
   // Reconnect Field* (cannot be serialised; patch from live TABLE).
   TABLE *patched_src = nullptr;
   if (!reconstruct_field_pointers(thd, rpd_table.get(), patched_src)) return false;
+  Utils::TableGuard patched_guard(thd, patched_src);
 
   // Rebuild the ART indexes from the restored column cells before binlog
   // mutations run through normal row/index maintenance. Without this the table
@@ -340,16 +339,12 @@ bool RecoveryJob::try_snapshot_recovery(THD *thd) {
   // It runs after reconstruct_field_pointers() because the key codec encodes out of a
   // record image, which needs Fields bound to this TABLE.
   auto *table_impl = dynamic_cast<Imcs::Table *>(rpd_table.get());
-  if (table_impl == nullptr) {
-    Utils::Util::close_table(thd, patched_src);
-    return false;
-  }
+  if (table_impl == nullptr) return false;
   if (table_impl->rebuild_indexes(&ctx, patched_src) != SHANNON_SUCCESS) {
     // Fall back to the slow lane rather than publish a table whose indexes
     // disagree with its rows. drop_partial_table takes the IMCS entry back out.
     sql_print_warning("RecoveryJob(snapshot): %s could not rebuild its indexes; recovery rejected",
                       ctx.m_sch_tb_name.c_str());
-    Utils::Util::close_table(thd, patched_src);
     return false;
   }
 
@@ -364,10 +359,7 @@ bool RecoveryJob::try_snapshot_recovery(THD *thd) {
         record.m_source_trx_id = 0;  // recovered committed system version, not a live writer
         return parser.apply_change(ctx, record, 0).status == Populate::ChangeApplyResult::Status::APPLIED;
       });
-  if (!replayed) {
-    Utils::Util::close_table(thd, patched_src);
-    return false;
-  }
+  if (!replayed) return false;
   auto validation = m_source_validation;
   DBUG_EXECUTE_IF("rapid_recovery_full_validation_unavailable", {
     validation.mode = SourceValidationMode::FULL;
@@ -381,7 +373,6 @@ bool RecoveryJob::try_snapshot_recovery(THD *thd) {
     validation_result = SourceValidationResult::UNAVAILABLE;
   if (validation_result != SourceValidationResult::SKIPPED && validation_result != SourceValidationResult::VERIFIED) {
     m_source_validation_failed = true;
-    Utils::Util::close_table(thd, patched_src);
     return false;
   }
   capture->initialize(Utils::BinlogPositionReader::current_position());
@@ -396,15 +387,15 @@ bool RecoveryJob::try_snapshot_recovery(THD *thd) {
         meta.persisted_scn = manifest.value.persisted_scn;
       });
   }
-  Utils::Util::close_table(thd, patched_src);
   return published;
 }
 
 bool RecoveryJob::reconstruct_field_pointers(THD *thd, Imcs::RpdTable *rpd_table, TABLE *&out_source) {
   const auto &info = m_table_info;
 
-  out_source = Utils::Util::open_table_by_name(thd, info.schema_name, info.table_name, TL_READ_WITH_SHARED_LOCKS);
-  if (!out_source) {
+  Utils::TableGuard source_guard(thd, info.schema_name, info.table_name, TL_READ_WITH_SHARED_LOCKS);
+  out_source = nullptr;
+  if (!source_guard.get()) {
     std::string log_msg =
         "RecoveryJob(snapshot): cannot open " + info.schema_name + "." + info.table_name + " to patch Field*";
     LogErr(ERROR_LEVEL, ER_LOG_PRINTF_MSG, log_msg.c_str());
@@ -423,6 +414,7 @@ bool RecoveryJob::reconstruct_field_pointers(THD *thd, Imcs::RpdTable *rpd_table
       if (f) imcu->reconstruct_cu_field(i, f, f->charset());
     }
   });
+  out_source = source_guard.release();
   return true;
 }
 
@@ -493,19 +485,16 @@ void RecoveryJob::schedule_checkpoint_async() {
 bool RecoveryJob::reload_normal_table(THD *thd) {
   const auto &info = m_table_info;
 
-  TABLE *source =
-      ShannonBase::Utils::Util::open_table_by_name(thd, info.schema_name, info.table_name, TL_READ_WITH_SHARED_LOCKS);
+  Utils::TableGuard source_guard(thd, info.schema_name, info.table_name, TL_READ_WITH_SHARED_LOCKS);
+  TABLE *source = source_guard.get();
   if (!source) {
     std::string log_msg = "RecoveryJob: cannot open table " + info.schema_name + "." + info.table_name + " for reading";
     LogErr(ERROR_LEVEL, ER_LOG_PRINTF_MSG, log_msg.c_str());
     return false;
   }
 
-  Rapid_load_context context;
-  context.m_schema_name = info.schema_name;
-  context.m_table_name = info.table_name;
+  Rapid_load_context context{info.schema_name, info.table_name};
   context.m_thd = thd;
-  context.m_sch_tb_name = info.schema_name + "." + info.table_name;
   context.m_table = source;
   context.m_table_id = source->file->get_table_id();
   context.m_extra_info.m_scn = TransactionCoordinator::instance().allocate_scn();
@@ -522,11 +511,6 @@ bool RecoveryJob::reload_normal_table(THD *thd) {
     if (!table || !register_in_loaded_tables(thd, source, table.get())) {
       result = HA_ERR_GENERIC;
     }
-    Utils::Util::close_table(thd, source);
-    source = nullptr;
-  } else {
-    ShannonBase::Utils::Util::close_table(thd, source);
-    source = nullptr;
   }
   return (result == SHANNON_SUCCESS);
 }
@@ -534,8 +518,8 @@ bool RecoveryJob::reload_normal_table(THD *thd) {
 bool RecoveryJob::reload_partitioned_table(THD *thd) {
   const auto &info = m_table_info;
 
-  TABLE *source =
-      ShannonBase::Utils::Util::open_table_by_name(thd, info.schema_name, info.table_name, TL_READ_WITH_SHARED_LOCKS);
+  Utils::TableGuard source_guard(thd, info.schema_name, info.table_name, TL_READ_WITH_SHARED_LOCKS);
+  TABLE *source = source_guard.get();
   if (!source) {
     std::string log_msg =
         "RecoveryJob: cannot open partitioned table " + info.schema_name + "." + info.table_name + " for reading";
@@ -543,11 +527,8 @@ bool RecoveryJob::reload_partitioned_table(THD *thd) {
     return false;
   }
 
-  Rapid_load_context context;
-  context.m_schema_name = info.schema_name;
-  context.m_table_name = info.table_name;
+  Rapid_load_context context{info.schema_name, info.table_name};
   context.m_thd = thd;
-  context.m_sch_tb_name = info.schema_name + "." + info.table_name;
   context.m_table = source;
   context.m_table_id = source->file->get_table_id();
   context.m_extra_info.m_scn = TransactionCoordinator::instance().allocate_scn();
@@ -561,7 +542,6 @@ bool RecoveryJob::reload_partitioned_table(THD *thd) {
   // back from a restart empty while InnoDB still has every row.
   if (source->part_info == nullptr) {
     sql_print_error("RecoveryJob: %s has no partition info; cannot reload it", context.m_sch_tb_name.c_str());
-    ShannonBase::Utils::Util::close_table(thd, source);
     return false;
   }
   for (uint index = 0; index < source->part_info->get_tot_partitions(); ++index) {
@@ -572,7 +552,6 @@ bool RecoveryJob::reload_partitioned_table(THD *thd) {
   context.m_trx = Transaction::get_or_create_trx(thd);
   if (context.m_trx == nullptr) {
     sql_print_error("RecoveryJob: cannot start a Rapid transaction for %s", context.m_sch_tb_name.c_str());
-    ShannonBase::Utils::Util::close_table(thd, source);
     return false;
   }
   context.m_trx->begin_stmt();
@@ -596,11 +575,6 @@ bool RecoveryJob::reload_partitioned_table(THD *thd) {
     auto table =
         Imcs::Imcs::instance()->get_rpd_table<std::shared_ptr<ShannonBase::Imcs::RpdTable>>(context.m_table_id);
     success = table && register_in_loaded_tables(thd, source, table.get());
-    Utils::Util::close_table(thd, source);
-    source = nullptr;
-  } else {
-    ShannonBase::Utils::Util::close_table(thd, source);
-    source = nullptr;
   }
 
   return success;

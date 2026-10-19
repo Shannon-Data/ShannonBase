@@ -230,11 +230,8 @@ inline bool is_system_schema_name(const char *schema_name) {
 }  // namespace detail
 
 enum class loader_state_t {
-  LOADER_STATE_INIT = 0, /*!< self-loader thread instance created */
-  LOADER_STATE_RUN,      /*!< self-loader thread should be running */
-  LOADER_STATE_STOP,     /*!< self-loader thread should be stopped */
-  LOADER_STATE_EXIT,     /*!< self-loader thread has been shutdown */
-  LOADER_STATE_DISABLED  /*!< self-loader thread was never started */
+  LOADER_STATE_RUN, /*!< self-loader thread should be running */
+  LOADER_STATE_EXIT /*!< self-loader thread has been shutdown */
 };
 
 class SelfLoadManager {
@@ -304,7 +301,6 @@ class SelfLoadManager {
 
   void decay_importance();
   void unload_cold_tables();
-  void prepare_load_unload_queues();
   void run_load_unload_algorithm();
 
   uint64_t get_current_memory_usage();
@@ -326,8 +322,6 @@ class SelfLoadManager {
                                SelectExecutedIn executed_in);
 
   std::optional<std::string> extract_secondary_engine(const std::string &input);
-
-  bool worker_active();
 
   bool is_system_schema(const char *schema_name) { return detail::is_system_schema_name(schema_name); }
 

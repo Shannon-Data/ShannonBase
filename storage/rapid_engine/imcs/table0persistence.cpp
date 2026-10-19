@@ -28,6 +28,7 @@
 #include <cassert>
 #include <cctype>
 #include <cerrno>
+#include <charconv>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -36,7 +37,6 @@
 #include <limits>
 #include <shared_mutex>
 #include <sstream>
-#include <stdexcept>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -54,7 +54,7 @@
 #include "storage/rapid_engine/imcs/cu.h"
 #include "storage/rapid_engine/imcs/imcu.h"
 #include "storage/rapid_engine/imcs/table.h"
-#include "storage/rapid_engine/recovery/native_stream.h"
+#include "storage/rapid_engine/recovery/recovery_load.h"
 #include "storage/rapid_engine/utils/binlog_position.h"
 #include "storage/rapid_engine/utils/crc.h"
 
@@ -371,14 +371,14 @@ std::vector<uint64_t> TablePersistenceManager::list_manifest_generations() const
   std::error_code ec;
   const fs::path dir = m_partition_dir / "checkpoints";
   if (!fs::is_directory(dir, ec)) return gens;
-  for (const auto &e : fs::directory_iterator(dir, ec)) {
-    if (ec) break;
-    const std::string stem = e.path().stem().string();  // "checkpoint-N"
+  for (fs::directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec)) {
+    const std::string stem = it->path().stem().string();  // "checkpoint-N"
     if (stem.rfind("checkpoint-", 0) != 0) continue;
-    try {
-      gens.push_back(std::stoull(stem.substr(11)));
-    } catch (...) {
-    }
+    uint64_t generation = 0;
+    const char *first = stem.data() + 11;
+    const char *last = stem.data() + stem.size();
+    const auto parsed = std::from_chars(first, last, generation);
+    if (parsed.ec == std::errc{} && parsed.ptr == last) gens.push_back(generation);
   }
   std::sort(gens.begin(), gens.end());
   return gens;

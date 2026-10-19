@@ -255,6 +255,11 @@ class Rapid_ha_data {
 class Rapid_load_context : public Rapid_context {
  public:
   Rapid_load_context() : m_trx(nullptr), m_table(nullptr), m_local_dict(nullptr), m_thd{nullptr} {}
+  Rapid_load_context(const std::string &schema, const std::string &table) : Rapid_load_context() {
+    m_schema_name = schema;
+    m_table_name = table;
+    m_sch_tb_name = schema + "." + table;
+  }
   virtual ~Rapid_load_context() = default;
 
   // current transaction.

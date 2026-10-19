@@ -152,8 +152,8 @@ ShannonBase::Imcs::RpdTable *resolve_change_target(const table_id_t &table_id, c
  * @return the consumed record size, or 0 on failure.
  */
 int apply_cross_partition_update(Rapid_load_context *context, const table_id_t &table_id, const byte *old_start,
-                                 const byte *old_end_ptr, const byte *new_start,
-                                 ShannonBase::Imcs::RpdTable *old_table) {
+                                 const byte *old_end_ptr, const byte *new_start, ShannonBase::Imcs::RpdTable *old_table,
+                                 bool &permanent_failure) {
   const size_t row_size = old_end_ptr - old_start;
 
   auto global_row_id = old_table->locate_row(context, (uchar *)old_start);
@@ -180,7 +180,8 @@ int apply_cross_partition_update(Rapid_load_context *context, const table_id_t &
     return 0;
   }
 
-  if (!new_table->insert_row(context, (uchar *)new_start).ok()) {
+  const auto inserted = new_table->insert_row(context, (uchar *)new_start);
+  if (!inserted.ok()) {
     std::ostringstream oss;
     oss << "[popragate] cross-partition update (insert side) in rapid " << context->m_schema_name.c_str() << "."
         << context->m_table_name.c_str() << " failed";
@@ -191,10 +192,16 @@ int apply_cross_partition_update(Rapid_load_context *context, const table_id_t &
   // Install the destination image before removing the source. If insertion
   // fails, the old partition is untouched. If source deletion fails, undo the
   // destination insert so the propagation retry sees its original pre-image.
-  if (old_table->delete_row(context, global_row_id)) {
-    auto inserted_row = new_table->locate_row(context, (uchar *)new_start);
-    const bool rollback_ok = inserted_row != INVALID_ROW_ID && !new_table->delete_row(context, inserted_row);
+  bool source_delete_failed = false;
+  DBUG_EXECUTE_IF("rapid_cross_partition_delete_failure", { source_delete_failed = true; });
+  if (source_delete_failed || old_table->delete_row(context, global_row_id)) {
+    bool rollback_failed = false;
+    DBUG_EXECUTE_IF("rapid_cross_partition_rollback_failure", { rollback_failed = true; });
+    const bool rollback_ok = !rollback_failed && !new_table->delete_row(context, inserted.value);
     if (!rollback_ok) {
+      // The destination still contains this change. Replaying it can duplicate
+      // rows and index entries; quarantine instead of retrying uncertain state.
+      permanent_failure = true;
       sql_print_error("Rapid COPY_INFO cross-partition UPDATE rollback failed for table %llu",
                       static_cast<unsigned long long>(table_id));
     }
@@ -211,12 +218,13 @@ int apply_cross_partition_update(Rapid_load_context *context, const table_id_t &
 
 uint CopyInfoParser::parse_copy_info(Rapid_load_context *context, table_id_t &table_id,
                                      change_record_buff_t::OperType oper_type, byte *start, byte *end_ptr,
-                                     byte *new_start, byte *new_end_ptr) {
+                                     byte *new_start, byte *new_end_ptr, bool &permanent_failure) {
+  permanent_failure = false;
   // Dispatch by operation type
   auto ret{ShannonBase::SHANNON_SUCCESS};
   switch (oper_type) {
     case change_record_buff_t::OperType::UPDATE:
-      ret = parse_and_apply_update(context, table_id, start, end_ptr, new_start, new_end_ptr);
+      ret = parse_and_apply_update(context, table_id, start, end_ptr, new_start, new_end_ptr, permanent_failure);
       break;
     case change_record_buff_t::OperType::INSERT:
       ret = parse_and_apply_insert(context, table_id, start, end_ptr);
@@ -266,7 +274,8 @@ bool PreImageOffPageDataIsComplete(const ShannonBase::Imcs::RpdTable *rpd_table,
 }  // namespace
 
 int CopyInfoParser::parse_and_apply_update(Rapid_load_context *context, table_id_t &table_id, const byte *old_start,
-                                           const byte *old_end_ptr, const byte *new_start, const byte *new_end_ptr) {
+                                           const byte *old_end_ptr, const byte *new_start, const byte *new_end_ptr,
+                                           bool &permanent_failure) {
   bool droppable{false};
   std::shared_ptr<ShannonBase::Imcs::RpdTable> rpd_table_guard;
   auto rpd_table = resolve_change_target(table_id, context->m_extra_info.m_old_part_key,
@@ -321,7 +330,8 @@ int CopyInfoParser::parse_and_apply_update(Rapid_load_context *context, table_id
   // that is a delete from the old partition plus an insert into the new one,
   // exactly as the primary engine does it.
   if (context->m_extra_info.m_part_key != context->m_extra_info.m_old_part_key) {
-    return apply_cross_partition_update(context, table_id, old_start, old_end_ptr, new_start, rpd_table);
+    return apply_cross_partition_update(context, table_id, old_start, old_end_ptr, new_start, rpd_table,
+                                        permanent_failure);
   }
 
   if (context->m_detached_row_image && !PreImageOffPageDataIsComplete(rpd_table, context, old_start)) {
@@ -584,9 +594,10 @@ ChangeApplyResult CopyInfoParser::apply_change(Rapid_load_context &context, chan
   const byte *old_end = old_start + record.m_size;
   const byte *new_start = record.m_buff1.get();
   const byte *new_end = new_start + record.m_size;
-  result.parsed_bytes =
-      parse_copy_info(&context, record.m_table_id, record.m_oper, const_cast<byte *>(old_start),
-                      const_cast<byte *>(old_end), const_cast<byte *>(new_start), const_cast<byte *>(new_end));
+  bool permanent_failure = false;
+  result.parsed_bytes = parse_copy_info(&context, record.m_table_id, record.m_oper, const_cast<byte *>(old_start),
+                                        const_cast<byte *>(old_end), const_cast<byte *>(new_start),
+                                        const_cast<byte *>(new_end), permanent_failure);
 
   if (result.parsed_bytes == record.m_size) {
     result.status = ChangeApplyResult::Status::APPLIED;
@@ -596,7 +607,7 @@ ChangeApplyResult CopyInfoParser::apply_change(Rapid_load_context &context, chan
     // eligible for Rapid offload again.
     if (!replay) SourceTxnTracker::instance().on_change_applied(source_txn_id, record.m_table_id);
   } else {
-    result.status = ChangeApplyResult::Status::RETRYABLE;
+    result.status = permanent_failure ? ChangeApplyResult::Status::PERMANENT : ChangeApplyResult::Status::RETRYABLE;
   }
   return result;
 }

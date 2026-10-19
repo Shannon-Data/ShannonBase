@@ -3,11 +3,10 @@
 #include <gtest/gtest.h>
 #include <chrono>
 #include <fstream>
-#include <new>
 #include <sstream>
 #include <thread>
 #include "storage/rapid_engine/recovery/checkpoint_store.h"
-#include "storage/rapid_engine/recovery/native_stream.h"
+#include "storage/rapid_engine/recovery/recovery_load.h"
 #include "storage/rapid_engine/include/rapid_notification_tracker.h"
 #include "storage/rapid_engine/recovery/source_validation.h"
 #include "storage/rapid_engine/imcs/table0persistence.h"
@@ -53,13 +52,11 @@ class StubSourceValidator : public SourceRecoveryValidator {
  public:
   SourceValidationResult result{SourceValidationResult::VERIFIED};
   unsigned calls{0};
-  bool throws{false};
   bool expires{false};
   const SourceValidationContext *seen{nullptr};
   SourceValidationResult validate(const SourceValidationContext &context) override {
     ++calls;
     seen = &context;
-    if (throws) throw std::bad_alloc();
     if (expires) std::this_thread::sleep_until(context.deadline);
     return result;
   }
@@ -70,7 +67,7 @@ SourceValidationContext validation_context() {
 }  // namespace
 TEST(RapidSourceValidation, FastNeverCallsRegisteredValidator) {
   auto validator = std::make_shared<StubSourceValidator>();
-  validator->throws = true;
+  validator->result = SourceValidationResult::UNAVAILABLE;
   SourceValidationPolicy policy{SourceValidationMode::FAST, validator};
   EXPECT_EQ(policy.validate(validation_context()), SourceValidationResult::SKIPPED);
   EXPECT_EQ(validator->calls, 0u);
@@ -99,7 +96,12 @@ TEST(RapidSourceValidation, FullCannotSkipVerification) {
   SourceValidationPolicy policy{SourceValidationMode::FULL, validator};
   EXPECT_EQ(policy.validate(validation_context()), SourceValidationResult::UNAVAILABLE);
 }
-
+TEST(RapidSourceValidation, FullProviderFailureIsUnavailable) {
+  auto validator = std::make_shared<StubSourceValidator>();
+  validator->result = SourceValidationResult::UNAVAILABLE;
+  SourceValidationPolicy policy{SourceValidationMode::FULL, validator};
+  EXPECT_EQ(policy.validate(validation_context()), SourceValidationResult::UNAVAILABLE);
+}
 TEST(RapidSourceValidation, FullExpiredDeadlineDoesNotCallValidator) {
   auto validator = std::make_shared<StubSourceValidator>();
   SourceValidationPolicy policy{SourceValidationMode::FULL, validator};
@@ -195,6 +197,18 @@ TEST(RapidRecoveryProtocol, AlternateMarkerFencesWhenTableDirectoryIsBlocked) {
   EXPECT_FALSE(std::filesystem::exists(manager.recovery_taint_path()));
   EXPECT_TRUE(std::filesystem::exists(manager.recovery_taint_alt_path()));
   EXPECT_TRUE(manager.recovery_tainted());
+}
+TEST(RapidRecoveryProtocol, InvalidGenerationNamesAreIgnored) {
+  RevocationDirectory directory;
+  ShannonBase::Imcs::TablePersistenceManager manager(directory.snapshots(), "db", "table");
+  const auto checkpoints = directory.root / "rapid_snapshots" / "db" / "table" / "checkpoints";
+  std::filesystem::create_directories(checkpoints);
+  for (const auto *name : {"checkpoint-7.manifest", "checkpoint-.manifest", "checkpoint-9junk.manifest",
+                           "checkpoint--1.manifest", "checkpoint-18446744073709551616.manifest"}) {
+    std::ofstream file(checkpoints / name);
+    ASSERT_TRUE(file.good());
+  }
+  EXPECT_EQ(manager.latest_generation(), 7u);
 }
 TEST(RapidRecoveryProtocol, RevokeProviderFailureFencesRecovery) {
   RevocationDirectory directory;

@@ -13,6 +13,10 @@ SET use_secondary_engine=OFF;
 SELECT COUNT(*), SUM(v) FROM t;
 COUNT(*)	SUM(v)
 3	60
+SET use_secondary_engine=FORCED;
+SELECT COUNT(*), SUM(v) FROM t;
+ERROR HY000: Table has not been loaded
+SET use_secondary_engine=OFF;
 SET DEBUG_SYNC='now SIGNAL rapid_self_load_recovery_continue';
 SET DEBUG_SYNC='now SIGNAL rapid_restart_recovery_continue';
 SET use_secondary_engine=FORCED;
