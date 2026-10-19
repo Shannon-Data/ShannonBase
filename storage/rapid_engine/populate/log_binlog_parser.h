@@ -52,6 +52,7 @@
 #ifndef __SHANNONBASE_LOG_BINLOG_PARSER_H__
 #define __SHANNONBASE_LOG_BINLOG_PARSER_H__
 
+#include <functional>
 #include <vector>
 #include "storage/rapid_engine/include/rapid_notification_tracker.h"
 #include "storage/rapid_engine/populate/log_commons.h"
@@ -83,6 +84,13 @@ class BinlogParser {
                          BinlogPosition &assembled_end, const char **failure_reason = nullptr,
                          const std::atomic<bool> *cancel = nullptr, bool recovery = false) noexcept;
   static bool supports(const TABLE *);
+};
+
+// Applies complete source transactions to an unpublished restored table.
+// The caller holds write-excluding source MDL and discards the image on failure.
+class BinlogReplay {
+ public:
+  static bool replay(THD *, TABLE *, const BinlogPosition &, const std::function<bool(change_record_buff_t &)> &apply);
 };
 
 // Shared with the load/capture code: resolve partitions and own off-page bytes

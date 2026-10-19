@@ -62,7 +62,6 @@
 #include "storage/rapid_engine/utils/utils.h"      // Util::open_table_by_name
 
 #include "storage/rapid_engine/include/rapid_propagation_config.h"
-#include "storage/rapid_engine/populate/log_binlog_replay.h"
 #include "storage/rapid_engine/utils/background_session.h"
 
 namespace ShannonBase {
