@@ -76,7 +76,7 @@ TEST_F(RapidSystemPoolTest, ExhaustionHasNoHeapFallbackAndFreeAllowsReuse) {
   ASSERT_TRUE(buffer);
   EXPECT_FALSE(allocate_system_buffer(1));
   PoolMemoryResource resource;
-  EXPECT_THROW(resource.allocate(1), std::bad_alloc);
+  EXPECT_THROW(static_cast<void>(resource.allocate(1)), std::bad_alloc);
   EXPECT_EQ(capacity, system_pool_stats().used);
   buffer.reset();
   EXPECT_EQ(0u, system_pool_stats().used);

@@ -321,6 +321,14 @@ IF(MY_COMPILER_IS_GNU AND CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 12)
   ADD_COMPILE_FLAGS(regexp_engine-t.cc COMPILE_FLAGS "-Wno-restrict")
 ENDIF()
 
+# GCC's optimized speculative devirtualization can take the address of DD
+# thunks supplied by server_unittest_library. On Linux, -fPIE emits direct
+# relocations that cannot bind to those shared-library symbols. Compile this
+# source with -fPIC in both the merged and standalone tests; keep PIE linking.
+IF(LINUX AND MY_COMPILER_IS_GNU)
+  ADD_COMPILE_FLAGS(dd_sdi-t.cc COMPILE_FLAGS "-fPIC")
+ENDIF()
+
 IF(WIN32)
   LIST(APPEND SERVER_TESTS win_tests)
 ENDIF()
