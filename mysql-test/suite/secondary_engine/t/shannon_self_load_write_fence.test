@@ -1,0 +1,31 @@
+# CAPTURE must exclude source writes until the self-loaded table is published.
+--source include/have_debug.inc
+--source include/have_debug_sync.inc
+SET use_secondary_engine=OFF;
+SET secondary_engine_cost_threshold=0;
+CREATE TABLE self_fence(id INT PRIMARY KEY, v INT) SECONDARY_ENGINE=rapid;
+INSERT INTO self_fence VALUES (1,10),(2,20);
+SELECT SUM(v) FROM self_fence;
+SET GLOBAL rapid_self_load_enabled=ON;
+SET DEBUG_SYNC='now WAIT_FOR rapid_self_load_fenced';
+--connect(writer,localhost,root,,test)
+--send UPDATE self_fence SET v=11 WHERE id=1
+--connection default
+--let $wait_condition = SELECT COUNT(*)=1 FROM performance_schema.metadata_locks WHERE OBJECT_SCHEMA='test' AND OBJECT_NAME='self_fence' AND LOCK_STATUS='PENDING' AND LOCK_TYPE='SHARED_WRITE'
+--source include/wait_condition.inc
+SET DEBUG_SYNC='now SIGNAL rapid_self_load_continue';
+SET GLOBAL rapid_self_load_enabled=OFF;
+--connection writer
+--reap
+--connection default
+--let $wait_condition = SELECT COUNT(*)=1 FROM performance_schema.rpd_table_id WHERE SCHEMA_NAME='test' AND TABLE_NAME='self_fence'
+--source include/wait_condition.inc
+SET use_secondary_engine=FORCED;
+SELECT * FROM self_fence ORDER BY id;
+SET use_secondary_engine=OFF;
+--let $assert_digest = SELECT GROUP_CONCAT(CONCAT(id,':',v) ORDER BY id) FROM self_fence
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+DROP TABLE self_fence;
+SET DEBUG_SYNC='RESET';
+SET secondary_engine_cost_threshold=DEFAULT;
+--disconnect writer

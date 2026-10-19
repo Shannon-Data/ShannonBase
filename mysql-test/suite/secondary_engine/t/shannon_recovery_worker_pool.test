@@ -1,0 +1,35 @@
+# More tables than worker slots: every job must run and release its THD/MDL.
+--source include/no_ps_protocol.inc
+--disable_query_log
+CREATE DATABASE recovery_pool;
+USE recovery_pool;
+--let $i = 12
+while ($i)
+{
+  eval CREATE TABLE t$i(id INT PRIMARY KEY) SECONDARY_ENGINE=rapid;
+  eval INSERT INTO t$i VALUES ($i);
+  eval ALTER TABLE t$i SECONDARY_LOAD;
+  --dec $i
+}
+--enable_query_log
+--let $restart_parameters = restart: --rapid_reload_on_restart=ON
+--source include/restart_mysqld.inc
+USE recovery_pool;
+--let $wait_condition = SELECT COUNT(*)=12 FROM performance_schema.rpd_table_id WHERE SCHEMA_NAME='recovery_pool'
+--source include/wait_condition.inc
+SET use_secondary_engine=FORCED;
+--disable_query_log
+--let $i = 12
+while ($i)
+{
+  --let $value = `SELECT id FROM t$i`
+  if ($value != $i)
+  {
+    --die Recovery worker published incorrect table contents
+  }
+  --dec $i
+}
+--enable_query_log
+SET use_secondary_engine=OFF;
+SELECT COUNT(*) FROM performance_schema.rpd_table_id WHERE SCHEMA_NAME='recovery_pool';
+DROP DATABASE recovery_pool;

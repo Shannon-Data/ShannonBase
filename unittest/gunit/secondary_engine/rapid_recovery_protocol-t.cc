@@ -535,3 +535,14 @@ TEST(RapidRecoveryProtocol, ExactPinsProtectQueriesAndUnpublishedConsumerWork) {
   publication.reset();
   Populate::configured_change_propagation_mode.store(mode);
 }
+
+TEST(RapidRecoveryProtocol, RestoredFrontierAdvancesAllocatorWithoutRewinding) {
+  auto &coordinator = ShannonBase::TransactionCoordinator::instance();
+  const uint64_t restored = coordinator.allocate_scn() + 10000;
+  coordinator.observe_commit_scn(restored);
+  const uint64_t first = coordinator.allocate_scn();
+  EXPECT_GT(first, restored);
+  coordinator.observe_commit_scn(restored - 100);
+  EXPECT_GT(coordinator.allocate_scn(), first);
+  EXPECT_GE(coordinator.get_current_scn(), restored);
+}

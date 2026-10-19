@@ -65,7 +65,8 @@ class RecoveryManager {
    * (a table-level operation; @a imcu only identifies the table). @a scn is
    * informational. Each generation records its committed-binlog boundary.
    */
-  bool checkpoint_imcu(const std::string &db, const std::string &tbl, Imcs::Imcu *imcu, uint64_t scn);
+  bool checkpoint_imcu(const std::string &db, const std::string &tbl, Imcs::Imcu *imcu, uint64_t scn,
+                       bool *deferred = nullptr);
 
   /**
    * Return the shared per-table checkpoint and notification manager.

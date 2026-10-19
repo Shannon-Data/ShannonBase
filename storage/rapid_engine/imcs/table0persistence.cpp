@@ -684,7 +684,12 @@ bool TablePersistenceManager::serialize_imcu(Imcu *imcu, uint64_t snapshot_seque
   return true;
 }
 
-bool TablePersistenceManager::checkpoint(Imcu *trigger, uint64_t snapshot_sequence) {
+bool TablePersistenceManager::checkpoint(Imcu *trigger, uint64_t snapshot_sequence, bool *deferred) {
+  if (deferred) *deferred = false;
+  auto defer = [deferred]() {
+    if (deferred) *deferred = true;
+    return false;
+  };
   if (!trigger || !trigger->owner()) {
     DBUG_PRINT("cu_recovery", ("checkpoint skipped: no trigger/owner"));
     return false;
@@ -718,10 +723,12 @@ bool TablePersistenceManager::checkpoint(Imcu *trigger, uint64_t snapshot_sequen
     fs::remove_all(tmp_dir, ec);
   }
   if (!Recovery::DurableFileSystem::create_directories(tmp_dir)) return false;
+  auto cleanup_tmp = create_scope_guard([&] { Recovery::DurableFileSystem::remove_directory(tmp_dir); });
 
   // Directory durability and generation allocation never hold the TP gate.
   std::unique_lock notification_guard(m_notifications.mutex());
-  if (!m_notifications.quiescent() || !m_notifications.position().valid()) return false;
+  if (!m_notifications.quiescent()) return defer();
+  if (!m_notifications.position().valid()) return false;
   auto *owner = trigger->owner();
 
   std::shared_lock table_list_lock(owner->m_table_mutex);
@@ -744,8 +751,8 @@ bool TablePersistenceManager::checkpoint(Imcu *trigger, uint64_t snapshot_sequen
   // rolls it away. Publish no generation instead; the next sweep retries.
   for (const auto &im : imcus) {
     if (im && im->has_uncommitted_changes()) {
-      DBUG_PRINT("cu_recovery", ("checkpoint refused: IMCU %u has uncommitted changes", im->get_imcu_id()));
-      return false;
+      DBUG_PRINT("cu_recovery", ("checkpoint deferred: IMCU %u has uncommitted changes", im->get_imcu_id()));
+      return defer();
     }
   }
 
@@ -768,7 +775,6 @@ bool TablePersistenceManager::checkpoint(Imcu *trigger, uint64_t snapshot_sequen
   // Optimistic cut: serialize one IMCU at a time, then validate that every
   // mutation version and the source notification boundary stayed unchanged.
   // A concurrent change discards the generation instead of freezing all CUs.
-  auto cleanup_tmp = create_scope_guard([&] { Recovery::DurableFileSystem::remove_directory(tmp_dir); });
   RecoveryManifest manifest;
   manifest.table_id = owner->meta().table_id;
   manifest.generation = gen;
@@ -792,9 +798,8 @@ bool TablePersistenceManager::checkpoint(Imcu *trigger, uint64_t snapshot_sequen
     if (permission_error) return false;
     {
       std::unique_lock lock(im->mutation_mutex());
-      if (im->mutation_version() != versions[i] || im->has_uncommitted_changes() ||
-          !serialize_imcu(im.get(), boundary, output))
-        return false;
+      if (im->mutation_version() != versions[i] || im->has_uncommitted_changes()) return defer();
+      if (!serialize_imcu(im.get(), boundary, output)) return false;
     }
     output.close();
     if (!output) return false;
@@ -822,11 +827,15 @@ bool TablePersistenceManager::checkpoint(Imcu *trigger, uint64_t snapshot_sequen
   // Acquire the notification gate before mutation locks, matching the cut's
   // lock order. Hold every lock only for validation, with no serialization/I/O.
   notification_guard.lock();
-  if (!m_notifications.quiescent() || m_notifications.sequence() != boundary) return false;
-  for (const auto &im : imcus)
+  if (!m_notifications.quiescent() || m_notifications.sequence() != boundary) return defer();
+  for (const auto &im : imcus) {
     if (im) freeze_locks.emplace_back(im->mutation_mutex());
-  for (size_t i = 0; i < imcus.size(); ++i)
-    if (imcus[i] && (imcus[i]->mutation_version() != versions[i] || imcus[i]->has_uncommitted_changes())) return false;
+  }
+
+  for (size_t i = 0; i < imcus.size(); ++i) {
+    if (imcus[i] && (imcus[i]->mutation_version() != versions[i] || imcus[i]->has_uncommitted_changes()))
+      return defer();
+  }
   freeze_locks.clear();
   notification_guard.unlock();
   table_list_lock.unlock();

@@ -1,0 +1,21 @@
+SET use_secondary_engine=OFF;
+SET secondary_engine_cost_threshold=0;
+CREATE TABLE self_fence(id INT PRIMARY KEY, v INT) SECONDARY_ENGINE=rapid;
+INSERT INTO self_fence VALUES (1,10),(2,20);
+SELECT SUM(v) FROM self_fence;
+SUM(v)
+30
+SET GLOBAL rapid_self_load_enabled=ON;
+SET DEBUG_SYNC='now WAIT_FOR rapid_self_load_fenced';
+UPDATE self_fence SET v=11 WHERE id=1;
+SET DEBUG_SYNC='now SIGNAL rapid_self_load_continue';
+SET GLOBAL rapid_self_load_enabled=OFF;
+SET use_secondary_engine=FORCED;
+SELECT * FROM self_fence ORDER BY id;
+id	v
+1	11
+2	20
+SET use_secondary_engine=OFF;
+DROP TABLE self_fence;
+SET DEBUG_SYNC='RESET';
+SET secondary_engine_cost_threshold=DEFAULT;

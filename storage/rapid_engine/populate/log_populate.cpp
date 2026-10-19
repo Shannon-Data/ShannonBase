@@ -947,18 +947,21 @@ const char *Populator::prepare_load(THD *thd, TABLE *table, LoadState &state, bo
   if (!propagation_backend_available(prepared.mode))
     return "COMMITTED_BINLOG change propagation backend is not implemented";
 
+  // Capture ignores a table until publication, so every backend must exclude
+  // source writers from the start of the scan through registration. The caller
+  // releases transaction-duration MDL after publication (also on failure).
+  MDL_request fence;
+  MDL_REQUEST_INIT(&fence, MDL_key::TABLE, table->s->db.str, table->s->table_name.str, MDL_SHARED_NO_WRITE,
+                   MDL_TRANSACTION);
+  if (thd->mdl_context.acquire_lock(&fence, thd->variables.lock_wait_timeout))
+    return "cannot lock source table for change propagation";
+
   if (prepared.mode == CopyInfoMode::COMMITTED_BINLOG) {
     if (partial_load) return "COMMITTED_BINLOG requires loading the whole partitioned table";
     if (const char *error = CommittedBinlog::check_configuration(thd)) return error;
     if (!BinlogParser::supports(table))
       return "COMMITTED_BINLOG requires a primary key and no foreign keys or generated columns";
 
-    // Autopilot loads need the same write fence as explicit SECONDARY_LOAD.
-    MDL_request fence;
-    MDL_REQUEST_INIT(&fence, MDL_key::TABLE, table->s->db.str, table->s->table_name.str, MDL_SHARED_NO_WRITE,
-                     MDL_TRANSACTION);
-    if (thd->mdl_context.acquire_lock(&fence, thd->variables.lock_wait_timeout))
-      return "cannot lock source table for change propagation";
     prepared.baseline = Utils::BinlogPositionReader::current_position();
     if (!prepared.baseline.valid()) return "cannot establish a durable, unencrypted binlog load boundary";
   }

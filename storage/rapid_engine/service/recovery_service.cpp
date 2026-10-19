@@ -107,6 +107,9 @@ bool RecoveryJob::execute() {
     return false;
   }
   THD *thd = session.thd();
+  auto &framework = RecoveryFramework::instance();
+  if (!framework.register_session(thd)) return false;
+  auto unregister_session = create_scope_guard([&] { framework.unregister_session(thd); });
 
   // A revoked or uninspectable recovery image requires an explicit user load.
   // Decide before taking source MDL: AP failure must not trigger a primary scan
@@ -136,6 +139,7 @@ bool RecoveryJob::execute() {
 
   DBUG_SIGNAL_WAIT_FOR(thd, "rapid_pause_restart_recovery", "rapid_restart_recovery_paused",
                        "rapid_restart_recovery_continue");
+  if (thd->killed) return false;
 
   // Source state remains authoritative. Fast recovery requires a matching
   // column checkpoint and complete committed MySQL binlog history.
@@ -147,6 +151,7 @@ bool RecoveryJob::execute() {
   MDL_REQUEST_INIT(&source_lock, MDL_key::TABLE, info.schema_name.c_str(), info.table_name.c_str(), MDL_SHARED_NO_WRITE,
                    MDL_TRANSACTION);
   if (thd->mdl_context.acquire_lock(&source_lock, thd->variables.lock_wait_timeout)) {
+    if (thd->killed) return false;
     std::string log_msg =
         "RecoveryJob: cannot lock " + info.schema_name + "." + info.table_name + " for a consistent primary reload";
     LogErr(ERROR_LEVEL, ER_LOG_PRINTF_MSG, log_msg.c_str());
@@ -174,7 +179,7 @@ bool RecoveryJob::execute() {
     return true;
   }
 
-  if (reject_revoked_image()) return false;
+  if (thd->killed || reject_revoked_image()) return false;
 
   // A requested FULL check cannot silently fall back to FAST or trigger an
   // automatic source reload. Keep the failed table unpublished for user load.
@@ -424,7 +429,6 @@ bool RecoveryJob::reconstruct_field_pointers(THD *thd, Imcs::RpdTable *rpd_table
 
 bool RecoveryJob::register_in_loaded_tables(THD *thd, TABLE *source, Imcs::RpdTable *rpd_table) {
   const auto &info = m_table_info;
-  (void)thd;
 
   rpd_table->meta().total_rows.store(rpd_table->count_total_rows(), std::memory_order_relaxed);
 
@@ -442,6 +446,7 @@ bool RecoveryJob::register_in_loaded_tables(THD *thd, TABLE *source, Imcs::RpdTa
     shannon_loaded_tables->erase(info.schema_name.c_str(), info.table_name.c_str());
     Imcs::Imcs::instance()->cleanup(m_share->m_tableid);
   });
+  if (thd->killed) return false;
   // Source MDL excludes writes until propagation is attached and publication
   // completes. Readers must never see a share whose attach can still fail.
   if (configured_change_propagation_mode.load() == CopyInfoMode::COMMITTED_BINLOG &&
@@ -752,43 +757,44 @@ void RecoveryFramework::dispatch_jobs(const std::vector<SecondaryLoadedTable> &t
   // one thread per table would start thousands at once on a large instance.
   constexpr size_t kMaxParallelRecoveryJobs = 8;
 
-  for (const auto &tbl : tables) {
-    {
-      std::unique_lock<std::mutex> lk(m_jobs_mutex);
-      m_jobs_cv.wait(lk, [this] {
-        return m_stopped.load(std::memory_order_acquire) || m_active_jobs.load() < kMaxParallelRecoveryJobs;
+  auto jobs = std::make_shared<const std::vector<SecondaryLoadedTable>>(tables);
+  auto next = std::make_shared<std::atomic<size_t>>(0);
+  for (size_t worker = 0; worker < std::min(kMaxParallelRecoveryJobs, tables.size()); ++worker) {
+    if (m_stopped.load(std::memory_order_acquire)) break;
+    m_active_jobs.fetch_add(1, std::memory_order_relaxed);
+    std::thread job_thread([this, jobs, next]() {
+      auto finish_worker = create_scope_guard([this] {
+        {
+          std::lock_guard<std::mutex> lk(m_jobs_mutex);
+          m_active_jobs.fetch_sub(1, std::memory_order_acq_rel);
+        }
+        m_jobs_cv.notify_all();
       });
-      if (m_stopped.load(std::memory_order_acquire)) break;
-      m_active_jobs.fetch_add(1, std::memory_order_relaxed);
-    }
-
-    std::thread job_thread([this, tbl]() mutable {
+      while (!m_stopped.load(std::memory_order_acquire)) {
+        const size_t index = next->fetch_add(1, std::memory_order_relaxed);
+        if (index >= jobs->size()) break;
+        const auto &tbl = (*jobs)[index];
 #ifndef NDEBUG
-      bool repeat_job = false;
-      {
-        // execute() destroys its session and thread-local DBUG state on return.
-        // Capture the test request while a valid admin THD owns that state.
-        Utils::BackgroundSession debug_session;
-        if (debug_session.is_valid()) DBUG_EXECUTE_IF("rapid_recovery_repeat_job", { repeat_job = true; });
-      }
+        bool repeat_job = false;
+        {
+          // execute() destroys its session and thread-local DBUG state on return.
+          // Capture the test request while a valid admin THD owns that state.
+          Utils::BackgroundSession debug_session;
+          if (debug_session.is_valid()) DBUG_EXECUTE_IF("rapid_recovery_repeat_job", { repeat_job = true; });
+        }
 #endif
-      RecoveryJob job(tbl);
-      bool ok = job.execute();
+        RecoveryJob job(tbl);
+        bool ok = job.execute();
 #ifndef NDEBUG
-      if (repeat_job) {
-        const bool repeated = job.execute();
-        LogErr(INFORMATION_LEVEL, ER_LOG_PRINTF_MSG,
-               repeated == ok ? "RecoveryFramework: repeated recovery returned the same result"
-                              : "RecoveryFramework: repeated recovery changed its result");
-      }
+        if (repeat_job) {
+          const bool repeated = job.execute();
+          LogErr(INFORMATION_LEVEL, ER_LOG_PRINTF_MSG,
+                 repeated == ok ? "RecoveryFramework: repeated recovery returned the same result"
+                                : "RecoveryFramework: repeated recovery changed its result");
+        }
 #endif
-      if (ok) m_reloaded_count.fetch_add(1, std::memory_order_relaxed);
-
-      {
-        std::lock_guard<std::mutex> lk(m_jobs_mutex);  // under the lock: no lost wake-up
-        m_active_jobs.fetch_sub(1, std::memory_order_acq_rel);
+        if (ok) m_reloaded_count.fetch_add(1, std::memory_order_relaxed);
       }
-      m_jobs_cv.notify_all();
     });
 
     {
@@ -798,8 +804,22 @@ void RecoveryFramework::dispatch_jobs(const std::vector<SecondaryLoadedTable> &t
   }
 }
 
+bool RecoveryFramework::register_session(THD *thd) {
+  std::lock_guard lock(m_sessions_mutex);
+  if (m_stopped.load(std::memory_order_acquire)) return false;
+  m_sessions.insert(thd);
+  return true;
+}
+
+void RecoveryFramework::unregister_session(THD *thd) {
+  std::lock_guard lock(m_sessions_mutex);
+  m_sessions.erase(thd);
+}
+
 void RecoveryFramework::startup() {
   if (m_started.exchange(true, std::memory_order_acq_rel)) return;
+  m_stopped.store(false, std::memory_order_release);
+  m_reloaded_count.store(0, std::memory_order_relaxed);
   m_restart_in_progress.store(true, std::memory_order_release);
   auto finish_startup = create_scope_guard([this]() { m_restart_in_progress.store(false, std::memory_order_release); });
 
@@ -842,6 +862,14 @@ void RecoveryFramework::shutdown() {
   // 1. Signal shutdown flags
   m_stopped.store(true, std::memory_order_release);
   {
+    std::lock_guard lock(m_sessions_mutex);
+    for (THD *thd : m_sessions) {
+      mysql_mutex_lock(&thd->LOCK_thd_data);
+      thd->awake(THD::KILL_CONNECTION);
+      mysql_mutex_unlock(&thd->LOCK_thd_data);
+    }
+  }
+  {
     std::lock_guard<std::mutex> lk(m_jobs_mutex);  // pair with the waiters' predicate
   }
   m_jobs_cv.notify_all();  // wake a dispatcher waiting for a free job slot
@@ -876,12 +904,21 @@ void RecoveryFramework::shutdown() {
     m_job_threads.clear();
   }
 
+  // A job already publishing when shutdown began may have restarted a
+  // propagation worker after the caller's first stop. Drain again only after
+  // every recovery session has exited, while persistence managers are alive.
+  Populate::CommittedBinlog::shutdown();
+  Populate::Populator::shutdown();
+
   // Stop scheduler AFTER jobs drain. Unpublish it first: tables and hooks reach it
   // through global(), and it must not be handed out once it is stopping.
   if (m_checkpoint_scheduler) {
     CheckpointScheduler::set_global(nullptr);
     m_checkpoint_scheduler->stop();
+    m_checkpoint_scheduler.reset();
   }
+  m_dd_worker.reset();
+  m_started.store(false, std::memory_order_release);
 }
 }  // namespace Service
 }  // namespace ShannonBase

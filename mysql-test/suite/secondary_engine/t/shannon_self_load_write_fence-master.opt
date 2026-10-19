@@ -1,0 +1,4 @@
+--loose-rapid_schema_embedding=OFF
+--rapid_self_load_skip_quiet_check=ON
+--rapid_self_load_interval_seconds=60
+--loose-debug=d,rapid_self_load_test_tick,rapid_pause_self_load_fenced

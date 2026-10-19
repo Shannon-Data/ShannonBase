@@ -100,7 +100,7 @@
 #include "storage/rapid_engine/populate/log_commons.h"
 #include "storage/rapid_engine/populate/log_dml_notification.h"  // DML notification capture side
 #include "storage/rapid_engine/populate/log_populate.h"
-#include "storage/rapid_engine/recovery/recovery.h"  // rapid_recovery_startup, rapid_recovery_shutdown
+#include "storage/rapid_engine/recovery/recovery.h"  // CheckpointScheduler
 #include "storage/rapid_engine/trx/transaction.h"    //transaction
 #include "storage/rapid_engine/utils/binlog_position.h"
 #include "storage/rapid_engine/utils/concurrent.h"

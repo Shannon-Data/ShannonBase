@@ -77,11 +77,12 @@ std::shared_ptr<Imcs::TablePersistenceManager> RecoveryManager::table_manager(co
   return get_table_mgr(db, tbl);
 }
 
-bool RecoveryManager::checkpoint_imcu(const std::string &db, const std::string &tbl, Imcs::Imcu *imcu,
-                                      uint64_t /*scn*/) {
+bool RecoveryManager::checkpoint_imcu(const std::string &db, const std::string &tbl, Imcs::Imcu *imcu, uint64_t /*scn*/,
+                                      bool *deferred) {
+  if (deferred) *deferred = false;
   if (!imcu) return false;
   auto mgr = get_table_mgr(db, tbl);
-  if (!mgr->checkpoint(imcu, 0)) return false;
+  if (!mgr->checkpoint(imcu, 0, deferred)) return false;
 
   return true;
 }
@@ -383,7 +384,8 @@ void CheckpointScheduler::do_ondemand_checkpoints() {
     auto imcus = rpd_table->get_imcus();
     if (imcus.empty()) continue;
     // checkpoint() snapshots the whole table into one generation; trigger once.
-    if (!m_mgr->checkpoint_imcu(db, tbl, imcus.front().get(), scn)) {
+    bool deferred = false;
+    if (!m_mgr->checkpoint_imcu(db, tbl, imcus.front().get(), scn, &deferred) && !deferred) {
       std::string log_msg = "CheckpointScheduler: on-demand checkpoint failed " + db + "." + tbl;
       LogErr(WARNING_LEVEL, ER_LOG_PRINTF_MSG, log_msg.c_str());
     }

@@ -371,7 +371,7 @@ void notify_insert(THD *thd, TABLE *table, COPY_INFO *info) {
 
   if (ShannonBase::Populate::configured_change_propagation_mode.load() ==
       ShannonBase::Populate::CopyInfoMode::COMMITTED_BINLOG) {
-    if (loaded) ShannonBase::Populate::CommittedBinlog::notify_dml(thd, table);
+    if (loaded) ShannonBase::Populate::CommittedBinlog::notify_dml(thd, table, loaded->meta().table_id);
     return;
   }
 
@@ -396,7 +396,7 @@ void notify_update(THD *thd, TABLE *table, const uchar *old_row, const uchar *ne
   if (!loaded) ShannonBase::Recovery::revoke_unregistered_table_image(table->s->db.str, table->s->table_name.str);
   if (ShannonBase::Populate::configured_change_propagation_mode.load() ==
       ShannonBase::Populate::CopyInfoMode::COMMITTED_BINLOG) {
-    if (loaded) ShannonBase::Populate::CommittedBinlog::notify_dml(thd, table);
+    if (loaded) ShannonBase::Populate::CommittedBinlog::notify_dml(thd, table, loaded->meta().table_id);
     return;
   }
 
@@ -414,7 +414,7 @@ void notify_delete(THD *thd, TABLE *table, const uchar *old_row) {
   if (!loaded) ShannonBase::Recovery::revoke_unregistered_table_image(table->s->db.str, table->s->table_name.str);
   if (ShannonBase::Populate::configured_change_propagation_mode.load() ==
       ShannonBase::Populate::CopyInfoMode::COMMITTED_BINLOG) {
-    if (loaded) ShannonBase::Populate::CommittedBinlog::notify_dml(thd, table);
+    if (loaded) ShannonBase::Populate::CommittedBinlog::notify_dml(thd, table, loaded->meta().table_id);
     return;
   }
 

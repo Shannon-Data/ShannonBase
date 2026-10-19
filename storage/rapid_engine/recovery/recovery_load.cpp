@@ -146,25 +146,5 @@ int LoadFlagManager::query_loaded_tables(THD *thd, std::vector<SecondaryLoadedTa
   return 0;
 }
 
-int LoadFlagManager::is_table_flagged(THD *thd, const std::string &schema_name, const std::string &table_name,
-                                      bool &loaded) {
-  loaded = false;
-
-  if (!thd || is_system_schema(schema_name)) return thd ? 0 : HA_ERR_GENERIC;
-  auto *client = thd->dd_client();
-  if (!client) return HA_ERR_GENERIC;
-  dd::cache::Dictionary_client::Auto_releaser releaser(client);
-  // Dictionary acquisition requires the corresponding table MDL.
-  MDL_request request;
-  MDL_REQUEST_INIT(&request, MDL_key::TABLE, schema_name.c_str(), table_name.c_str(), MDL_SHARED, MDL_TRANSACTION);
-  if (thd->mdl_context.acquire_lock(&request, thd->variables.lock_wait_timeout)) return HA_ERR_GENERIC;
-  const dd::Table *table = nullptr;
-  if (client->acquire(schema_name.c_str(), table_name.c_str(), &table)) return HA_ERR_GENERIC;
-  if (table) {
-    bool value = false;
-    if (table->options().exists("secondary_load") && !table->options().get("secondary_load", &value)) loaded = value;
-  }
-  return 0;
-}
 }  // namespace Recovery
 }  // namespace ShannonBase

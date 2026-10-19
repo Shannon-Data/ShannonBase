@@ -716,6 +716,7 @@ int Imcs::load_innodb_parallel(const Rapid_load_context *context, ha_innobase *f
   Parallel_reader_adapter::Load_fn load_fn = [&context, &shannon_file, &rpd_table, &error_flag, &total_rows, table_info,
                                               total_to_load](void *cookie, uint nrows, void *rowdata,
                                                              uint64_t partition_id) -> bool {
+    if (context->m_thd->killed) error_flag.store(true, std::memory_order_release);
     if (error_flag.load(std::memory_order_acquire)) return true;
     // ref to `row_sel_store_row_id_to_prebuilt` in row0sel.cc
     auto scan_cookie = static_cast<parall_scan_cookie_t *>(cookie);  //, if you enable thread contexs.
@@ -724,6 +725,10 @@ int Imcs::load_innodb_parallel(const Rapid_load_context *context, ha_innobase *f
     auto data_ptr = static_cast<uchar *>(rowdata);
     auto end_data_ptr = static_cast<uchar *>(rowdata) + ptrdiff_t(nrows * scan_cookie->row_len);
     for (auto index = 0u; index < nrows; data_ptr += ptrdiff_t(scan_cookie->row_len), index++) {
+      if (context->m_thd->killed) {
+        error_flag.store(true, std::memory_order_release);
+        return true;
+      }
       bool inserted{false};
       try {
         inserted = rpd_table->insert_row(context, (uchar *)data_ptr).ok();

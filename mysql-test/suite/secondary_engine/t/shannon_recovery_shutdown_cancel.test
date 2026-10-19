@@ -1,0 +1,23 @@
+# Shutdown must wake recovery THDs, including a job waiting on DEBUG_SYNC/MDL.
+--source include/have_debug.inc
+--source include/have_debug_sync.inc
+--source include/no_ps_protocol.inc
+--disable_query_log
+CALL mtr.add_suppression("RecoveryJob: cannot lock test.cancel_recovery for a consistent primary reload");
+--enable_query_log
+CREATE TABLE cancel_recovery(id INT PRIMARY KEY) SECONDARY_ENGINE=rapid;
+INSERT INTO cancel_recovery VALUES (1);
+ALTER TABLE cancel_recovery SECONDARY_LOAD;
+--let $restart_parameters = restart: --rapid_reload_on_restart=ON --debug=d,rapid_pause_restart_recovery
+--source include/restart_mysqld.inc
+SET DEBUG_SYNC='now WAIT_FOR rapid_restart_recovery_paused';
+# Do not signal rapid_restart_recovery_continue: shutdown must cancel the job.
+--let $shutdown_server_timeout = 30
+--let $restart_parameters = restart: --rapid_reload_on_restart=ON
+--source include/restart_mysqld.inc
+--let $wait_condition = SELECT COUNT(*)=1 FROM performance_schema.rpd_table_id WHERE SCHEMA_NAME='test' AND TABLE_NAME='cancel_recovery'
+--source include/wait_condition.inc
+SET use_secondary_engine=FORCED;
+SELECT * FROM cancel_recovery;
+SET use_secondary_engine=OFF;
+DROP TABLE cancel_recovery;

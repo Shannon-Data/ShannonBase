@@ -420,3 +420,28 @@ FULL success/mismatch/missing implementation, exceptions and deadlines, plus
 `shannon_recovery_validation_unavailable` for keeping failed AP unpublished and
 manual loading without changing TP data. These checks do not replace full-suite,
 long-duration pressure, GC/checkpoint measurements or SLA qualification.
+
+## Current operational limits
+
+`rapid_change_propagation_mode` selects the actual backend (`CAPTURE` or
+`COMMITTED_BINLOG`). `rapid_propagation_mode` remains a reserved interface for
+future REDO_LOG support, retaining DIRECT_NOTIFICATION, REDO_LOG_PARSE and HYBRID.
+REDO_LOG_PARSE and HYBRID are not implemented; setting them currently does not
+change execution. Use `rapid_change_propagation_mode` to select an active backend.
+
+The committed-binlog reader and recovery replay buffer at most
+`min(rapid_pop_buffer_size_max, 64 MiB)` of decoded row-image payload for one
+transaction. Before/after images and off-page data count toward this limit;
+it is not a limit on SQL text length or just the compressed binlog event size.
+The event reader also has a 64 MiB buffer limit. An unsupported/oversized online
+transaction fences the affected Rapid table instead of publishing a partial
+transaction. Primary InnoDB data is not rolled back by this fence. Use the
+primary engine while resolving the cause, then unload and explicitly
+`SECONDARY_LOAD` the affected table to establish a fresh baseline. A workload
+with recurrent oversized transactions is outside the supported online envelope;
+raising the configured buffer above 64 MiB does not remove the ceiling.
+
+Recovery uses at most eight workers. Shutdown requests cooperative cancellation
+of registered recovery sessions and joins the workers before destroying engine
+resources. MDL waits and row scans can stop on cancellation; uninterruptible
+filesystem/device operations still prevent a strict shutdown deadline.

@@ -1,0 +1,7 @@
+--loose-rapid_schema_embedding=OFF
+--log-bin
+--binlog-format=ROW
+--binlog-row-image=FULL
+--sync-binlog=1
+--innodb-flush-log-at-trx-commit=1
+--rapid_change_propagation_mode=COMMITTED_BINLOG

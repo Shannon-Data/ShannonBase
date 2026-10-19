@@ -11,7 +11,7 @@
 # Notes:
 #   - Uses concurrency to cancel in-progress runs for the same workflow/ref/event
 #   - Includes disk space optimizations to prevent 'No space left on device' errors
-#   - Uses AddressSanitizer (--sanitize) with leak detection and suppression file
+#   - Compiles with WITH_ASAN=ON; --sanitize enables MTR sanitizer report checking
 #   - Commented-out alternative test commands (collections/default.push) for future use with faster runners
 #   - lint job adjusted to handle non-PR events (push) by checking github.event_name
 #
@@ -101,6 +101,7 @@ jobs:
           git fetch --tags -f
           cmake ../ \
           -DCMAKE_BUILD_TYPE=Release \
+          -DWITH_ASAN=ON \
           -DCMAKE_INSTALL_PREFIX=${SHANNON_PREFIX}/ \
           -DMYSQL_DATADIR=${SHANNON_PREFIX}/data \
           -DSYSCONFDIR=${SHANNON_PREFIX}/ \
@@ -193,6 +194,7 @@ jobs:
           git fetch --tags -f
           cmake ../ \
           -DCMAKE_BUILD_TYPE=Release \
+          -DWITH_ASAN=ON \
           -DCMAKE_INSTALL_PREFIX=${SHANNON_PREFIX}/ \
           -DMYSQL_DATADIR=${SHANNON_PREFIX}/data \
           -DSYSCONFDIR=${SHANNON_PREFIX}/ \

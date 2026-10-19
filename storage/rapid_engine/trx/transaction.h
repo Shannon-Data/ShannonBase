@@ -94,6 +94,15 @@ class Transaction : public MemoryObject {
     inline uint64_t get_current_scn() const { return m_global_scn.load(std::memory_order_acquire); }
     inline uint64_t allocate_scn() { return m_global_scn.fetch_add(1, std::memory_order_acq_rel); }
 
+    // Recovery observes SCNs from a previous process. Never allocate below
+    // that frontier when replaying or accepting subsequent source commits.
+    void observe_scn(uint64_t scn) {
+      const uint64_t next = scn == UINT64_MAX ? scn : scn + 1;
+      uint64_t current = m_global_scn.load(std::memory_order_relaxed);
+      while (current < next && !m_global_scn.compare_exchange_weak(current, next, std::memory_order_acq_rel)) {
+      }
+    }
+
     /**
      * Update minimum active SCN (called when transaction commits/aborts)
      * @param active_txns Current active transaction list with their start SCNs
