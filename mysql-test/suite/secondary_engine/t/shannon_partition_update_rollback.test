@@ -1,0 +1,56 @@
+# A failed compensation must quarantine immediately, without retrying a
+# partially applied cross-partition UPDATE.
+--source include/have_debug.inc
+--source include/no_ps_protocol.inc
+SET @saved_debug=@@GLOBAL.debug;
+CALL mtr.add_suppression('Rapid COPY_INFO cross-partition UPDATE rollback failed');
+CALL mtr.add_suppression('Rapid propagation quarantined table');
+SET use_secondary_engine=OFF;
+CREATE TABLE partition_rollback (id INT PRIMARY KEY, v INT, KEY(v))
+  SECONDARY_ENGINE=rapid PARTITION BY RANGE(id)
+  (PARTITION p0 VALUES LESS THAN (10), PARTITION p1 VALUES LESS THAN MAXVALUE);
+INSERT INTO partition_rollback VALUES (1,100),(2,200);
+ALTER TABLE partition_rollback SECONDARY_LOAD;
+CREATE TABLE partition_healthy (id INT PRIMARY KEY, v INT) SECONDARY_ENGINE=rapid;
+INSERT INTO partition_healthy VALUES (1,10);
+ALTER TABLE partition_healthy SECONDARY_LOAD;
+SET GLOBAL debug='+d,rapid_cross_partition_delete_failure,rapid_cross_partition_rollback_failure';
+UPDATE partition_rollback SET id=11 WHERE id=1;
+SET use_secondary_engine=FORCED;
+--error ER_SECONDARY_ENGINE_PLUGIN,ER_SECONDARY_ENGINE
+SELECT COUNT(*) FROM partition_rollback;
+# Wait for the worker to report the terminal outcome before inspecting its log.
+--let $grep_file = $MYSQLTEST_VARDIR/log/mysqld.1.err
+--let $grep_pattern = Rapid propagation quarantined table
+--let $wait_timeout = 30
+--source include/wait_for_pattern_in_file.inc
+--let ROLLBACK_LOG = $MYSQLTEST_VARDIR/log/mysqld.1.err
+perl;
+  use strict;
+  die "ROLLBACK_LOG not set" unless $ENV{ROLLBACK_LOG};
+  open(my $log, '<', $ENV{'ROLLBACK_LOG'}) or die $!;
+  my ($failures, $retries) = (0, 0);
+  while (my $line = <$log>) {
+    ($failures, $retries) = (0, 0) if $line =~ /^CURRENT_TEST: /;
+    ++$failures if $line =~ /Rapid COPY_INFO cross-partition UPDATE rollback failed/;
+    ++$retries if $line =~ /Rapid propagation retry /;
+  }
+  die "Expected one failed compensation and no retries: $failures failures, $retries retries"
+    unless $failures == 1 && $retries == 0;
+EOF
+SET GLOBAL debug=@saved_debug;
+SET use_secondary_engine=ON;
+SELECT id,v FROM partition_rollback ORDER BY id;
+SET use_secondary_engine=OFF;
+UPDATE partition_healthy SET v=20 WHERE id=1;
+--let $assert_digest = SELECT SUM(v) FROM partition_healthy
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+ALTER TABLE partition_rollback SECONDARY_UNLOAD;
+ALTER TABLE partition_rollback SECONDARY_LOAD;
+--let $assert_digest = SELECT GROUP_CONCAT(CONCAT(id,':',v) ORDER BY id) FROM partition_rollback
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+# Exercise the same move after recovery, including secondary-index lookups.
+UPDATE partition_rollback SET id=1 WHERE id=11;
+--let $assert_digest = SELECT GROUP_CONCAT(CONCAT(id,':',v) ORDER BY id) FROM partition_rollback WHERE v=100
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+DROP TABLE partition_rollback, partition_healthy;

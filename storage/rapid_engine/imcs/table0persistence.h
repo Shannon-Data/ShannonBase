@@ -116,7 +116,7 @@ class TablePersistenceManager {
   bool remove_generation(uint64_t generation);
   bool recovery_required() const { return m_recovery_required.load(); }
   void require_recovery() { m_recovery_required.store(true); }
-  // Fence live recovery first; provider/path allocation failures return false.
+  // Fence live recovery first; provider and persistence errors return false.
   bool revoke_fast_recovery() noexcept;
   bool mark_recovery_taint() noexcept;
   bool recovery_tainted() const;

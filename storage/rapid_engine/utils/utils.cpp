@@ -34,7 +34,7 @@
 #include "include/my_bitmap.h"
 #include "mysql/plugin.h"  // mysql_tmpfile
 #include "sql/log.h"       // sql_print_error
-#include "sql/mysqld.h"    // mysqld_server_started
+#include "sql/mysqld.h"    // get_server_state
 #include "sql/sql_base.h"
 #include "storage/innobase/include/ha_prototypes.h"  // thd_parallel_read_threads
 #include "storage/rapid_engine/imcs/varlen0data.h"
@@ -478,21 +478,24 @@ bool Util::wait_for_server_bootup(int timeout_seconds, std::function<bool()> sho
   int elapsed_sec = 0;
 
   mysql_mutex_lock(&LOCK_server_started);
-  while (!mysqld_server_started) {
+  // Component readiness is signaled before SERVER_OPERATING, and also on
+  // startup abort. DD recovery must wait for the operational state, as in
+  // HeatWave Bug#34960922, and leave promptly when startup fails.
+  while (get_server_state() != SERVER_OPERATING) {
     mysql_mutex_unlock(&LOCK_server_started);
     const bool stop = should_stop();
     mysql_mutex_lock(&LOCK_server_started);
 
-    if (stop) {
+    if (stop || get_server_state() == SERVER_SHUTTING_DOWN) {
       mysql_mutex_unlock(&LOCK_server_started);
       return false;
     }
 
-    if (mysqld_server_started) break;
+    if (get_server_state() == SERVER_OPERATING) break;
     if (elapsed_sec >= timeout_seconds) {
       mysql_mutex_unlock(&LOCK_server_started);
       sql_print_warning(
-          "ML EmbeddingManager: timed out waiting for server bootup "
+          "Rapid: timed out waiting for server bootup "
           "after %d seconds",
           timeout_seconds);
       return false;

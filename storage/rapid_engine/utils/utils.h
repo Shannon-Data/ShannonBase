@@ -36,6 +36,7 @@
 #include <sstream>
 #include <string>
 #include <type_traits>
+#include <utility>
 
 #include "include/field_types.h"
 #include "include/my_inttypes.h"
@@ -529,6 +530,37 @@ class Util {
   }
   static bool wait_for_server_bootup(int timeout_seconds = 300);
   static bool wait_for_server_bootup(int timeout_seconds, std::function<bool()> should_stop);
+};
+
+/** Pairs open_table_by_name() with close_table() on every scope exit.
+ * The THD must outlive this guard. This releases the external handler lock
+ * and completes the statement transaction as close_table() normally does;
+ * TABLE storage remains owned by the THD until close_thread_tables().
+ */
+class TableGuard final {
+ public:
+  TableGuard(THD *thd, const std::string &schema, const std::string &table, thr_lock_type mode)
+      : m_thd(thd), m_table(Util::open_table_by_name(thd, schema, table, mode)) {}
+
+  // Adopt a table opened by open_table_by_name(), not an arbitrary borrowed TABLE.
+  TableGuard(THD *thd, TABLE *table) noexcept : m_thd(thd), m_table(table) {}
+  ~TableGuard() noexcept { close(); }
+
+  TableGuard(const TableGuard &) = delete;
+  TableGuard &operator=(const TableGuard &) = delete;
+  TableGuard(TableGuard &&) = delete;
+  TableGuard &operator=(TableGuard &&) = delete;
+
+  TABLE *get() const noexcept { return m_table; }
+  // Transfer the close obligation to another guard.
+  TABLE *release() noexcept { return std::exchange(m_table, nullptr); }
+  void close() noexcept {
+    if (auto *table = release()) Util::close_table(m_thd, table);
+  }
+
+ private:
+  THD *m_thd;
+  TABLE *m_table;
 };
 
 class Table_closer {

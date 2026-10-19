@@ -81,12 +81,6 @@ mysql_pfs_key_t rapid_self_load_thread_key;
 namespace ShannonBase {
 extern std::shared_ptr<Utils::MemoryPool> shannon_rpd_memory_pool;
 
-extern bool shannon_rpd_self_load_enabled;
-extern ulonglong shannon_rpd_self_load_interval_sec;  // default 24hurs
-extern bool shannon_rpd_self_load_skip_quiet_check;
-extern int shannon_rpd_self_load_base_relation_fill_percentage;  // default percentage 70%.
-extern ulonglong shannon_rpd_purge_batch_size;
-
 namespace Populate {
 extern std::shared_mutex shannon_pop_table_mutex;
 extern std::multiset<std::string> shannon_pop_tables;
@@ -300,7 +294,7 @@ namespace ShannonBase {
 namespace Autopilot {
 // static members initialization.
 std::once_flag SelfLoadManager::one;
-std::unique_ptr<SelfLoadManager> SelfLoadManager::m_instance = nullptr;
+std::unique_ptr<SelfLoadManager> SelfLoadManager::m_instance{nullptr};
 std::atomic<loader_state_t> SelfLoadManager::m_worker_state{loader_state_t::LOADER_STATE_EXIT};
 std::condition_variable SelfLoadManager::m_worker_cv;
 std::mutex SelfLoadManager::m_worker_mutex;
@@ -309,16 +303,6 @@ uint64_t SelfLoadManager::m_reload_generation{0};
 std::mutex SelfLoadManager::m_worker_lifecycle_mutex;
 bool SelfLoadManager::m_worker_started{false};
 std::atomic<bool> SelfLoadManager::m_accept_requests{true};
-
-class HandlerGuard {
- public:
-  HandlerGuard(THD *thd, TABLE *tb) : m_thd(thd), m_table_ptr(tb) {}
-  ~HandlerGuard() {}
-
- private:
-  THD *m_thd{nullptr};
-  TABLE *m_table_ptr{nullptr};
-};
 
 std::optional<std::string> SelfLoadManager::extract_secondary_engine(const std::string &input) {
   auto eng_str = input;
@@ -335,9 +319,9 @@ std::optional<std::string> SelfLoadManager::extract_secondary_engine(const std::
 
 // to scan mysq.schema, to get all schem information. such as schema_id, schema_name, etc.
 int SelfLoadManager::load_mysql_schema_info() {
-  auto cat_tables_ptr = Utils::Util::open_table_by_name(current_thd, "mysql", "schemata", TL_READ_WITH_SHARED_LOCKS);
+  Utils::TableGuard table_guard(current_thd, "mysql", "schemata", TL_READ_WITH_SHARED_LOCKS);
+  auto *cat_tables_ptr = table_guard.get();
   if (!cat_tables_ptr) {
-    Utils::Util::close_table(current_thd, cat_tables_ptr);
     LogErr(WARNING_LEVEL, ER_LOG_PRINTF_MSG, "Self-Load: cannot open mysql.schemata; the RPD Mirror stays empty");
     return HA_ERR_GENERIC;
   }
@@ -345,11 +329,7 @@ int SelfLoadManager::load_mysql_schema_info() {
   // must read from secondary engine.
   /* Read the traning data into train_data vector from rapid engine. here, we use training data
   as lablels too */
-  HandlerGuard garud(current_thd, cat_tables_ptr);
-  if (cat_tables_ptr->file->inited == handler::NONE && cat_tables_ptr->file->ha_rnd_init(true)) {
-    Utils::Util::close_table(current_thd, cat_tables_ptr);
-    return HA_ERR_GENERIC;
-  }
+  if (cat_tables_ptr->file->inited == handler::NONE && cat_tables_ptr->file->ha_rnd_init(true)) return HA_ERR_GENERIC;
 
   int tmp{HA_ERR_GENERIC};
   ShannonBase::Utils::ColumnMapGuard guard(cat_tables_ptr);
@@ -368,15 +348,14 @@ int SelfLoadManager::load_mysql_schema_info() {
   }
   cat_tables_ptr->file->ha_rnd_end();
 
-  Utils::Util::close_table(current_thd, cat_tables_ptr);
   return SHANNON_SUCCESS;
 }
 
 // to scan mysq.table_stats, to get all statistics information. such as row count, data size, index size, etc.
 int SelfLoadManager::load_mysql_table_stats() {
-  auto cat_tables_ptr = Utils::Util::open_table_by_name(current_thd, "mysql", "table_stats", TL_READ_WITH_SHARED_LOCKS);
+  Utils::TableGuard table_guard(current_thd, "mysql", "table_stats", TL_READ_WITH_SHARED_LOCKS);
+  auto *cat_tables_ptr = table_guard.get();
   if (!cat_tables_ptr) {
-    Utils::Util::close_table(current_thd, cat_tables_ptr);
     LogErr(WARNING_LEVEL, ER_LOG_PRINTF_MSG, "Self-Load: cannot open mysql.table_stats; table sizes stay unknown");
     return HA_ERR_GENERIC;
   }
@@ -384,11 +363,7 @@ int SelfLoadManager::load_mysql_table_stats() {
   // must read from secondary engine.
   /* Read the traning data into train_data vector from rapid engine. here, we use training data
   as lablels too */
-  HandlerGuard garud(current_thd, cat_tables_ptr);
-  if (cat_tables_ptr->file->inited == handler::NONE && cat_tables_ptr->file->ha_rnd_init(true)) {
-    Utils::Util::close_table(current_thd, cat_tables_ptr);
-    return HA_ERR_GENERIC;
-  }
+  if (cat_tables_ptr->file->inited == handler::NONE && cat_tables_ptr->file->ha_rnd_init(true)) return HA_ERR_GENERIC;
 
   int tmp{HA_ERR_GENERIC};
   ShannonBase::Utils::ColumnMapGuard guard(cat_tables_ptr);
@@ -422,7 +397,6 @@ int SelfLoadManager::load_mysql_table_stats() {
   }
   cat_tables_ptr->file->ha_rnd_end();
 
-  Utils::Util::close_table(current_thd, cat_tables_ptr);
   return SHANNON_SUCCESS;
 }
 
@@ -431,9 +405,7 @@ int SelfLoadManager::load_mysql_table_ids() {
   dd::cache::Dictionary_client *dd_client = current_thd->dd_client();
 
   std::vector<const dd::Schema *> schemas;
-  if (dd_client->fetch_global_components(&schemas)) {
-    return HA_ERR_GENERIC;
-  }
+  if (dd_client->fetch_global_components(&schemas)) return HA_ERR_GENERIC;
 
   for (const dd::Schema *schema : schemas) {
     if (is_system_schema(schema->name().c_str())) continue;
@@ -453,9 +425,9 @@ int SelfLoadManager::load_mysql_table_ids() {
 
 // to scan mysq.tables, to get all schem information. such as table_name, secondary_engine info, etc.
 int SelfLoadManager::load_mysql_tables_info() {
-  auto cat_tables_ptr = Utils::Util::open_table_by_name(current_thd, "mysql", "tables", TL_READ_WITH_SHARED_LOCKS);
+  Utils::TableGuard table_guard(current_thd, "mysql", "tables", TL_READ_WITH_SHARED_LOCKS);
+  auto *cat_tables_ptr = table_guard.get();
   if (!cat_tables_ptr) {
-    Utils::Util::close_table(current_thd, cat_tables_ptr);
     LogErr(WARNING_LEVEL, ER_LOG_PRINTF_MSG, "Self-Load: cannot open mysql.tables; the RPD Mirror stays empty");
     return HA_ERR_GENERIC;
   }
@@ -463,11 +435,7 @@ int SelfLoadManager::load_mysql_tables_info() {
   // must read from secondary engine.
   /* Read the traning data into train_data vector from rapid engine. here, we use training data
   as lablels too */
-  HandlerGuard garud(current_thd, cat_tables_ptr);
-  if (cat_tables_ptr->file->inited == handler::NONE && cat_tables_ptr->file->ha_rnd_init(true)) {
-    Utils::Util::close_table(current_thd, cat_tables_ptr);
-    return HA_ERR_GENERIC;
-  }
+  if (cat_tables_ptr->file->inited == handler::NONE && cat_tables_ptr->file->ha_rnd_init(true)) return HA_ERR_GENERIC;
 
   int tmp{HA_ERR_GENERIC};
   ShannonBase::Utils::ColumnMapGuard guard(cat_tables_ptr);
@@ -514,7 +482,6 @@ int SelfLoadManager::load_mysql_tables_info() {
   }
   cat_tables_ptr->file->ha_rnd_end();
 
-  Utils::Util::close_table(current_thd, cat_tables_ptr);
   return SHANNON_SUCCESS;
 }
 
@@ -573,7 +540,7 @@ void SelfLoadManager::update_table_importance(TableInfo *table_info, uint64_t to
   // Adjust weights based on execution location
   // Queries executed by MySQL receive a higher importance increment (due to longer execution time)
   // Queries executed by HeatWave receive a smaller importance increment (due to shorter execution time)
-  double weight_factor = 1.0;
+  double weight_factor{1.0};
   if (executed_in == SelectExecutedIn::kSecondaryEngine) {
     // HeatWave has shorter execution times, so reduce the importance increment to balance the difference
     weight_factor = 0.5;  // This coefficient can be adjusted based on actual performance differences
@@ -584,7 +551,7 @@ void SelfLoadManager::update_table_importance(TableInfo *table_info, uint64_t to
   // Update the importance score using weighted averaging
   // For frequently accessed tables, use a smaller weight to smooth out fluctuations
   double current_importance = table_info->stats.importance.load();
-  double updated_importance;
+  double updated_importance{0.0};
 
   do {
     current_importance = table_info->stats.importance.load();
@@ -609,7 +576,7 @@ void SelfLoadManager::update_table_stats(THD *thd, Table_ref *table_lists, Selec
       (query_end_time >= query_start_time ? query_end_time - query_start_time : 0) / 1000.0;
 
   std::vector<std::shared_ptr<TableInfo>> query_tables;
-  uint64_t total_query_size = 0;
+  uint64_t total_query_size{0};
 
   // travers all the tables in the query statement.
   for (Table_ref *table = table_lists; table; table = table->next_global) {
@@ -709,7 +676,7 @@ static void self_load_coordinator_main() {
       if (!(first_cycle && SelfLoadManager::m_reload_pending.load()))
         SelfLoadManager::m_worker_cv.wait_for(lock, timeout, [&]() {
           auto state = SelfLoadManager::m_worker_state.load();
-          return state == loader_state_t::LOADER_STATE_STOP || state == loader_state_t::LOADER_STATE_EXIT ||
+          return state == loader_state_t::LOADER_STATE_EXIT ||
                  observed_generation != SelfLoadManager::m_reload_generation;
         });
       observed_generation = SelfLoadManager::m_reload_generation;
@@ -734,12 +701,14 @@ static void self_load_coordinator_main() {
                            "rapid_self_load_recovery_continue");
       continue;
     }
+
     if (SelfLoadManager::m_reload_pending.exchange(false) && self_load_inst->reconcile_propagation_state())
       SelfLoadManager::m_reload_pending.store(true);
     if (!ShannonBase::shannon_rpd_engine_cfg.self_load_enabled) {
       if (SelfLoadManager::m_reload_pending.load()) continue;
       break;
     }
+
     const auto now = std::chrono::steady_clock::now();
     auto selection_interval = std::chrono::seconds(ShannonBase::shannon_rpd_engine_cfg.self_load_interval_sec);
     DBUG_EXECUTE_IF("rapid_self_load_test_tick", { selection_interval = std::chrono::seconds(1); });
@@ -751,8 +720,6 @@ static void self_load_coordinator_main() {
   SelfLoadManager::m_worker_state.store(loader_state_t::LOADER_STATE_EXIT);
   close_thread_tables(thd);
 }
-
-bool SelfLoadManager::worker_active() { return thread_is_active(srv_threads.m_rapid_self_load_cordinator); }
 
 void SelfLoadManager::notify_propagation_failure() {
   {
@@ -772,6 +739,7 @@ void SelfLoadManager::start_self_load_worker() {
   std::lock_guard<std::mutex> lifecycle(m_worker_lifecycle_mutex);
   if (!m_accept_requests.load() || m_worker_state.load() == loader_state_t::LOADER_STATE_RUN) return;
   if (m_worker_started) srv_threads.m_rapid_self_load_cordinator.wait();
+
   srv_threads.m_rapid_self_load_cordinator =
       os_thread_create(rapid_self_load_thread_key, 0, self_load_coordinator_main);
   m_worker_state.store(loader_state_t::LOADER_STATE_RUN);
@@ -832,6 +800,7 @@ bool SelfLoadManager::reconcile_propagation_state() {
              meta.stale_reason == stale_reason_t::ERROR_CLUSTER_OOM;
     });
   };
+
   if (!has_oom()) return false;
   if (!is_system_quiet()) return true;
   RpdMirror::refresh_propagation_health(nullptr);
@@ -892,16 +861,13 @@ void SelfLoadManager::run_self_load_algorithm() {
   // Optional table selection does not control the separate OOM recovery check.
   if (!ShannonBase::shannon_rpd_engine_cfg.self_load_enabled) return;
 
-  // step 1: decline the importance.
+  // step 1: decay the importance.
   decay_importance();
 
-  // step 2: unload the clod tables.
+  // step 2: unload the cold tables.
   unload_cold_tables();
 
-  // step 3: perform load/unload queue.
-  prepare_load_unload_queues();
-
-  // step 4: execute load/unload oper.
+  // step 3: execute load/unload operations.
   run_load_unload_algorithm();
 }
 
@@ -962,10 +928,6 @@ void SelfLoadManager::unload_cold_tables() {
   }
 }
 
-void SelfLoadManager::prepare_load_unload_queues() {
-  // in run_load_unload_algorithm[do nothing]
-}
-
 void SelfLoadManager::run_load_unload_algorithm() {
   std::priority_queue<LoadCandidate> load_queue;
   std::priority_queue<UnloadCandidate> unload_queue;
@@ -997,8 +959,7 @@ void SelfLoadManager::run_load_unload_algorithm() {
 
   while (!load_queue.empty() && current_memory < memory_threshold) {
     // Check for shutdown signal before processing each table
-    auto state = SelfLoadManager::m_worker_state.load();
-    if (state == loader_state_t::LOADER_STATE_STOP || state == loader_state_t::LOADER_STATE_EXIT) return;
+    if (SelfLoadManager::m_worker_state.load() == loader_state_t::LOADER_STATE_EXIT) return;
 
     auto load_candidate = load_queue.top();
     load_queue.pop();
@@ -1103,11 +1064,8 @@ int SelfLoadManager::perform_self_load(const std::string &schema, const std::str
   // mode guard afterwards so that path does not recursively lock it.
   std::shared_lock mode_lock(Populate::propagation_mode_mutex);
 
-  Rapid_load_context context;
-  context.m_schema_name = schema;
-  context.m_table_name = table;
+  Rapid_load_context context{schema, table};
   context.m_thd = current_thd;
-  context.m_sch_tb_name = schema + "." + table;
   // Bulk load, not DML. Leaving m_oper at its PROPAGATION default sends every
   // row down Imcu::insert_row()'s DML branch: a WAL prepare/commit pair per row
   // for data being read out of InnoDB (which is already durable), and a journal
@@ -1119,14 +1077,12 @@ int SelfLoadManager::perform_self_load(const std::string &schema, const std::str
   // costs every scan the per-row visibility walk.
   context.m_extra_info.m_oper = ShannonBase::Rapid_context::extra_info_t::OperType::LOAD;
 
-  TABLE *source_table = Utils::Util::open_table_by_name(current_thd, schema, table, TL_READ_WITH_SHARED_LOCKS);
+  Utils::TableGuard table_guard(current_thd, schema, table, TL_READ_WITH_SHARED_LOCKS);
+  TABLE *source_table = table_guard.get();
   if (!source_table) return HA_ERR_GENERIC;
 
   Populate::Populator::LoadState propagation;
-  if (Populate::Populator::prepare_load(current_thd, source_table, propagation)) {
-    Utils::Util::close_table(current_thd, source_table);
-    return HA_ERR_GENERIC;
-  }
+  if (Populate::Populator::prepare_load(current_thd, source_table, propagation)) return HA_ERR_GENERIC;
   DBUG_SIGNAL_WAIT_FOR(current_thd, "rapid_pause_self_load_fenced", "rapid_self_load_fenced",
                        "rapid_self_load_continue");
   context.m_table = source_table;
@@ -1163,7 +1119,7 @@ int SelfLoadManager::perform_self_load(const std::string &schema, const std::str
       result = HA_ERR_GENERIC;
     }
   }
-  Utils::Util::close_table(current_thd, source_table);
+  table_guard.close();
 
   if (result == SHANNON_SUCCESS) {
     RpdMirror::Registry::set_state(schema, table, table_access_stats_t::LOADED, ShannonBase::load_type_t::SELF);
@@ -1209,9 +1165,7 @@ int SelfLoadManager::perform_self_unload(const std::string &schema, const std::s
     return SHANNON_SUCCESS;
   }
 
-  Rapid_load_context context;
-  context.m_schema_name = schema;
-  context.m_table_name = table;
+  Rapid_load_context context{schema, table};
   if (!table_info) {
     sql_print_warning("Self-Load: table_info not found for %s.%s, cannot unload", schema.c_str(), table.c_str());
     return HA_ERR_GENERIC;

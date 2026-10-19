@@ -193,39 +193,6 @@ class CopyInfoParser {
   ~CopyInfoParser() = default;
 
   /**
-   * @brief RAII wrapper for TABLE resource management
-   *
-   * Automatically closes table when going out of scope.
-   */
-  class TableGuard {
-   public:
-    explicit TableGuard(THD *thd, TABLE *table) noexcept : m_thd(thd), m_table(table) {}
-
-    ~TableGuard() noexcept {
-      if (m_table && m_thd) {
-        ShannonBase::Utils::Util::close_table(m_thd, m_table);
-        // Remove the table from table definition cache to force reopening on next access
-        // Reason: In multi-threaded environments, other threads may use cached table instances,
-        // but the field pointers (field->ptr) within these table instances might have been
-        // reset during previous operations, leading to incorrect field offset values.
-        // Forcing a reopen ensures that field information is properly reinitialized.
-        // tdc_remove_table(m_thd, TDC_RT_MARK_FOR_REOPEN, m_table->s->db.str, m_table->s->table_name.str, false);
-      }
-    }
-
-    // Disable copy
-    TableGuard(const TableGuard &) = delete;
-    TableGuard &operator=(const TableGuard &) = delete;
-
-    TableGuard(TableGuard &&other) = delete;
-    TableGuard &operator=(TableGuard &&other) = delete;
-
-   private:
-    THD *m_thd;
-    TABLE *m_table;
-  };
-
-  /**
    * @brief Parse and apply change records from a binary copy buffer.
    *
    * This function iterates through a binary stream containing encoded change
@@ -258,6 +225,7 @@ class CopyInfoParser {
    * @param[in]  new_start   Pointer to the start of the binary buffer containing change records[table->record[0]].
    * @param[in]  new_end_ptr Pointer to the end of the binary buffer [table->record[1]].
    *
+   * @param[out] permanent_failure True when a partial mutation could not be undone; do not retry.
    * @return returns parsed bytes; or return 0 on error.
    *
    * @note The function assumes `parse_record_header()` advances `start` safely
@@ -267,7 +235,7 @@ class CopyInfoParser {
    *              provided `Rapid_load_context` instance.
    */
   uint parse_copy_info(Rapid_load_context *context, table_id_t &table_id, change_record_buff_t::OperType oper_type,
-                       byte *start, byte *end_ptr, byte *new_start, byte *new_end_ptr);
+                       byte *start, byte *end_ptr, byte *new_start, byte *new_end_ptr, bool &permanent_failure);
 
   /**
    * Apply one buffered COPY_INFO change record.
@@ -321,7 +289,8 @@ class CopyInfoParser {
    *     worker and must never be interpreted as a MySQL row image.
    */
   int parse_and_apply_update(Rapid_load_context *context, table_id_t &table_id, const byte *old_start,
-                             const byte *old_end_ptr, const byte *new_start, const byte *new_end_ptr);
+                             const byte *old_end_ptr, const byte *new_start, const byte *new_end_ptr,
+                             bool &permanent_failure);
 
   /**
    * @brief Apply an INSERT operation to a RAPID table using COPY_INFO data.

@@ -31,6 +31,20 @@ eligibility or an inspection error leaves that table unloaded for explicit
 `ALTER TABLE db.table SECONDARY_LOAD`; other eligible tables recover independently.
 TP source-state comparison remains an extension interface for a future release.
 
+Startup follows HeatWave's asynchronous recovery boundary (WL#14936 and
+Bug#34960922). Rapid init establishes recovery ownership and starts the DD
+worker; that worker waits for MySQL `SERVER_OPERATING`, then discovers persisted
+`secondary_load` tables and dispatches recovery jobs. MySQL can serve primary
+engine requests while Rapid recovers. An AP table is published only after its
+restore/reload and propagation registration succeed. Self-load waits until DD
+discovery and all recovery jobs finish. Startup abort (`SERVER_SHUTTING_DOWN`)
+cancels the boot wait instead of allowing DD access or waiting for the timeout.
+
+There is no global SQL-layer startup barrier. Source writes can precede a
+recovery job's MDL acquisition, so row notifications must retain unregistered
+image revocation and recovery must recheck it after taking source MDL. Existing
+source locks may temporarily block writes to the table being recovered.
+
 `PERSISTED_SCN` is a Rapid frontier, not a MySQL GTID. Replay starts from the
 manifest's bound binlog file/offset and prefix digest, which also protects the
 GTID events in that prefix; there is no standalone persisted GTID-set field or

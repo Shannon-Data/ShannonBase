@@ -331,7 +331,7 @@ bool Simple_Predicate::evaluate_regexp(const std::string &str, const std::string
 
 void Simple_Predicate::evaluate(const std::vector<const uchar *> &col_data, size_t num_rows, bit_array_t &result) {
   if (col_data.empty()) return;
-  auto simd_eligible = [](PredicateOperator o) -> bool {
+  auto simd_eligible [[maybe_unused]] = [](PredicateOperator o) -> bool {
     switch (o) {
       case PredicateOperator::EQUAL:
       case PredicateOperator::NOT_EQUAL:
@@ -394,7 +394,7 @@ void Simple_Predicate::evaluate_int32_vectorized(const std::vector<const uchar *
   // ordering (the same trick used in evaluate_int64_vectorized), so the
   // existing signed compare instructions produce the correct unsigned result.
   const Field *cmp_field = field_meta.load(std::memory_order_acquire);
-  const bool col_unsigned = cmp_field != nullptr && cmp_field->is_unsigned();
+  const bool col_unsigned [[maybe_unused]] = cmp_field != nullptr && cmp_field->is_unsigned();
 #if defined(SHANNON_AVX_VECT_SUPPORTED)
   const int32_t sign_flip = col_unsigned ? static_cast<int32_t>(0x80000000U) : 0;
   const int32_t target = static_cast<int32_t>(value.as_int()) ^ sign_flip;
@@ -665,7 +665,7 @@ void Simple_Predicate::evaluate_int64_vectorized(const std::vector<const uchar *
   // trick: it is a monotonic bijection uint64_t -> int64_t), so the existing
   // signed compare instructions produce the correct unsigned result.
   const Field *cmp_field = field_meta.load(std::memory_order_acquire);
-  const bool col_unsigned = cmp_field != nullptr && cmp_field->is_unsigned();
+  const bool col_unsigned [[maybe_unused]] = cmp_field != nullptr && cmp_field->is_unsigned();
 #if defined(SHANNON_AVX_VECT_SUPPORTED)
   const int64_t sign_flip = col_unsigned ? static_cast<int64_t>(0x8000000000000000ULL) : 0;
   const int64_t target = value.as_int() ^ sign_flip;
@@ -980,7 +980,7 @@ void Simple_Predicate::evaluate_int64_vectorized(const std::vector<const uchar *
 
 void Simple_Predicate::evaluate_double_vectorized(const std::vector<const uchar *> &col_data, size_t num_rows,
                                                   bit_array_t &result) {
-  auto load_fp = [&](const uchar *p) -> double {
+  auto load_fp [[maybe_unused]] = [&](const uchar *p) -> double {
     if (!p) return std::numeric_limits<double>::quiet_NaN();
     if (column_type.load(std::memory_order_acquire) == MYSQL_TYPE_FLOAT) {
       float f;
@@ -1383,7 +1383,7 @@ void Simple_Predicate::evaluate_decimal_vectorized(const std::vector<const uchar
 
   const double target [[maybe_unused]] = value.as_double();
   const double target2 [[maybe_unused]] = value2.as_double();
-  const bool lo = low_order.load(std::memory_order_acquire);
+  const bool lo [[maybe_unused]] = low_order.load(std::memory_order_acquire);
 #if defined(SHANNON_AVX_VECT_SUPPORTED)
   {
     constexpr size_t simd_width = 4;  // AVX2 path: 4 x double

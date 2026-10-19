@@ -43,6 +43,8 @@ namespace Recovery {
  * Incremental implementations may share immutable objects between generations;
  * publish() success always represents a complete recoverable logical state.
  */
+// Providers report operation failures through false; recovery callers do not
+// translate exceptions into status values.
 class CheckpointStore {
  public:
   virtual ~CheckpointStore() = default;

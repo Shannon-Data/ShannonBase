@@ -1,0 +1,30 @@
+SET @saved_debug=@@GLOBAL.debug;
+CALL mtr.add_suppression('Rapid COPY_INFO cross-partition UPDATE rollback failed');
+CALL mtr.add_suppression('Rapid propagation quarantined table');
+SET use_secondary_engine=OFF;
+CREATE TABLE partition_rollback (id INT PRIMARY KEY, v INT, KEY(v))
+SECONDARY_ENGINE=rapid PARTITION BY RANGE(id)
+(PARTITION p0 VALUES LESS THAN (10), PARTITION p1 VALUES LESS THAN MAXVALUE);
+INSERT INTO partition_rollback VALUES (1,100),(2,200);
+ALTER TABLE partition_rollback SECONDARY_LOAD;
+CREATE TABLE partition_healthy (id INT PRIMARY KEY, v INT) SECONDARY_ENGINE=rapid;
+INSERT INTO partition_healthy VALUES (1,10);
+ALTER TABLE partition_healthy SECONDARY_LOAD;
+SET GLOBAL debug='+d,rapid_cross_partition_delete_failure,rapid_cross_partition_rollback_failure';
+UPDATE partition_rollback SET id=11 WHERE id=1;
+SET use_secondary_engine=FORCED;
+SELECT COUNT(*) FROM partition_rollback;
+Got one of the listed errors
+include/wait_for_pattern_in_file.inc [Rapid propagation quarantined table]
+SET GLOBAL debug=@saved_debug;
+SET use_secondary_engine=ON;
+SELECT id,v FROM partition_rollback ORDER BY id;
+id	v
+2	200
+11	100
+SET use_secondary_engine=OFF;
+UPDATE partition_healthy SET v=20 WHERE id=1;
+ALTER TABLE partition_rollback SECONDARY_UNLOAD;
+ALTER TABLE partition_rollback SECONDARY_LOAD;
+UPDATE partition_rollback SET id=1 WHERE id=11;
+DROP TABLE partition_rollback, partition_healthy;
