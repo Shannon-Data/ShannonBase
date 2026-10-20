@@ -761,7 +761,12 @@ TEST(RapidArtConcurrency, ReadersSeeAConsistentTreeWhileWritersChurn) {
           }
           scans.fetch_add(1, std::memory_order_relaxed);
         }
-        std::this_thread::yield();
+        // glibc's rwlock prefers readers, so yield() alone lets four threads
+        // re-acquire the shared lock forever. Pause now and then to hand it on.
+        if ((local() & 15) == 0)
+          std::this_thread::sleep_for(std::chrono::microseconds(50));
+        else
+          std::this_thread::yield();
       }
     });
   }
@@ -793,15 +798,20 @@ TEST(RapidArtConcurrency, ReadersSeeAConsistentTreeWhileWritersChurn) {
     });
   }
 
+  // A run that barely wrote proves nothing about the interleaving. The bar is
+  // low on purpose, but a fixed run length still misses it on slow hosts (92
+  // writes in 2s on the ARM runner), so wait for it -- the deadline keeps a
+  // genuine starvation bug failing the test.
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
   std::this_thread::sleep_for(std::chrono::seconds(2));
+  while (writes.load() <= 100 && std::chrono::steady_clock::now() < deadline)
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
   stop.store(true);
   for (auto &t : threads) t.join();
 
   EXPECT_EQ(0u, errors.load()) << "reads=" << reads.load() << " writes=" << writes.load();
   EXPECT_GT(reads.load(), 1000u);
   EXPECT_GT(scans.load(), 10u);
-  // A run that barely wrote proves nothing about the interleaving. The bar is
-  // low on purpose: a sanitizer build runs this several times slower.
   EXPECT_GT(writes.load(), 100u) << "writers were starved";
 
   // The untouched half must be intact.
