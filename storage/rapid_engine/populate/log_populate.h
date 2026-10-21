@@ -88,14 +88,6 @@ struct Populator::LoadState {
   BinlogPosition baseline;
 };
 
-#define log_rapid_pop_mutex_enter(log) mutex_enter(&((log).rapid_populator_mutex))
-
-#define log_rapid_pop_mutex_enter_nowait(log) mutex_enter_nowait(&((log).rapid_populator_mutex))
-
-#define log_rapid_pop_mutex_exit(log) mutex_exit(&((log).rapid_populator_mutex))
-
-#define log_rapid_pop_mutex_own(log) (mutex_own(&((log).rapid_populator_mutex)) || !Populator::log_rapid_is_active())
-
 /** a buffer to store redo log records, then parses these records. if we
 use std::map, that will occure corruption at rb tree reblance. if we impl
 copy cotr or assingment cotr, it's still corruption, due to access
@@ -210,11 +202,6 @@ class PopulatorImpl : public Populator::Impl {
   bool active_impl() override;
 
   /**
-   * To send notify to populator main thread to start do propagation.
-   */
-  void send_notify_impl() override;
-
-  /**
    * To launch log pop main thread.
    */
   void start_impl() override;
@@ -264,8 +251,8 @@ class PopulatorImpl : public Populator::Impl {
    * - The background thread (`rapid_log_coordinator`) periodically monitors
    *   the buffer size and launches worker threads to process and propagate
    *   these buffered changes.
-   * - Thread safety is guaranteed by `rapid_populator_mutex` when the buffer
-   *   is concurrently consumed and modified.
+   * - Thread safety is guaranteed by the per-table `enqueue_mutex` and the
+   *   shard lock when the buffer is concurrently consumed and modified.
    * - When remote propagation is implemented, care must be taken to preserve
    *   LSN ordering guarantees and ensure durability.
    */

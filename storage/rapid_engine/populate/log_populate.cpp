@@ -96,6 +96,16 @@ static uint64 shannon_rpd_loop_counter{0};
 // legitimately observe the same current log LSN.
 static std::atomic<uint64_t> shannon_change_id{1};
 
+// Created in start_impl() and destroyed in end_impl(). The guard is only taken
+// on rare signals, never by ordinary DML.
+static std::mutex coordinator_event_mutex;
+static os_event_t shannon_coordinator_event{nullptr};
+
+static inline void NotifyCoordinator() noexcept {
+  std::lock_guard<std::mutex> lk(coordinator_event_mutex);
+  if (shannon_coordinator_event) os_event_set(shannon_coordinator_event);
+}
+
 /**
  * Wake everything parked on this buffer's query barrier.
  *
@@ -152,7 +162,7 @@ static void RequestAllBufferedTablesFlush() {
     }
   }
 
-  if (any && shannon_propagation_thread_started.load(std::memory_order_acquire)) os_event_set(log_sys->rapid_events[0]);
+  if (any && shannon_propagation_thread_started.load(std::memory_order_acquire)) NotifyCoordinator();
 }
 
 struct table_worker_context {
@@ -690,9 +700,10 @@ void table_worker_context::dispatch_to_table_worker(const table_id_t &table_key,
     std::unique_lock lock(table_workers_mutex);
     if (buffer->detached.load() || buffer->broken.load()) {
       buffer->inflight_size.fetch_sub(bytes);
-      for (const auto &candidate : batch)
+      for (const auto &candidate : batch) {
         SourceTxnTracker::instance().on_change_applied(static_cast<Transaction::ID>(candidate.record.m_source_trx_id),
                                                        candidate.record.m_table_id);
+      }
       return;
     }
     const bool pooled = ResMgmt::limits_execution(ResMgmt::work_governor().mode());
@@ -703,9 +714,10 @@ void table_worker_context::dispatch_to_table_worker(const table_id_t &table_key,
       if (ctx->buffer != buffer || ctx->should_stop.load()) {
         MarkPropagationBufferBroken(buffer);
         buffer->inflight_size.fetch_sub(bytes);
-        for (const auto &candidate : batch)
+        for (const auto &candidate : batch) {
           SourceTxnTracker::instance().on_change_applied(static_cast<Transaction::ID>(candidate.record.m_source_trx_id),
                                                          candidate.record.m_table_id);
+        }
         return;
       }
     } else {
@@ -754,7 +766,7 @@ void table_worker_context::dispatch_to_table_worker(const table_id_t &table_key,
  * main entry of pop thread. it monitors shannon_pop_buff, a new mtr_log_rect_t
  * is coming, then it starts a new worker to dealing with this mtr_log_rec_t.
  */
-static void parse_log_func_main(log_t *log_ptr) {
+static void parse_log_func_main(log_t *log_ptr [[maybe_unused]]) {
   ResMgmt::WorkerRegistration resource_registration;
 #ifdef SHANNON_POSIX_PLATFORM
   pthread_setname_np(pthread_self(), "rapid_log_coordinator");
@@ -777,15 +789,13 @@ static void parse_log_func_main(log_t *log_ptr) {
     // sets pending_flush on buffer objects that are held by shared_ptr,
     // therefore the buffers remain valid even if the corresponding map entry
     // is erased between the two iteration passes.
-    auto stop_condition = [&](bool wait) {
+    auto stop_condition = [&](bool) {
       for (auto &shard : shannon_pop_shards) {
         std::shared_lock<std::shared_mutex> lk(shard.mutex);
         for (const auto &[key, tbuf] : shard.buffers) {
           if (tbuf->pending_flush.load(std::memory_order_acquire)) return true;
         }
       }
-
-      if (wait && os_event_is_set(log_sys->rapid_events[0])) return true;
 
       if (std::chrono::steady_clock::now() >= wait_deadline) {
         for (auto &shard : shannon_pop_shards) {
@@ -800,8 +810,7 @@ static void parse_log_func_main(log_t *log_ptr) {
       return false;
     };
 
-    os_event_wait_for(log_ptr->rapid_events[0], 0, std::chrono::milliseconds{POP_MAX_WAIT_TIMEOUT}, stop_condition);
-    os_event_reset(log_sys->rapid_events[0]);
+    os_event_wait_for(shannon_coordinator_event, 0, std::chrono::milliseconds{POP_MAX_WAIT_TIMEOUT}, stop_condition);
 
     if (!shannon_propagation_thread_started.load()) break;
 
@@ -866,7 +875,7 @@ static void parse_log_func_main(log_t *log_ptr) {
 
       if (!tbuf->change_candiates.empty()) {
         tbuf->pending_flush.store(true, std::memory_order_release);
-        os_event_set(log_ptr->rapid_events[0]);
+        NotifyCoordinator();
       }
       if (batch_vec.empty()) continue;
 
@@ -964,14 +973,7 @@ int Populator::write(FILE *file, uint64_t start_lsn, change_record_buff *changed
  */
 void Populator::print_info(FILE *file) { get_impl()->print_info_impl(file); }
 
-/**
- * To send notify to populator main thread to start do propagation.
- */
-void Populator::send_notify() { get_impl()->send_notify_impl(); }
-
 bool PopulatorImpl::active_impl() { return thread_is_active(srv_threads.m_change_pop_cordinator); }
-
-void PopulatorImpl::send_notify_impl() { os_event_set(log_sys->rapid_events[0]); }
 
 void PopulatorImpl::start_impl() {
   // Recovery dispatches one thread per table and each calls here once its
@@ -985,6 +987,10 @@ void PopulatorImpl::start_impl() {
   std::lock_guard<std::mutex> guard(start_mutex);
   if (!active_impl() && shannon_loaded_tables->size()) {
     SourceTxnTracker::instance().start();
+    {
+      std::lock_guard<std::mutex> lk(coordinator_event_mutex);
+      if (!shannon_coordinator_event) shannon_coordinator_event = os_event_create();
+    }
     srv_threads.m_change_pop_cordinator = os_thread_create(rapid_populate_thread_key, 0, parse_log_func_main, log_sys);
     ShannonBase::Populate::shannon_propagation_thread_started.store(true, std::memory_order_seq_cst);
     srv_threads.m_change_pop_cordinator.start();
@@ -1056,11 +1062,11 @@ void PopulatorImpl::unload_impl(const table_id_t &table_id) {
 
 void PopulatorImpl::end_impl() {
   // An exited coordinator does not imply that its table workers have exited.
-  // Always drain the worker registry; touch log_sys only for a live coordinator.
+  // Always drain the worker registry; signal the event only for a live coordinator.
   // Step 1: stop and join the coordinator main thread FIRST, before touching table_workers.
   if (active_impl()) {
     shannon_propagation_thread_started.store(false, std::memory_order_seq_cst);
-    os_event_set(log_sys->rapid_events[0]);
+    NotifyCoordinator();
     if (thread_is_active(srv_threads.m_change_pop_cordinator)) srv_threads.m_change_pop_cordinator.join();
   }
 
@@ -1115,6 +1121,15 @@ void PopulatorImpl::end_impl() {
     shard.buffers.clear();
   }
   SourceTxnTracker::instance().shutdown();
+
+  // Last step: no coordinator or producer can signal once the registry is empty.
+  {
+    std::lock_guard<std::mutex> lk(coordinator_event_mutex);
+    if (shannon_coordinator_event) {
+      os_event_destroy(shannon_coordinator_event);
+      shannon_coordinator_event = nullptr;
+    }
+  }
   ut_a(!active_impl());
 }
 
@@ -1241,7 +1256,7 @@ int PopulatorImpl::write_impl(FILE *file [[maybe_unused]], uint64_t start_lsn, c
     if (crossed_global_buffer) RequestAllBufferedTablesFlush();
     if (ring_high_water) {
       tbuf->pending_flush.store(true, std::memory_order_release);
-      send_notify_impl();
+      NotifyCoordinator();
     }
 
     // Do not wake merely because this is the first record for a table. Normal
@@ -1259,7 +1274,7 @@ int PopulatorImpl::write_impl(FILE *file [[maybe_unused]], uint64_t start_lsn, c
   // briefly -- puts backpressure back on the commit path, where it only shows
   // up under load.
   tbuf->pending_flush.store(true, std::memory_order_release);
-  os_event_set(log_sys->rapid_events[0]);
+  NotifyCoordinator();
 
   if (committed_binlog) {
     // The producer is the binlog reader, never the primary writer. Retain the
@@ -1366,7 +1381,7 @@ PropagationBarrier PopulatorImpl::request_table_barrier_impl(const table_id_t &t
   // target is already inflight, the worker itself will signal barrier_cv.
   if (tbuf->data_size.load(std::memory_order_acquire) > 0 && active_impl()) {
     tbuf->pending_flush.store(true, std::memory_order_release);
-    os_event_set(log_sys->rapid_events[0]);
+    NotifyCoordinator();
   }
   return barrier;
 }
