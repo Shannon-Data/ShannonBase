@@ -298,11 +298,6 @@ class Populator {
     return get_impl()->mark_table_required_impl(table_id);
   }
 
-  /**
-   * To send notify to populator main thread to start do propagation.
-   */
-  static void send_notify();
-
  public:
   // Internal implementation interface
   class Impl {
@@ -344,10 +339,6 @@ class Populator {
      * To test table is loaded or not.
      */
     virtual bool is_loaded_table_impl(std::string sch_name, std::string table_name) = 0;
-    /**
-     * To send notify to populator main thread to start do propagation.
-     */
-    virtual void send_notify_impl() = 0;
 
     virtual PropagationBarrier request_table_barrier_impl(const table_id_t &table_id) = 0;
     virtual TablePropagationWaitResult wait_table_applied_for_impl(const table_id_t &table_id,
