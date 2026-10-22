@@ -40,6 +40,7 @@
 #include "sql/current_thd.h"
 #include "sql/item_cmpfunc.h"  //Item_eq_base
 
+#include "storage/rapid_engine/executor/iterators/table_scan_iterator.h"
 #include "storage/rapid_engine/imcs/imcs.h"
 #include "storage/rapid_engine/monitor/rapid_monitor.h"
 #include "storage/rapid_engine/resource_management/io_scheduler.h"
@@ -61,7 +62,7 @@ bool AllocateJoinAux(Allocate allocate) {
   }
 }
 
-size_t RetainedBuildLimit(size_t requested, size_t grant) {
+inline size_t RetainedBuildLimit(size_t requested, size_t grant) {
   // A caller's old unlimited sentinel must not bypass the operator grant.
   return std::min(requested == 0 ? grant : requested, grant / 2);
 }
@@ -84,7 +85,6 @@ size_t GrowthCapacity(size_t current, size_t required) {
   }
   return capacity;
 }
-
 }  // namespace
 
 VectorizedHashJoinIterator::VectorizedHashJoinIterator(
@@ -159,6 +159,9 @@ void VectorizedHashJoinIterator::PublishBloomStats() {
                                                                              std::memory_order_relaxed);
   RapidMonitor::rapid_counters.query_hash_join_bloom_disabled_total.fetch_add(m_stats.bloom_adaptively_disabled,
                                                                               std::memory_order_relaxed);
+  RapidMonitor::rapid_counters.query_hash_join_bloom_scan_rejects_total.fetch_add(m_stats.bloom_scan_rejects,
+                                                                                  std::memory_order_relaxed);
+  m_stats.bloom_scan_rejects = 0;
   m_stats.bloom_bytes = m_stats.bloom_checks = m_stats.bloom_rejects = 0;
   m_stats.bloom_adaptively_disabled = false;
 }
@@ -183,6 +186,8 @@ bool VectorizedHashJoinIterator::Init() try {
   m_bloom.reset();
   m_bloom_active = false;
   m_bloom_sample_checks = m_bloom_sample_rejects = 0;
+  m_bloom_pushdown_disabled = false;
+  m_pushdown_checks = m_pushdown_rejects = 0;
   m_stats = PerformanceStats{};
   m_stats.build_memory_limit_bytes = m_max_memory_available;
 
@@ -1022,6 +1027,63 @@ void VectorizedHashJoinIterator::ReassessRuntimeFilter() {
   }
 }
 
+bool VectorizedHashJoinIterator::RejectRuntimeHash(uint64_t hash) {
+  if (!m_bloom_active) return false;
+
+  ++m_stats.bloom_checks;
+  const bool rejected = !m_bloom.may_contain(hash);
+  if (rejected) ++m_stats.bloom_rejects;
+  if (m_stats.bloom_checks == (4 * SHANNON_KB) || (m_stats.bloom_checks % (64 * SHANNON_KB)) == 0)
+    ReassessRuntimeFilter();
+  // Observe both placements so a later selective phase can restore pushdown.
+  ++m_pushdown_checks;
+  m_pushdown_rejects += rejected;
+  if (m_pushdown_checks == (4 * SHANNON_KB)) {
+    m_bloom_pushdown_disabled = !Utils::RuntimeBloomPolicy::scan_pushdown_after_sample(
+        !m_bloom_pushdown_disabled, m_pushdown_checks, m_pushdown_rejects);
+    m_pushdown_checks = m_pushdown_rejects = 0;
+  }
+  return rejected;
+}
+
+bool VectorizedHashJoinIterator::CanPushRuntimeFilter() const {
+  if (m_join_conditions.empty() || m_probe_input_tables.tables().size() != 1) return false;
+
+  TABLE *probe = m_probe_input_tables.tables()[0].table;
+  for (const auto &condition : m_join_conditions) {
+    const auto *eq = condition.join_condition();
+    if (!eq || eq->functype() != Item_func::EQ_FUNC || eq->argument_count() != 2) return false;
+
+    Item *left = eq->arguments()[0]->real_item();
+    Item *right = eq->arguments()[1]->real_item();
+    if (left->type() != Item::FIELD_ITEM || right->type() != Item::FIELD_ITEM) return false;
+
+    Field *a = down_cast<Item_field *>(left)->field;
+    Field *b = down_cast<Item_field *>(right)->field;
+    if (!a || !b || a->type() != b->type() || a->is_unsigned() || b->is_unsigned() ||
+        (a->table == probe) == (b->table == probe))
+      return false;
+    if (a->type() != MYSQL_TYPE_LONG && a->type() != MYSQL_TYPE_LONGLONG) return false;
+  }
+  return true;
+}
+
+int VectorizedHashJoinIterator::FilterScanRow(void *owner, const std::pmr::vector<ColumnChunk> &columns, size_t row) {
+  auto *join = static_cast<VectorizedHashJoinIterator *>(owner);
+  if ((row & 255) == 0 && join->CheckCancelled()) return -1;
+  if (!join->m_bloom_active || join->m_bloom_pushdown_disabled) return 1;
+  JoinKeyResult key = JoinKeyResult::ERROR;
+  // Only the canonical direct signed INT/BIGINT equality encoding is eligible.
+  // Expressions, conversions and NULL-safe equality retain the original path.
+  if (!join->TryBuildDirectJoinKey(columns, row, &key)) return 1;
+  if (key == JoinKeyResult::ERROR) return -1;
+  if (key == JoinKeyResult::NULL_KEY) return 1;
+  const uint64_t hash = XXH64(join->m_join_key_buffer.ptr(), join->m_join_key_buffer.length(), 0);
+  const bool rejected = join->RejectRuntimeHash(hash);
+  if (rejected) ++join->m_stats.bloom_scan_rejects;
+  return rejected ? 0 : 1;
+}
+
 size_t VectorizedHashJoinIterator::SpillPartitionIndex(uint64_t hash, size_t depth) {
   // Partition on the high bits and bucket on the low bits, so the two uses of
   // the same hash stay independent. Each recursion level consumes the next
@@ -1722,6 +1784,7 @@ bool VectorizedHashJoinIterator::ReadBuildBatch() {
 }
 
 int VectorizedHashJoinIterator::ReadProbeBatch() {
+  m_probe_batch_filtered = false;
   m_curr_probe_size = 0;
   ResetProbeCursor();
 
@@ -1733,7 +1796,14 @@ int VectorizedHashJoinIterator::ReadProbeBatch() {
   if (m_probe_batch_input != nullptr) {
     for (ColumnChunk &chunk : m_probe_batch_columns) chunk.clear();
     size_t rows = 0;
-    int result = m_probe_batch_input->ReadBatch(m_probe_batch_columns, m_batch_size, rows);
+    auto *scan = dynamic_cast<VectorizedTableScanIterator *>(m_probe_batch_input);
+    bool pushdown = m_bloom_active && !m_bloom_pushdown_disabled && !m_spilled && scan != nullptr &&
+                    scan->SupportsRuntimeFilter() && CanPushRuntimeFilter();
+    DBUG_EXECUTE_IF("rapid_bloom_pushdown_disabled", { pushdown = false; });
+    const int result = pushdown
+                           ? scan->ReadFilteredBatch(m_probe_batch_columns, m_batch_size, rows, this, FilterScanRow)
+                           : m_probe_batch_input->ReadBatch(m_probe_batch_columns, m_batch_size, rows);
+    m_probe_batch_filtered = pushdown;
     if (result != 0 && result != HA_ERR_END_OF_FILE) return result;
     if (rows == 0) return -1;
     if (CopyBatchColumns(m_probe_batch_columns, rows, m_probe_columns)) return 1;
@@ -1797,14 +1867,7 @@ int VectorizedHashJoinIterator::NextProbeOutput(OutputRow *out) {
       if (key_result == JoinKeyResult::OK) {
         m_probe_cursor_hash = XXH64(m_join_key_buffer.ptr(), m_join_key_buffer.length(), 0);
         bool rejected = false;
-        if (m_bloom_active) {
-          ++m_stats.bloom_checks;
-          rejected = !m_bloom.may_contain(m_probe_cursor_hash);
-          if (rejected) ++m_stats.bloom_rejects;
-          // One-way disable prevents oscillation. Revisit effective resources
-          // after the initial sample and periodically, not on every row.
-          if (m_stats.bloom_checks == 4096 || (m_stats.bloom_checks % 65536) == 0) ReassessRuntimeFilter();
-        }
+        if (!m_probe_batch_filtered) rejected = RejectRuntimeHash(m_probe_cursor_hash);
         if (!rejected) {
           const size_t bucket_idx = m_probe_cursor_hash & (m_hash_table_size - 1);
           m_probe_cursor_slot = m_hash_buckets[bucket_idx];

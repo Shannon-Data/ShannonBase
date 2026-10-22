@@ -575,6 +575,45 @@ int VectorizedTableScanIterator::ReadBatch(std::pmr::vector<ColumnChunk> &col_ch
   return 0;
 }
 
+// Compact in scan order, before the parent copies columns into probe storage.
+// This does not reduce storage reads; it avoids downstream copies/probes.
+int VectorizedTableScanIterator::ReadFilteredBatch(std::pmr::vector<ColumnChunk> &chunks, size_t capacity,
+                                                   size_t &rows_read, void *owner, RuntimeFilter filter) {
+  if (!SupportsRuntimeFilter() || filter == nullptr || capacity == 0) return HA_ERR_GENERIC;
+  for (;;) {
+    const int result = ReadBatch(chunks, capacity, rows_read);
+    if (result != 0 && result != HA_ERR_END_OF_FILE) return result;
+    const size_t input_rows = rows_read;
+    size_t kept = 0;
+    for (size_t row = 0; row < input_rows; ++row) {
+      const int keep = filter(owner, chunks, row);
+      if (keep < 0) return HA_ERR_GENERIC;
+      if (!keep) continue;
+      if (kept != row) {
+        for (auto &chunk : chunks) {
+          if (!chunk.valid()) continue;
+          const bool is_null = chunk.nullable_fast(row);
+          auto *mask = chunk.mutable_null_mask_data();
+          const uint8_t bit = uint8_t{1} << (kept & 7);
+          if (is_null)
+            mask[kept >> 3] |= bit;
+          else {
+            mask[kept >> 3] &= ~bit;
+            std::memmove(chunk.mutable_data(kept), chunk.data_fast(row), chunk.width());
+          }
+        }
+      }
+      ++kept;
+    }
+    for (auto &chunk : chunks)
+      if (chunk.valid()) chunk.resize(kept);
+    m_operator_stats.rows_out -= input_rows - kept;
+    rows_read = kept;
+    if (kept != 0 || result == HA_ERR_END_OF_FILE || input_rows == 0) return result;
+    // A fully rejected batch is not EOF. Continue to the next physical batch.
+  }
+}
+
 bool VectorizedTableScanIterator::PushbackBatchTail(const std::pmr::vector<ColumnChunk> &chunks, size_t from_row,
                                                     size_t total_rows) {
   assert(from_row <= total_rows);

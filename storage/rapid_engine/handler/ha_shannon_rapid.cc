@@ -1704,6 +1704,7 @@ static const char *rapid_propagation_mode_names[] = {"DIRECT_NOTIFICATION", "RED
   X(query_hash_join_bloom_bytes_total, query_hash_join_bloom_bytes_total)                                         \
   X(query_hash_join_bloom_checks_total, query_hash_join_bloom_checks_total)                                       \
   X(query_hash_join_bloom_rejects_total, query_hash_join_bloom_rejects_total)                                     \
+  X(query_hash_join_bloom_scan_rejects_total, query_hash_join_bloom_scan_rejects_total)                           \
   X(query_hash_join_bloom_disabled_total, query_hash_join_bloom_disabled_total)                                   \
   X(query_vectorized_hash_join_spill_rows_total, query_vectorized_hash_join_spill_rows_total)                     \
   X(query_vectorized_aggregate_spill_rows_total, query_vectorized_aggregate_spill_rows_total)                     \
