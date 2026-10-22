@@ -167,6 +167,8 @@ void collect_rapid_monitor_metrics(Metrics &metrics) {
       rapid_counters.query_hash_join_bloom_checks_total.load(std::memory_order_relaxed);
   metrics.query_hash_join_bloom_rejects_total =
       rapid_counters.query_hash_join_bloom_rejects_total.load(std::memory_order_relaxed);
+  metrics.query_hash_join_bloom_scan_rejects_total =
+      rapid_counters.query_hash_join_bloom_scan_rejects_total.load(std::memory_order_relaxed);
   metrics.query_hash_join_bloom_disabled_total =
       rapid_counters.query_hash_join_bloom_disabled_total.load(std::memory_order_relaxed);
   metrics.query_vectorized_hash_join_spill_rows_total =

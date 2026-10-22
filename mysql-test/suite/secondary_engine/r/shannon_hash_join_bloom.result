@@ -19,6 +19,8 @@ SET SESSION debug='-d,rapid_bloom_disabled';
 SELECT COUNT(*),SUM(p.v) FROM p JOIN b ON p.k=b.k;
 COUNT(*)	SUM(p.v)
 236	15086
+SET SESSION debug='+d,rapid_bloom_pushdown_disabled';
+SET SESSION debug='-d,rapid_bloom_pushdown_disabled';
 SET SESSION debug='+d,rapid_bloom_disabled';
 SELECT COUNT(*),SUM(p.v) FROM p JOIN b ON p.k=b.k;
 COUNT(*)	SUM(p.v)
@@ -56,5 +58,18 @@ EXECUTE q USING @n;
 COUNT(*)	SUM(p.v)
 119	3836
 DEALLOCATE PREPARE q;
+SET use_secondary_engine=OFF;
+ALTER TABLE b SECONDARY_UNLOAD;
+UPDATE b SET k=k+8000;
+ALTER TABLE b SECONDARY_LOAD;
+ALTER TABLE p SECONDARY_UNLOAD;
+UPDATE p SET k=-id WHERE k IS NULL;
+ALTER TABLE p SECONDARY_LOAD;
+SET use_secondary_engine=FORCED;
+SET use_secondary_engine=OFF;
+ALTER TABLE p SECONDARY_UNLOAD;
+UPDATE p SET k=8000+id%160;
+ALTER TABLE p SECONDARY_LOAD;
+SET use_secondary_engine=FORCED;
 SET use_secondary_engine=OFF;
 DROP DATABASE sh_bloom;

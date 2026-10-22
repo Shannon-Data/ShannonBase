@@ -129,6 +129,7 @@ struct Metrics {
   uint64_t query_hash_join_bloom_bytes_total{0};
   uint64_t query_hash_join_bloom_checks_total{0};
   uint64_t query_hash_join_bloom_rejects_total{0};
+  uint64_t query_hash_join_bloom_scan_rejects_total{0};
   uint64_t query_hash_join_bloom_disabled_total{0};
   uint64_t query_vectorized_aggregate_spill_rows_total{0};
   uint64_t query_vectorized_aggregate_batch_rows_total{0};
@@ -191,6 +192,7 @@ struct RapidCounters {
   std::atomic<uint64_t> query_hash_join_bloom_bytes_total{0};
   std::atomic<uint64_t> query_hash_join_bloom_checks_total{0};
   std::atomic<uint64_t> query_hash_join_bloom_rejects_total{0};
+  std::atomic<uint64_t> query_hash_join_bloom_scan_rejects_total{0};
   std::atomic<uint64_t> query_hash_join_bloom_disabled_total{0};
   std::atomic<uint64_t> query_vectorized_aggregate_spill_rows_total{0};
   std::atomic<uint64_t> query_vectorized_aggregate_batch_rows_total{0};

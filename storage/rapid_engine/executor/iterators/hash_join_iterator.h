@@ -79,6 +79,7 @@ class VectorizedHashJoinIterator final : public RowIterator, public BatchReadabl
     size_t bloom_bytes{0};
     size_t bloom_checks{0};
     size_t bloom_rejects{0};
+    size_t bloom_scan_rejects{0};
     bool bloom_adaptively_disabled{false};
     size_t build_rows{0};
     size_t probe_rows{0};
@@ -139,6 +140,9 @@ class VectorizedHashJoinIterator final : public RowIterator, public BatchReadabl
   void PublishBloomStats();
   Utils::RuntimeBloomPolicy RuntimeFilterPolicy() const;
   void ReassessRuntimeFilter();
+  bool RejectRuntimeHash(uint64_t hash);
+  bool CanPushRuntimeFilter() const;
+  static int FilterScanRow(void *owner, const std::pmr::vector<ColumnChunk> &columns, size_t row);
 
   // Emit at most one joined row and retain the exact match position so a high
   // fanout probe row never needs a materialized output vector.
@@ -361,6 +365,9 @@ class VectorizedHashJoinIterator final : public RowIterator, public BatchReadabl
   std::pmr::vector<uchar> m_hash_key_arena{&m_build_memory};
   Utils::RuntimeBloomFilter m_bloom{&m_build_memory};
   bool m_bloom_active{false};
+  bool m_probe_batch_filtered{false};
+  bool m_bloom_pushdown_disabled{false};
+  size_t m_pushdown_checks{0}, m_pushdown_rejects{0};
   size_t m_bloom_sample_checks{0}, m_bloom_sample_rejects{0};
   size_t m_hash_table_size{0};  // Number of buckets, power-of-two.
 

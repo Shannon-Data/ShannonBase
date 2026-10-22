@@ -22,6 +22,23 @@ SELECT COUNT(*),SUM(p.v) FROM p JOIN b ON p.k=b.k;
 if ($after <= $before) {
   --die Runtime Bloom filter did not reject any probe rows
 }
+# Scan pushdown must execute, preserve results, and retain a join-local baseline.
+--let $scan_counter = rapid_query_hash_join_bloom_scan_rejects_total
+--let $scan_before = query_get_value(SHOW GLOBAL STATUS LIKE '$scan_counter', Value, 1)
+--let $assert_query = SELECT COUNT(*),SUM(p.v) FROM p JOIN b ON p.k=b.k
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $scan_after = query_get_value(SHOW GLOBAL STATUS LIKE '$scan_counter', Value, 1)
+if ($scan_after <= $scan_before) {
+  --die Runtime filter was not applied at the scan output
+}
+SET SESSION debug='+d,rapid_bloom_pushdown_disabled';
+--let $assert_query = SELECT COUNT(*),SUM(p.v) FROM p JOIN b ON p.k=b.k
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $scan_before = query_get_value(SHOW GLOBAL STATUS LIKE '$scan_counter', Value, 1)
+if ($scan_after != $scan_before) {
+  --die Disabled scan pushdown rejected rows
+}
+SET SESSION debug='-d,rapid_bloom_pushdown_disabled';
 --let $assert_query = SELECT p.k,COUNT(*),SUM(p.v) FROM p JOIN b ON p.k=b.k GROUP BY p.k ORDER BY p.k
 --let $assert_ordered = 1
 --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
@@ -83,5 +100,40 @@ EXECUTE q USING @n;
 SET @n=128;
 EXECUTE q USING @n;
 DEALLOCATE PREPARE q;
+# Surviving rows occur only after several fully rejected physical batches.
+SET use_secondary_engine=OFF;
+ALTER TABLE b SECONDARY_UNLOAD;
+UPDATE b SET k=k+8000;
+ALTER TABLE b SECONDARY_LOAD;
+ALTER TABLE p SECONDARY_UNLOAD;
+UPDATE p SET k=-id WHERE k IS NULL;
+ALTER TABLE p SECONDARY_LOAD;
+SET use_secondary_engine=FORCED;
+--let $assert_query = SELECT COUNT(*),SUM(p.v) FROM p JOIN b ON p.k=b.k
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+# At about 20% rejection, stop scan compaction but keep useful local filtering.
+SET use_secondary_engine=OFF;
+ALTER TABLE p SECONDARY_UNLOAD;
+UPDATE p SET k=8000+id%160;
+ALTER TABLE p SECONDARY_LOAD;
+SET use_secondary_engine=FORCED;
+--let $local_counter = rapid_query_hash_join_bloom_rejects_total
+--let $scan_before = query_get_value(SHOW GLOBAL STATUS LIKE '$scan_counter', Value, 1)
+--let $local_before = query_get_value(SHOW GLOBAL STATUS LIKE '$local_counter', Value, 1)
+--let $assert_query = SELECT COUNT(*),SUM(p.v) FROM p JOIN b ON p.k=b.k
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $scan_after = query_get_value(SHOW GLOBAL STATUS LIKE '$scan_counter', Value, 1)
+--let $local_after = query_get_value(SHOW GLOBAL STATUS LIKE '$local_counter', Value, 1)
+--let $scan_delta = `SELECT $scan_after - $scan_before`
+--let $local_delta = `SELECT $local_after - $local_before`
+if ($scan_delta == 0) {
+  --die Scan pushdown did not sample the mixed workload
+}
+if ($local_delta <= $scan_delta) {
+  --die Low-benefit scan pushdown did not fall back to local filtering
+}
+# A nonmerged LIMIT input is a semantic barrier to scan pushdown.
+--let $assert_query = SELECT COUNT(*) FROM (SELECT k FROM p LIMIT 100) d JOIN b ON d.k=b.k
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SET use_secondary_engine=OFF;
 DROP DATABASE sh_bloom;

@@ -92,3 +92,27 @@ TEST(RapidBloomPolicy, EffectiveResourcesAndQueuedWorkReduceAllowance) {
   const auto unknown = RuntimeBloomPolicy::choose(64*mib, 16*mib, 0, 0, 0, 1, false);
   EXPECT_EQ(0U, unknown.max_bytes);
 }
+
+TEST(RapidBloomPolicy, ScanPlacementRecoversWithHysteresis) {
+  using ShannonBase::Utils::RuntimeBloomPolicy;
+  const auto choose = RuntimeBloomPolicy::scan_pushdown_after_sample;
+  EXPECT_TRUE(choose(true, 0, 0));
+  EXPECT_FALSE(choose(false, 0, 0));
+  EXPECT_FALSE(choose(true, 4096, 2047));
+  EXPECT_TRUE(choose(true, 4096, 2048));
+  EXPECT_FALSE(choose(false, 4096, 3071));
+  EXPECT_TRUE(choose(false, 4096, 3072));
+
+  bool active = true;
+  active = choose(active, 4096, 819);   // Initial 20% rejection: local only.
+  EXPECT_FALSE(active);
+  active = choose(active, 4096, 2457);  // 60% must not oscillate placement.
+  EXPECT_FALSE(active);
+  active = choose(active, 4096, 3276);  // Later 80% rejection: scan again.
+  EXPECT_TRUE(active);
+  active = choose(active, 4096, 2457);
+  EXPECT_TRUE(active);
+  active = choose(active, 4096, 819);
+  EXPECT_FALSE(active);
+  EXPECT_TRUE(choose(false, SIZE_MAX, SIZE_MAX));
+}

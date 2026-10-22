@@ -40,6 +40,16 @@ namespace ShannonBase::Utils {
 struct RuntimeBloomPolicy {
   size_t max_bytes{0};
   unsigned min_reject_percent{12};
+
+  // Placement hysteresis: compaction needs stronger filtering than probing.
+  // Resume after a selective window instead of trusting the initial sample
+  // for the entire query. Division avoids overflow for arbitrary counts.
+  static bool scan_pushdown_after_sample(bool active, size_t checks, size_t rejects) noexcept {
+    if (checks == 0) return active;
+    const size_t required = active ? checks / 2 + checks % 2 : checks - checks / 4;
+    return rejects >= required;
+  }
+
   static RuntimeBloomPolicy choose(size_t operator_limit, size_t operator_used, size_t pool_capacity, size_t pool_used,
                                    size_t pool_reserved, size_t active, bool waiting) noexcept {
     if (operator_used >= operator_limit || pool_used >= pool_capacity) return {};
