@@ -1,0 +1,60 @@
+CREATE DATABASE sh_bloom;
+USE sh_bloom;
+SET SESSION use_secondary_engine=OFF;
+CREATE TABLE b(id INT PRIMARY KEY, k INT, k2 INT, v INT) SECONDARY_ENGINE=rapid;
+CREATE TABLE p(id INT PRIMARY KEY, k INT, k2 INT, v INT) SECONDARY_ENGINE=rapid;
+INSERT INTO b WITH RECURSIVE n AS (SELECT 1 AS i UNION ALL SELECT i+1 FROM n WHERE i<256)
+SELECT i, IF(i=256,NULL,i DIV 2), i%3, i FROM n;
+SET SESSION cte_max_recursion_depth=10000;
+INSERT INTO p WITH RECURSIVE n AS (SELECT 1 AS i UNION ALL SELECT i+1 FROM n WHERE i<8192)
+SELECT i, IF(i%13=0,NULL,i), i%3, i FROM n;
+ALTER TABLE b SECONDARY_LOAD;
+ALTER TABLE p SECONDARY_LOAD;
+SET SESSION optimizer_switch='hypergraph_optimizer=on';
+Warnings:
+Warning	1287	The hypergraph optimizer is highly experimental and is meant for testing only. Do not enable it unless you are a MySQL developer.
+SET SESSION secondary_engine_cost_threshold=0;
+SET SESSION use_secondary_engine=FORCED;
+SET SESSION debug='-d,rapid_bloom_disabled';
+SELECT COUNT(*),SUM(p.v) FROM p JOIN b ON p.k=b.k;
+COUNT(*)	SUM(p.v)
+236	15086
+SET SESSION debug='+d,rapid_bloom_disabled';
+SELECT COUNT(*),SUM(p.v) FROM p JOIN b ON p.k=b.k;
+COUNT(*)	SUM(p.v)
+236	15086
+SET SESSION debug='-d,rapid_bloom_disabled';
+SET SESSION debug='+d,rapid_bloom_allocation_failure';
+SELECT COUNT(*),SUM(p.v) FROM p JOIN b ON p.k=b.k;
+COUNT(*)	SUM(p.v)
+236	15086
+SET SESSION debug='-d,rapid_bloom_allocation_failure';
+SET SESSION debug='+d,rapid_bloom_resource_pressure';
+SELECT COUNT(*),SUM(p.v) FROM p JOIN b ON p.k=b.k;
+COUNT(*)	SUM(p.v)
+236	15086
+SET SESSION debug='-d,rapid_bloom_resource_pressure';
+SET SESSION debug='+d,rapid_bloom_probe_pressure';
+SELECT COUNT(*),SUM(p.v) FROM p JOIN b ON p.k=b.k;
+COUNT(*)	SUM(p.v)
+236	15086
+SET SESSION debug='-d,rapid_bloom_probe_pressure';
+SELECT COUNT(*),SUM(p.v) FROM p JOIN b ON p.k%128=b.k;
+COUNT(*)	SUM(p.v)
+15064	61699566
+PREPARE q FROM 'SELECT COUNT(*),SUM(p.v) FROM p JOIN b ON p.k=b.k WHERE b.id<=?';
+SET @n=256;
+EXECUTE q USING @n;
+COUNT(*)	SUM(p.v)
+236	15086
+SET @n=0;
+EXECUTE q USING @n;
+COUNT(*)	SUM(p.v)
+0	NULL
+SET @n=128;
+EXECUTE q USING @n;
+COUNT(*)	SUM(p.v)
+119	3836
+DEALLOCATE PREPARE q;
+SET use_secondary_engine=OFF;
+DROP DATABASE sh_bloom;

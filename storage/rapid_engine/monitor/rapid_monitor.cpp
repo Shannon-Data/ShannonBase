@@ -159,6 +159,16 @@ void collect_rapid_monitor_metrics(Metrics &metrics) {
       rapid_counters.query_vectorized_window_spill_rows_total.load(std::memory_order_relaxed);
   metrics.query_vectorized_window_spill_bytes_total =
       rapid_counters.query_vectorized_window_spill_bytes_total.load(std::memory_order_relaxed);
+  metrics.query_hash_join_bloom_builds_total =
+      rapid_counters.query_hash_join_bloom_builds_total.load(std::memory_order_relaxed);
+  metrics.query_hash_join_bloom_bytes_total =
+      rapid_counters.query_hash_join_bloom_bytes_total.load(std::memory_order_relaxed);
+  metrics.query_hash_join_bloom_checks_total =
+      rapid_counters.query_hash_join_bloom_checks_total.load(std::memory_order_relaxed);
+  metrics.query_hash_join_bloom_rejects_total =
+      rapid_counters.query_hash_join_bloom_rejects_total.load(std::memory_order_relaxed);
+  metrics.query_hash_join_bloom_disabled_total =
+      rapid_counters.query_hash_join_bloom_disabled_total.load(std::memory_order_relaxed);
   metrics.query_vectorized_hash_join_spill_rows_total =
       rapid_counters.query_vectorized_hash_join_spill_rows_total.load(std::memory_order_relaxed);
   metrics.query_vectorized_aggregate_spill_rows_total =

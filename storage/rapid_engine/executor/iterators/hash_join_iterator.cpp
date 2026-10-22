@@ -94,7 +94,7 @@ VectorizedHashJoinIterator::VectorizedHashJoinIterator(
     const Prealloced_array<TABLE *, 4> &probe_input_tables, bool store_rowids, table_map tables_to_get_rowid_for,
     size_t max_memory_available, const std::vector<HashJoinCondition> &join_conditions, bool allow_spill_to_disk,
     JoinType join_type, const Mem_root_array<Item *> &extra_conditions, HashJoinInput first_input,
-    bool probe_input_batch_mode, uint64_t *hash_table_generation)
+    bool probe_input_batch_mode, uint64_t *hash_table_generation, double estimated_probe_rows)
     : RowIterator(thd),
       // Recursive 16-way partitions need workspace independently of the build
       // buffer. This is a request; global/query/operator caps still take precedence.
@@ -123,7 +123,8 @@ VectorizedHashJoinIterator::VectorizedHashJoinIterator(
       m_extra_condition(nullptr),
       m_hash_table_gen(hash_table_generation),
       m_last_hash_table_gen(0),
-      m_estimated_build_rows(estimated_build_rows) {
+      m_estimated_build_rows(estimated_build_rows),
+      m_estimated_probe_rows(estimated_probe_rows) {
   if (AllocateJoinAux([&] {
         m_join_conditions.reserve(join_conditions.size());
         for (const auto &condition : join_conditions) m_join_conditions.emplace_back(condition);
@@ -146,7 +147,25 @@ VectorizedHashJoinIterator::VectorizedHashJoinIterator(
   }
 }
 
+VectorizedHashJoinIterator::~VectorizedHashJoinIterator() { PublishBloomStats(); }
+
+void VectorizedHashJoinIterator::PublishBloomStats() {
+  RapidMonitor::rapid_counters.query_hash_join_bloom_builds_total.fetch_add(m_stats.bloom_bytes != 0,
+                                                                            std::memory_order_relaxed);
+  RapidMonitor::rapid_counters.query_hash_join_bloom_bytes_total.fetch_add(m_stats.bloom_bytes,
+                                                                           std::memory_order_relaxed);
+  RapidMonitor::rapid_counters.query_hash_join_bloom_checks_total.fetch_add(m_stats.bloom_checks,
+                                                                            std::memory_order_relaxed);
+  RapidMonitor::rapid_counters.query_hash_join_bloom_rejects_total.fetch_add(m_stats.bloom_rejects,
+                                                                             std::memory_order_relaxed);
+  RapidMonitor::rapid_counters.query_hash_join_bloom_disabled_total.fetch_add(m_stats.bloom_adaptively_disabled,
+                                                                              std::memory_order_relaxed);
+  m_stats.bloom_bytes = m_stats.bloom_checks = m_stats.bloom_rejects = 0;
+  m_stats.bloom_adaptively_disabled = false;
+}
+
 bool VectorizedHashJoinIterator::Init() try {
+  PublishBloomStats();
   if (m_aux_initialization_failed) return true;
   if (!m_memory_reservation) {
     my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid query memory reservation exhausted");
@@ -162,6 +181,9 @@ bool VectorizedHashJoinIterator::Init() try {
   m_lookahead_start = 0;
   decltype(m_lookahead_chunks)(&m_aux_memory).swap(m_lookahead_chunks);
   decltype(m_chunk_map)(&m_aux_memory).swap(m_chunk_map);
+  m_bloom.reset();
+  m_bloom_active = false;
+  m_bloom_sample_checks = m_bloom_sample_rejects = 0;
   m_stats = PerformanceStats{};
   m_stats.build_memory_limit_bytes = m_max_memory_available;
 
@@ -205,6 +227,7 @@ bool VectorizedHashJoinIterator::Init() try {
   if (m_hash_table_gen != nullptr && *m_hash_table_gen == m_last_hash_table_gen && !m_build_columns.empty()) {
     UpdateBuildMemoryPeak();
     if (BuildMemoryWouldExceed(0)) return ReportBuildMemoryLimit();
+    BuildRuntimeFilter();
     m_state = State::PROBING_HASH_TABLE;
     m_curr_probe_size = 0;
     ResetProbeCursor();
@@ -953,7 +976,51 @@ bool VectorizedHashJoinIterator::BuildHashTable() {
 
   // Tails are construction-only state. Free them before probing.
   decltype(m_hash_bucket_tails)(&m_build_memory).swap(m_hash_bucket_tails);
+  BuildRuntimeFilter();
   return false;
+}
+
+void VectorizedHashJoinIterator::BuildRuntimeFilter() {
+  m_bloom.reset();
+  m_bloom_active = false;
+  // A partition-local filter must never reject rows for an unseen partition.
+  if (m_spilled || m_join_conditions.empty() || (m_join_type != JoinType::INNER && m_join_type != JoinType::SEMI) ||
+      m_hash_slots.size() < 128 || !(m_estimated_probe_rows >= 2.0 * static_cast<double>(m_hash_slots.size())))
+    return;
+  DBUG_EXECUTE_IF("rapid_bloom_disabled", { return; });
+  DBUG_EXECUTE_IF("rapid_bloom_allocation_failure", { return; });
+  const auto policy = RuntimeFilterPolicy();
+  if (!m_bloom.prepare(m_hash_slots.size(), policy.max_bytes)) return;
+  for (const auto &slot : m_hash_slots) m_bloom.insert(slot.hash);
+  m_bloom_active = true;  // publish only after all build keys are included
+  m_stats.bloom_bytes = m_bloom.bytes();
+  UpdateBuildMemoryPeak();
+}
+
+Utils::RuntimeBloomPolicy VectorizedHashJoinIterator::RuntimeFilterPolicy() const {
+  const auto pool = ResMgmt::system_pool_stats();
+  const auto ap = ResMgmt::work_governor().snapshot(ResMgmt::WorkClass::AP);
+  const auto sync = ResMgmt::work_governor().snapshot(ResMgmt::WorkClass::SYNC);
+  const auto maint = ResMgmt::work_governor().snapshot(ResMgmt::WorkClass::MAINT);
+  auto policy = Utils::RuntimeBloomPolicy::choose(
+      m_build_memory.limit(), m_build_memory.used() - m_bloom.bytes(), pool.capacity, pool.used, pool.reserved,
+      ap.active + sync.active + maint.active, ap.waiting != 0 || sync.waiting != 0 || maint.waiting != 0);
+  DBUG_EXECUTE_IF("rapid_bloom_resource_pressure", { policy.max_bytes = 0; });
+  return policy;
+}
+
+void VectorizedHashJoinIterator::ReassessRuntimeFilter() {
+  auto policy = RuntimeFilterPolicy();
+  DBUG_EXECUTE_IF("rapid_bloom_probe_pressure", { policy.max_bytes = 0; });
+  const size_t checks = m_stats.bloom_checks - m_bloom_sample_checks;
+  const size_t rejects = m_stats.bloom_rejects - m_bloom_sample_rejects;
+  m_bloom_sample_checks = m_stats.bloom_checks;
+  m_bloom_sample_rejects = m_stats.bloom_rejects;
+  if (m_bloom.bytes() > policy.max_bytes || rejects * 100 < checks * policy.min_reject_percent) {
+    m_bloom_active = false;
+    m_bloom.reset();  // Return optional memory when workload pressure rises.
+    m_stats.bloom_adaptively_disabled = true;
+  }
 }
 
 size_t VectorizedHashJoinIterator::SpillPartitionIndex(uint64_t hash, size_t depth) {
@@ -1730,8 +1797,19 @@ int VectorizedHashJoinIterator::NextProbeOutput(OutputRow *out) {
       m_probe_cursor_slot = kInvalidHashSlot;
       if (key_result == JoinKeyResult::OK) {
         m_probe_cursor_hash = XXH64(m_join_key_buffer.ptr(), m_join_key_buffer.length(), 0);
-        const size_t bucket_idx = m_probe_cursor_hash & (m_hash_table_size - 1);
-        m_probe_cursor_slot = m_hash_buckets[bucket_idx];
+        bool rejected = false;
+        if (m_bloom_active) {
+          ++m_stats.bloom_checks;
+          rejected = !m_bloom.may_contain(m_probe_cursor_hash);
+          if (rejected) ++m_stats.bloom_rejects;
+          // One-way disable prevents oscillation. Revisit effective resources
+          // after the initial sample and periodically, not on every row.
+          if (m_stats.bloom_checks == 4096 || (m_stats.bloom_checks % 65536) == 0) ReassessRuntimeFilter();
+        }
+        if (!rejected) {
+          const size_t bucket_idx = m_probe_cursor_hash & (m_hash_table_size - 1);
+          m_probe_cursor_slot = m_hash_buckets[bucket_idx];
+        }
       }
     }
 
