@@ -279,6 +279,8 @@ SET(SERVER_TESTS
   rapid_art
   rapid_ringbuffer
   rapid_resources
+  rapid_columnar_join_work
+  rapid_bloom_filter
   rapid_ml
   rapid_storage_index
   autopilot_helpers
@@ -359,6 +361,8 @@ SET(RAPID_TESTS
   rapid_art
   rapid_ringbuffer
   rapid_resources
+  rapid_columnar_join_work
+  rapid_bloom_filter
   rapid_ml
   rapid_storage_index
   transaction_journal_purge

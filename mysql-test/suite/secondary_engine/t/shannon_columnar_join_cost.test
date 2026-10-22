@@ -1,0 +1,56 @@
+--source include/have_debug.inc
+--source include/no_ps_protocol.inc
+--source include/elide_costs.inc
+CREATE DATABASE sh_join_cost;
+USE sh_join_cost;
+SET use_secondary_engine=OFF;
+CREATE TABLE a(id INT PRIMARY KEY,k INT,v BIGINT) SECONDARY_ENGINE=rapid;
+CREATE TABLE b(id INT PRIMARY KEY,k INT,v BIGINT,unused_pad VARCHAR(2000))
+  SECONDARY_ENGINE=rapid;
+SET cte_max_recursion_depth=2000;
+INSERT INTO a WITH RECURSIVE n AS
+  (SELECT 1 i UNION ALL SELECT i+1 FROM n WHERE i<1024)
+  SELECT i,IF(i%17=0,NULL,i%128),i FROM n;
+INSERT INTO b SELECT id,k,v,REPEAT('x',2000) FROM a WHERE id<=128;
+ALTER TABLE a SECONDARY_LOAD;
+ALTER TABLE b SECONDARY_LOAD;
+ANALYZE TABLE a,b;
+SET optimizer_switch='hypergraph_optimizer=on';
+SET secondary_engine_cost_threshold=0;
+SET use_secondary_engine=FORCED;
+# The declared VARCHAR width must not be charged when it is not projected.
+# The small grant makes an erroneous full-record spill estimate observable.
+SET join_buffer_size=131072;
+SET debug='+d,rapid_operator_budget_floor';
+--replace_regex $elide_costs_and_rows
+EXPLAIN FORMAT=TREE SELECT COUNT(*),SUM(b.v) FROM a JOIN b ON a.k=b.k;
+--let $assert_query = SELECT COUNT(*),SUM(b.v) FROM a JOIN b ON a.k=b.k
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+SET debug='+d,rapid_legacy_join_width_cost';
+--replace_regex $elide_costs_and_rows
+EXPLAIN FORMAT=TREE SELECT COUNT(*),SUM(b.v) FROM a JOIN b ON a.k=b.k;
+--let $assert_query = SELECT COUNT(*),SUM(b.v) FROM a JOIN b ON a.k=b.k
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+SET debug='-d,rapid_legacy_join_width_cost';
+# Filtered cardinality, compound keys and NULLs retain exact semantics.
+--let $assert_query = SELECT COUNT(*),SUM(a.v) FROM a JOIN b ON a.k=b.k AND a.v=b.v WHERE a.id<100
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_query = SELECT COUNT(*),SUM(b.v) FROM a LEFT JOIN b ON a.k=b.k
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_query = SELECT COUNT(*) FROM a WHERE EXISTS(SELECT 1 FROM b WHERE b.k=a.k)
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_query = SELECT COUNT(*) FROM a WHERE NOT EXISTS(SELECT 1 FROM b WHERE b.k=a.k)
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+# A projected string takes the existing row/variable-width path.
+--let $assert_query = SELECT COUNT(*),SUM(LENGTH(b.unused_pad)) FROM a JOIN b ON a.k=b.k
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_query = SELECT COUNT(*),SUM(a.v) FROM a STRAIGHT_JOIN b ON a.k=b.k
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+# Explicit join-order constraints remain the optimizer's responsibility.
+--replace_regex $elide_costs_and_rows
+EXPLAIN FORMAT=TREE SELECT /*+ JOIN_ORDER(a,b) */ COUNT(*) FROM a JOIN b ON a.k=b.k;
+--let $assert_query = SELECT /*+ JOIN_ORDER(a,b) */ COUNT(*) FROM a JOIN b ON a.k=b.k
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+SET debug='-d,rapid_operator_budget_floor';
+SET use_secondary_engine=OFF;
+DROP DATABASE sh_join_cost;
