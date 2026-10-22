@@ -31,6 +31,7 @@
 #include <limits>
 #include <memory>
 #include <vector>
+#include "storage/rapid_engine/optimizer/runtime_bloom_filter.h"
 #include "storage/rapid_engine/resource_management/res_mgmt.h"
 
 #include "sql/iterators/basic_row_iterators.h"
@@ -64,8 +65,10 @@ class VectorizedHashJoinIterator final : public RowIterator, public BatchReadabl
                              table_map tables_to_get_rowid_for, size_t max_memory_available,
                              const std::vector<HashJoinCondition> &join_conditions, bool allow_spill_to_disk,
                              JoinType join_type, const Mem_root_array<Item *> &extra_conditions,
-                             HashJoinInput first_input, bool probe_input_batch_mode, uint64_t *hash_table_generation);
+                             HashJoinInput first_input, bool probe_input_batch_mode, uint64_t *hash_table_generation,
+                             double estimated_probe_rows);
 
+  ~VectorizedHashJoinIterator() override;
   bool Init() override;
   int Read() override;
   void SetNullRowFlag(bool is_null_row) override;
@@ -73,6 +76,10 @@ class VectorizedHashJoinIterator final : public RowIterator, public BatchReadabl
   void EndPSIBatchModeIfStarted() override;
 
   struct PerformanceStats {
+    size_t bloom_bytes{0};
+    size_t bloom_checks{0};
+    size_t bloom_rejects{0};
+    bool bloom_adaptively_disabled{false};
     size_t build_rows{0};
     size_t probe_rows{0};
     size_t build_batches{0};
@@ -128,6 +135,10 @@ class VectorizedHashJoinIterator final : public RowIterator, public BatchReadabl
 
   // Build hash table from build input
   bool BuildHashTable();
+  void BuildRuntimeFilter();
+  void PublishBloomStats();
+  Utils::RuntimeBloomPolicy RuntimeFilterPolicy() const;
+  void ReassessRuntimeFilter();
 
   // Emit at most one joined row and retain the exact match position so a high
   // fanout probe row never needs a materialized output vector.
@@ -348,6 +359,9 @@ class VectorizedHashJoinIterator final : public RowIterator, public BatchReadabl
   std::pmr::vector<size_t> m_hash_bucket_tails{&m_build_memory};
   std::pmr::vector<HashSlot> m_hash_slots{&m_build_memory};
   std::pmr::vector<uchar> m_hash_key_arena{&m_build_memory};
+  Utils::RuntimeBloomFilter m_bloom{&m_build_memory};
+  bool m_bloom_active{false};
+  size_t m_bloom_sample_checks{0}, m_bloom_sample_rejects{0};
   size_t m_hash_table_size{0};  // Number of buckets, power-of-two.
 
   // Target load factor (rows per bucket); trade-off between memory and probe cost.
@@ -388,6 +402,7 @@ class VectorizedHashJoinIterator final : public RowIterator, public BatchReadabl
 
   // Estimated build row count (from optimizer), used for dynamic bucket sizing.
   double m_estimated_build_rows{0.0};
+  double m_estimated_probe_rows{0.0};
 
   // True when m_build_columns/m_probe_columns store MySQL record images because the corresponding input is row-mode.
   // Such chunks cannot be handed to a ReadBatch() caller that sized its own chunks by Util::normalized_length().

@@ -1,0 +1,87 @@
+--source include/have_debug.inc
+--source include/no_ps_protocol.inc
+CREATE DATABASE sh_bloom;
+USE sh_bloom;
+SET SESSION use_secondary_engine=OFF;
+CREATE TABLE b(id INT PRIMARY KEY, k INT, k2 INT, v INT) SECONDARY_ENGINE=rapid;
+CREATE TABLE p(id INT PRIMARY KEY, k INT, k2 INT, v INT) SECONDARY_ENGINE=rapid;
+INSERT INTO b WITH RECURSIVE n AS (SELECT 1 AS i UNION ALL SELECT i+1 FROM n WHERE i<256)
+SELECT i, IF(i=256,NULL,i DIV 2), i%3, i FROM n;
+SET SESSION cte_max_recursion_depth=10000;
+INSERT INTO p WITH RECURSIVE n AS (SELECT 1 AS i UNION ALL SELECT i+1 FROM n WHERE i<8192)
+SELECT i, IF(i%13=0,NULL,i), i%3, i FROM n;
+ALTER TABLE b SECONDARY_LOAD;
+ALTER TABLE p SECONDARY_LOAD;
+SET SESSION optimizer_switch='hypergraph_optimizer=on';
+SET SESSION secondary_engine_cost_threshold=0;
+SET SESSION use_secondary_engine=FORCED;
+SET SESSION debug='-d,rapid_bloom_disabled';
+--let $before = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_hash_join_bloom_rejects_total', Value, 1)
+SELECT COUNT(*),SUM(p.v) FROM p JOIN b ON p.k=b.k;
+--let $after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_hash_join_bloom_rejects_total', Value, 1)
+if ($after <= $before) {
+  --die Runtime Bloom filter did not reject any probe rows
+}
+--let $assert_query = SELECT p.k,COUNT(*),SUM(p.v) FROM p JOIN b ON p.k=b.k GROUP BY p.k ORDER BY p.k
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_query = SELECT COUNT(*),SUM(p.v) FROM p JOIN b ON p.k=b.k AND p.k2=b.k2 AND p.v>b.v
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_query = SELECT COUNT(*),SUM(p.v) FROM p JOIN b ON p.k<=>b.k
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_query = SELECT COUNT(*),SUM(p.v) FROM p JOIN b ON p.k=b.k JOIN b AS b2 ON p.k=b2.k
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_query = SELECT COUNT(*),SUM(p.v) FROM p WHERE EXISTS(SELECT 1 FROM b WHERE p.k=b.k)
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_query = SELECT COUNT(*),SUM(p.v) FROM p LEFT JOIN b ON p.k=b.k
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_query = SELECT COUNT(*),SUM(p.v) FROM p WHERE NOT EXISTS(SELECT 1 FROM b WHERE p.k=b.k)
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+SET SESSION debug='+d,rapid_bloom_disabled';
+--let $before = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_hash_join_bloom_checks_total', Value, 1)
+SELECT COUNT(*),SUM(p.v) FROM p JOIN b ON p.k=b.k;
+--let $after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_hash_join_bloom_checks_total', Value, 1)
+if ($after != $before) {
+  --die Disabled Bloom filter performed checks
+}
+SET SESSION debug='-d,rapid_bloom_disabled';
+SET SESSION debug='+d,rapid_bloom_allocation_failure';
+SELECT COUNT(*),SUM(p.v) FROM p JOIN b ON p.k=b.k;
+--let $after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_hash_join_bloom_checks_total', Value, 1)
+if ($after != $before) {
+  --die Allocation fallback used a Bloom filter
+}
+SET SESSION debug='-d,rapid_bloom_allocation_failure';
+SET SESSION debug='+d,rapid_bloom_resource_pressure';
+SELECT COUNT(*),SUM(p.v) FROM p JOIN b ON p.k=b.k;
+--let $after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_hash_join_bloom_checks_total', Value, 1)
+if ($after != $before) {
+  --die Resource-pressure fallback used a Bloom filter
+}
+SET SESSION debug='-d,rapid_bloom_resource_pressure';
+# Pressure arriving after build must release the optional filter safely.
+--let $disabled_before = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_hash_join_bloom_disabled_total', Value, 1)
+SET SESSION debug='+d,rapid_bloom_probe_pressure';
+SELECT COUNT(*),SUM(p.v) FROM p JOIN b ON p.k=b.k;
+SET SESSION debug='-d,rapid_bloom_probe_pressure';
+--let $disabled_after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_hash_join_bloom_disabled_total', Value, 1)
+if ($disabled_after <= $disabled_before) {
+  --die Runtime pressure did not disable the active filter
+}
+# Almost every non-NULL key matches: sampling must stop unnecessary checks.
+--let $disabled_before = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_hash_join_bloom_disabled_total', Value, 1)
+SELECT COUNT(*),SUM(p.v) FROM p JOIN b ON p.k%128=b.k;
+--let $disabled_after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_hash_join_bloom_disabled_total', Value, 1)
+if ($disabled_after <= $disabled_before) {
+  --die Ineffective filter was not disabled adaptively
+}
+PREPARE q FROM 'SELECT COUNT(*),SUM(p.v) FROM p JOIN b ON p.k=b.k WHERE b.id<=?';
+SET @n=256;
+EXECUTE q USING @n;
+SET @n=0;
+EXECUTE q USING @n;
+SET @n=128;
+EXECUTE q USING @n;
+DEALLOCATE PREPARE q;
+SET use_secondary_engine=OFF;
+DROP DATABASE sh_bloom;

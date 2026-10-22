@@ -929,7 +929,8 @@ unique_ptr_destroy_only<RowIterator> PathGenerator::CreateIteratorFromAccessPath
               thd, mem_root, std::move(job.children[1]), build_tables, estimated_build_rows, std::move(job.children[0]),
               probe_tables, param.store_rowids, param.tables_to_get_rowid_for,
               ShannonBase::Utils::Util::hash_join_memory_budget(thd), std::move(conditions), param.allow_spill_to_disk,
-              join_type, *extra_conditions, first_input, probe_input_batch_mode, hash_table_generation);
+              join_type, *extra_conditions, first_input, probe_input_batch_mode, hash_table_generation,
+              param.outer->num_output_rows());
 
         else
           iterator = NewIterator<HashJoinIterator>(
