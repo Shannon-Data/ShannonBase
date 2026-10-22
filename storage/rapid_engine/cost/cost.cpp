@@ -1761,8 +1761,50 @@ struct HashSpillEstimate {
   double io_cost{0};
 };
 
-HashSpillEstimate EstimateHashSpill(THD *thd, AccessPath *build, AccessPath *probe, double output_rows) {
-  auto row_width = [](AccessPath *input) {
+double ProjectedJoinWidth(AccessPath *input, bool *numeric = nullptr) {
+  double width = 0;
+  table_map visited = 0;
+  WalkTablesUnderAccessPath(
+      input,
+      [&width, &visited, numeric](TABLE *table) {
+        if (!table || !table->s) return false;
+        if (!table->pos_in_table_list || !table->read_set) {
+          width += table->s->rec_buff_length;
+          if (numeric) *numeric = false;
+          return false;
+        }
+        const table_map map = table->pos_in_table_list->map();
+        if (visited & map) return false;
+        visited |= map;
+        for (uint i = 0; i < table->s->fields; ++i) {
+          if (!bitmap_is_set(table->read_set, i)) continue;
+          const Field *field = table->field[i];
+          if (numeric &&
+              (ShannonBase::Utils::Util::is_string(field->type()) || ShannonBase::Utils::IsOffPageField(field)))
+            *numeric = false;
+          width += std::max(field->pack_length(), ShannonBase::Utils::Util::normalized_length(field));
+          width += 0.125;  // ColumnChunk null bitmap, including NOT NULL fields.
+        }
+        return false;
+      },
+      /*include_pruned_tables=*/true);
+  return std::max(1.0, width);
+}
+
+double JoinKeyWidth(const RelationalExpression *expr) {
+  double width = 0;
+  if (expr == nullptr) return width;
+  for (const auto *condition : expr->equijoin_conditions) {
+    // The executor's direct integer key is a type tag plus int64. Other
+    // numeric comparators have bounded encodings (including decimal).
+    width += condition->compare_type() == INT_RESULT ? 9.0 : 80.0;
+  }
+  return width;
+}
+
+HashSpillEstimate EstimateHashSpill(THD *thd, AccessPath *build, AccessPath *probe, double output_rows,
+                                    double key_width = -1) {
+  auto record_width = [](AccessPath *input) {
     double width = 0;
     WalkTablesUnderAccessPath(
         input,
@@ -1773,8 +1815,9 @@ HashSpillEstimate EstimateHashSpill(THD *thd, AccessPath *build, AccessPath *pro
         /*include_pruned_tables=*/true);
     return std::max(1.0, width);
   };
-  const double build_width = row_width(build);
-  const double probe_width = row_width(probe);
+  const bool columnar = key_width >= 0;
+  const double build_width = columnar ? ProjectedJoinWidth(build) : record_width(build);
+  const double probe_width = columnar ? ProjectedJoinWidth(probe) : record_width(probe);
   const double build_rows = std::max(0.0, build->num_output_rows());
   const double probe_rows = std::max(0.0, probe->num_output_rows());
   // Include retained hash metadata, not just the record image. A smaller
@@ -1784,7 +1827,10 @@ HashSpillEstimate EstimateHashSpill(THD *thd, AccessPath *build, AccessPath *pro
       std::min<size_t>(std::max<size_t>(requested, RapidCostConstants::kMinHashJoinMemoryGrant),
                        ShannonBase::ResMgmt::system_memory_limits().operation);
   const size_t build_budget = std::min(requested, nominal_grant / RapidCostConstants::kHashJoinGrantParts);
-  if (build_rows * (build_width + RapidCostConstants::kHashEntryOverheadBytes) <= build_budget) return {};
+  const double retained =
+      columnar ? ColumnarJoinCostEstimator::estimate(build_rows, probe_rows, build_width, key_width).retained_bytes
+               : build_rows * (build_width + RapidCostConstants::kHashEntryOverheadBytes);
+  if (retained <= build_budget) return {};
   // Ordered spill writes and reads both inputs and the materialized output.
   // Price sequential I/O blocks with the calibrated I/O factor. Recursive
   // repartitioning and skew can add passes beyond this baseline estimate.
@@ -1805,6 +1851,9 @@ bool ModifyHashJoinCost(THD *thd, const JoinHypergraph &graph, AccessPath *path,
   double inner_rows = hj.inner->num_output_rows();
   double outer_cost = hj.outer->cost();
   double inner_cost = hj.inner->cost();
+  if (!std::isfinite(inner_rows) || !std::isfinite(outer_rows) || inner_rows < 0 || outer_rows < 0 ||
+      inner_rows >= static_cast<double>(HA_POS_ERROR) || outer_rows >= static_cast<double>(HA_POS_ERROR))
+    return false;
 
   // MySQL builds the hash table on the inner input and probes with the outer,
   // so price those roles rather than assuming the smaller side builds -- but
@@ -1837,11 +1886,36 @@ bool ModifyHashJoinCost(THD *thd, const JoinHypergraph &graph, AccessPath *path,
 
   double output_rows = outer_rows * inner_rows * join_sel;
   output_rows = std::min(output_rows, std::max(outer_rows, inner_rows));
-  const auto spill = EstimateHashSpill(thd, hj.inner, hj.outer, output_rows);
+  bool numeric = true;
+  const double build_width = ProjectedJoinWidth(hj.inner, &numeric);
+  ProjectedJoinWidth(hj.outer, &numeric);
+  if (hj_expr) {
+    for (const auto *condition : hj_expr->equijoin_conditions) {
+      const auto type = condition->compare_type();
+      if (type != INT_RESULT && type != REAL_RESULT && type != DECIMAL_RESULT) numeric = false;
+    }
+  }
+  bool use_columnar_width = build_side_is_a_choice && numeric && !hj.store_rowids;
+  DBUG_EXECUTE_IF("rapid_legacy_join_width_cost", { use_columnar_width = false; });
+  const double key_width = use_columnar_width ? JoinKeyWidth(hj_expr) : -1;
+  double build_work_cost = 0;
+  if (use_columnar_width) {
+    const auto work = ColumnarJoinCostEstimator::estimate(inner_rows, outer_rows, build_width, key_width);
+    // Byte costs distinguish narrow/wide candidate builds without changing
+    // cardinalities or reconstructing plans. MySQL retains control of legal
+    // join orders, hints, dependencies and physical ordering properties.
+    const double copy_cost = work.build_copy_bytes * RapidCostConstants::kHashBuildCopyPerByte *
+                             ShannonBase::shannon_rpd_cost_est_instances->memory_factor();
+    const double hash_byte_cost =
+        RapidCostConstants::kHashKeyPerByte * ShannonBase::shannon_rpd_cost_est_instances->cpu_factor();
+    join_cost += copy_cost + work.key_bytes * hash_byte_cost;
+    build_work_cost = copy_cost + inner_rows * key_width * hash_byte_cost;
+  }
+  const auto spill = EstimateHashSpill(thd, hj.inner, hj.outer, output_rows, key_width);
   double total_cost = outer_cost + inner_cost + join_cost + spill.io_cost;
   path->set_cost(total_cost);
   path->set_cost_before_filter(total_cost);
-  path->set_init_cost(spill.blocking ? total_cost : hj.outer->init_cost() + inner_cost);
+  path->set_init_cost(spill.blocking ? total_cost : hj.outer->init_cost() + inner_cost + build_work_cost);
   // A rescan does not redo the children's once-only work (a materialized
   // input, say). Zero here made every hash join look fully re-run on rescan,
   // so a nested loop over the same inputs won on rescan cost at equal cost.

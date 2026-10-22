@@ -25,6 +25,8 @@
 */
 #ifndef __SHANNONBASE_COST_H__
 #define __SHANNONBASE_COST_H__
+#include <algorithm>
+#include <cmath>
 #include "storage/rapid_engine/include/rapid_types.h"
 
 #include "include/my_base.h"
@@ -49,6 +51,26 @@ class Predicate;
 class ColumnStatistics;
 }  // namespace Imcs
 namespace Optimizer {
+// Byte counts supplement, rather than replace, the calibrated per-row costs.
+// Row estimates are the filtered AccessPath estimates, never base table sizes.
+struct ColumnarJoinCostEstimator {
+  double build_copy_bytes{0};
+  double key_bytes{0};
+  double retained_bytes{0};
+
+  static ColumnarJoinCostEstimator estimate(double build_rows, double probe_rows, double projected_width,
+                                            double key_width) {
+    if (!std::isfinite(build_rows) || !std::isfinite(probe_rows) || !std::isfinite(projected_width) ||
+        !std::isfinite(key_width) || build_rows < 0 || probe_rows < 0 || projected_width < 0 || key_width < 0)
+      return {};
+    // HashSlot (40 bytes on 64-bit), plus an approximate bucket allowance.
+    // Column null bitmaps are included in projected_width.
+    // Keys are retained separately from projected columns.
+    const double width = std::max(1.0, projected_width);
+    return {build_rows * width, (build_rows + probe_rows) * key_width, build_rows * (width + key_width + 64.0)};
+  }
+};
+
 /**
  * MySQL Cost Model Constants (for reference)
  *
@@ -150,6 +172,10 @@ struct RapidCostConstants {
 
   // Materializing one row of a hash join's output.
   static constexpr double kHashJoinOutputPerRow = 0.001;
+  // Initial byte-work weights relative to calibrated memory/CPU costs. These
+  // supplement per-row costs; they are not a measured bandwidth guarantee.
+  static constexpr double kHashBuildCopyPerByte = 0.00001;
+  static constexpr double kHashKeyPerByte = 0.00001;
   // Per-row CPU in the metadata-only scan estimate, which has no column detail
   // to work from (estimate_scan_cost(rows, num_imcus)).
   static constexpr double kMetadataScanPerRow = 0.001;

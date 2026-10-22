@@ -47,7 +47,6 @@
 namespace ShannonBase {
 namespace Executor {
 namespace {
-
 // Keep allocation refusal local: iterator callers use status returns, and a
 // budget refusal must not escape into the SQL executor as a C++ exception.
 template <class Allocate>
@@ -1880,13 +1879,11 @@ bool VectorizedHashJoinIterator::ExtractRowToColumnChunks(const pack_rows::Table
 
   for (const pack_rows::Table &table : tables.tables()) {
     for (const pack_rows::Column &column : table.columns) {
-      if (chunk_idx >= chunks.size()) {
-        return true;  // Error: not enough chunks
-      }
+      if (chunk_idx >= chunks.size()) return true;  // Error: not enough chunks
 
       Field *field = column.field;
       bool is_null = field->is_null();
-      bool ok;
+      bool ok{false};
 
       if (is_null) {
         ok = chunks[chunk_idx].add(nullptr, 0, true);
@@ -1916,13 +1913,10 @@ bool VectorizedHashJoinIterator::LoadRowFromColumnChunks(const std::pmr::vector<
 
   for (const pack_rows::Table &table : tables.tables()) {
     for (const pack_rows::Column &column : table.columns) {
-      if (chunk_idx >= chunks.size() || row_idx >= chunks[chunk_idx].size()) {
-        return true;  // Error
-      }
+      if (chunk_idx >= chunks.size() || row_idx >= chunks[chunk_idx].size()) return true;  // Error
+
       const auto &chunk = chunks[chunk_idx];
-
       Field *field = column.field;
-
       if (chunk.nullable_fast(row_idx)) {
         if (field->is_nullable()) {
           field->set_null();
@@ -2007,9 +2001,9 @@ bool VectorizedHashJoinIterator::TryBuildDirectJoinKey(const std::pmr::vector<Co
       int64_t raw;
       std::memcpy(&raw, chunk->data_fast(row_idx), sizeof(raw));
       value = static_cast<longlong>(raw);
-    } else {
+    } else
       return false;
-    }
+
     if (m_join_key_buffer.append(pointer_cast<const char *>(&value), sizeof(value))) {
       *result = JoinKeyResult::ERROR;
       return true;
@@ -2040,9 +2034,7 @@ VectorizedHashJoinIterator::JoinKeyResult VectorizedHashJoinIterator::BuildJoinK
 }
 
 bool VectorizedHashJoinIterator::EvaluateExtraConditions() {
-  if (m_extra_condition == nullptr) {
-    return true;
-  }
+  if (m_extra_condition == nullptr) return true;
 
   return m_extra_condition->val_int() != 0;
 }
