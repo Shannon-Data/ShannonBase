@@ -284,24 +284,16 @@ int ML_forecasting::train(THD * /*thd*/, Json_wrapper &model_object, Json_wrappe
 
 int ML_forecasting::load(THD * /*thd*/, std::string &model_content) {
   assert(model_content.length() && m_handler_name.length());
-  std::lock_guard<std::mutex> lock(models_mutex);
-  Loaded_models[m_handler_name] = model_content;
-  return 0;
+  return Utils::register_prepared_model(m_handler_name, std::move(model_content)) ? 0 : HA_ERR_GENERIC;
 }
 
 int ML_forecasting::load_from_file(THD * /*thd*/, std::string &model_file_full_path, std::string &model_handle_name) {
   if (!model_file_full_path.length() || !model_handle_name.length()) return HA_ERR_GENERIC;
-  std::lock_guard<std::mutex> lock(models_mutex);
-  Loaded_models[model_handle_name] = Utils::read_file(model_file_full_path);
-  return 0;
+  return Utils::register_prepared_model(model_handle_name, Utils::read_file(model_file_full_path)) ? 0 : HA_ERR_GENERIC;
 }
 
 int ML_forecasting::unload(THD * /*thd*/, std::string &model_handle_name) {
-  std::lock_guard<std::mutex> lock(models_mutex);
-  assert(!Loaded_models.empty());
-  auto cnt = Loaded_models.erase(model_handle_name);
-  assert(cnt == 1);
-  return (cnt == 1) ? 0 : HA_ERR_GENERIC;
+  return Utils::unregister_prepared_model(model_handle_name);
 }
 
 int ML_forecasting::import(THD * /*thd*/, Json_wrapper &, Json_wrapper &, std::string &) {

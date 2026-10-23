@@ -54,7 +54,7 @@
 namespace ShannonBase {
 namespace ML {
 std::mutex models_mutex;
-std::map<std::string, std::string> Loaded_models;
+std::map<std::string, Prepared_model_ptr> Loaded_models;
 
 Auto_ML::Auto_ML(std::string schema, std::string table_name, std::string target_name, Json_wrapper options,
                  std::string handler)
@@ -195,7 +195,7 @@ void Auto_ML::build_task(std::string_view task_str) {
 }
 
 int Auto_ML::precheck_and_process_meta_info(std::string &model_handle_name, std::string &model_content,
-                                            bool should_loaded) {
+                                            bool should_loaded, bool need_content) {
   if (model_handle_name.length() == 0) return HA_ERR_GENERIC;
 
   {
@@ -227,7 +227,7 @@ int Auto_ML::precheck_and_process_meta_info(std::string &model_handle_name, std:
     std::transform(m_task_type_str.begin(), m_task_type_str.end(), m_task_type_str.begin(), ::toupper);
   }
 
-  if (Utils::read_model_object_content(model_handle_name, model_content)) return HA_ERR_GENERIC;
+  if (need_content && Utils::read_model_object_content(model_handle_name, model_content)) return HA_ERR_GENERIC;
 
   // m_task_type_str was just read from the model metadata's top-level "task"
   // key above. Do not re-derive it through init_task_map(): that re-parses the
@@ -253,7 +253,7 @@ int Auto_ML::load(THD *thd, String *model_handler_name) {
   m_handler = model_handler_name->c_ptr_safe();
 
   std::string model_content_str;
-  if (precheck_and_process_meta_info(m_handler, model_content_str, false)) return HA_ERR_GENERIC;
+  if (precheck_and_process_meta_info(m_handler, model_content_str, false, /*need_content=*/true)) return HA_ERR_GENERIC;
 
   return m_ml_task ? m_ml_task->load(thd, model_content_str) : HA_ERR_GENERIC;
 }
@@ -347,6 +347,9 @@ int Auto_ML::predict_table(THD *thd, String *in_sch_tb_name, String *model_handl
 int Auto_ML::import(THD *thd, Json_wrapper &model_object, Json_wrapper &model_metadata, String *model_handler_name) {
   std::string handler_name_str(model_handler_name->c_ptr_safe());
 
+  // The catalog rows are written by sys.ML_MODEL_IMPORT, which runs both sides
+  // of this call; drop cached metadata whether or not a task object exists.
+  Utils::invalidate_model_meta_cache();
   if (m_ml_task) return m_ml_task->import(thd, model_object, model_metadata, handler_name_str);
 
   return 0;
@@ -420,7 +423,8 @@ int Auto_ML::model_active(THD *thd, String *in_user_name, Json_wrapper &out_mode
   {
     std::lock_guard<std::mutex> lock(models_mutex);
     loaded_snapshot.reserve(Loaded_models.size());
-    for (const auto &[handle, serialized] : Loaded_models) loaded_snapshot.emplace_back(handle, serialized.size());
+    for (const auto &[handle, model] : Loaded_models)
+      loaded_snapshot.emplace_back(handle, model ? model->content_size : 0);
   }  // models_mutex released
 
   // add_alias()/append_alias() hand ownership to the parent DOM, so everything

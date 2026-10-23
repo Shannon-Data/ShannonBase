@@ -27,6 +27,7 @@
 #define __SHANNONBASE_AUTO_ML_INFO_H__
 
 #include <map>
+#include <memory>
 #include <mutex>
 #include <set>
 #include <string>
@@ -41,7 +42,27 @@ namespace ML {
   }
 
 extern std::mutex models_mutex;
-extern std::map<std::string, std::string> Loaded_models;
+
+// A model registered by ML_MODEL_LOAD: a booster deserialized once at load time.
+// The serialized bytes are dropped afterwards; only their size is kept, so a
+// multi-GB model is not held twice.
+class Prepared_model {
+ public:
+  Prepared_model() = default;
+  ~Prepared_model() = default;
+
+  // nullptr means "loaded but not a LightGBM model" (nothing to predict with).
+  void *handle() const { return booster.get(); }
+
+  size_t content_size{0};
+  // Owning BoosterHandle, freed by Utils; shared so a statement that is already
+  // predicting keeps the booster alive after ML_MODEL_UNLOAD.
+  std::shared_ptr<void> booster;
+  int num_class{1};
+};
+using Prepared_model_ptr = std::shared_ptr<Prepared_model>;
+
+extern std::map<std::string, Prepared_model_ptr> Loaded_models;
 
 // clang-format off
 enum class ML_TASK_TYPE_T {

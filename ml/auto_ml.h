@@ -76,10 +76,12 @@ class Auto_ML {
    * @param[in] model_handle_name, the hanlde name of model to check.
    * @param[in/out] model_content, the content of this trained model.
    * @param[in] should_loaded, true is to check whether is loaded into, false to check it should not be loaded.
+   * @param[in] need_content, read MODEL_OBJECT_CATALOG too. Only ML_MODEL_LOAD needs the bytes;
+   *            prediction and scoring run against the prepared handle and must not re-read them.
    * @return true has been loaded, otherwise not.
    *  */
   int precheck_and_process_meta_info(std::string &model_handle_name, std::string &model_content,
-                                     bool should_loaded = true);
+                                     bool should_loaded = true, bool need_content = false);
   // get the json array value.
   std::string get_array_string(Json_array *array);
   // init task job map, get an instance by type.

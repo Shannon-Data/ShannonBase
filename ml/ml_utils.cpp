@@ -28,10 +28,12 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cmath>
 #include <fstream>
 #include <iostream>
 #include <sstream>
+#include <unordered_map>
 
 #include "include/my_inttypes.h"
 
@@ -150,14 +152,18 @@ std::string Utils::read_file(std::string &file_path) {
     return "";
   }
 
-  std::ifstream file(file_path.c_str(), std::ios::binary);
+  // Sized read: a model file can be gigabytes, and reading it through an
+  // ostringstream would keep two copies alive at once.
+  std::ifstream file(file_path.c_str(), std::ios::binary | std::ios::ate);
   if (!file) {
     return "";
   }
-
-  std::ostringstream ss;
-  ss << file.rdbuf();
-  return ss.str();
+  const std::streamsize size = file.tellg();
+  if (size <= 0) return "";
+  std::string content(static_cast<size_t>(size), '\0');
+  file.seekg(0, std::ios::beg);
+  if (!file.read(content.data(), size)) return "";
+  return content;
 }
 
 int Utils::parse_json(Json_wrapper &options, OPTION_VALUE_T &option_value, std::string &key, size_t depth) {
@@ -747,26 +753,110 @@ BoosterHandle Utils::load_trained_model_from_string(std::string &model_content) 
   return (ret == 0) ? handle : nullptr;
 }
 
-int Utils::get_loaded_model_content(const std::string &model_handle_name, std::string &model_content) {
-  {
-    std::lock_guard<std::mutex> lock(models_mutex);
-    auto it = Loaded_models.find(model_handle_name);
-    if (it == Loaded_models.end()) {
+Prepared_model_ptr Utils::register_prepared_model(const std::string &model_handle_name, std::string model_content) {
+  auto model = std::make_shared<Prepared_model>();
+  model->content_size = model_content.size();
+
+  if (!model_content.empty()) {
+    BoosterHandle handle{nullptr};
+    int n_iteration{0};
+    if (LGBM_BoosterLoadModelFromString(model_content.c_str(), &n_iteration, &handle) || !handle) {
       std::ostringstream err;
-      err << model_handle_name << " has not been loaded";
+      err << model_handle_name << " can not load model from content string";
       my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
-      return HA_ERR_GENERIC;
+      return nullptr;
     }
-    model_content = it->second;
+    model->booster = std::shared_ptr<void>(handle, [](void *h) {
+      if (h) LGBM_BoosterFree(h);
+    });
+
+    int num_class{1};
+    if (LGBM_BoosterGetNumClasses(handle, &num_class) == 0 && num_class > 1) model->num_class = num_class;
   }
 
-  if (model_content.empty()) {
-    std::ostringstream err;
-    err << model_handle_name << " is loaded with empty content";
-    my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
-    return HA_ERR_GENERIC;
+  // LightGBM keeps its own parsed copy, so the serialized bytes are dead weight
+  // from here on. Releasing them now keeps a large model from being resident
+  // twice for the whole lifetime of the handle.
+  std::string().swap(model_content);
+
+  {
+    std::lock_guard<std::mutex> lock(models_mutex);
+    Loaded_models[model_handle_name] = model;
   }
+  Utils::invalidate_model_meta_cache();
+  return model;
+}
+
+Prepared_model_ptr Utils::get_prepared_model(const std::string &model_handle_name) {
+  std::lock_guard<std::mutex> lock(models_mutex);
+  auto it = Loaded_models.find(model_handle_name);
+  if (it == Loaded_models.end() || !it->second) {
+    std::ostringstream err;
+    err << model_handle_name << " has not been loaded";
+    my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
+    return nullptr;
+  }
+  return it->second;
+}
+
+int Utils::unregister_prepared_model(const std::string &model_handle_name) {
+  int ret{HA_ERR_GENERIC};
+  {
+    std::lock_guard<std::mutex> lock(models_mutex);
+    ret = (Loaded_models.erase(model_handle_name) == 1) ? 0 : HA_ERR_GENERIC;
+  }
+  Utils::invalidate_model_meta_cache();
+  return ret;
+}
+
+int Utils::ML_predict_batch(const Prepared_model_ptr &model, const double *data, size_t nrow, size_t ncol, int type,
+                            std::vector<double> &predictions) {
+  assert(type == C_API_PREDICT_NORMAL || type == C_API_PREDICT_RAW_SCORE || type == C_API_PREDICT_LEAF_INDEX ||
+         type == C_API_PREDICT_CONTRIB);
+  if (!model || !model->handle() || data == nullptr || nrow == 0 || ncol == 0) return HA_ERR_GENERIC;
+
+  // Ask LightGBM for the exact output size instead of guessing num_class * nrow:
+  // leaf index and feature contributions emit more than one value per row.
+  int64_t out_len{0};
+  if (LGBM_BoosterCalcNumPredict(model->handle(), static_cast<int>(nrow), type, 0, -1, &out_len) || out_len <= 0)
+    return HA_ERR_GENERIC;
+
+  predictions.resize(static_cast<size_t>(out_len), 0.0);
+  int64_t written{0};
+  // clang-format off
+  auto ret = LGBM_BoosterPredictForMat(model->handle(),  /* model handler */
+                                       data,              /* test data */
+                                       C_API_DTYPE_FLOAT64, /* testing data type */
+                                       static_cast<int>(nrow), /* # of testing data */
+                                       static_cast<int>(ncol), /* # of features of testing data */
+                                       1,                  /* row-based format */
+                                       type,               /* What should be predicted */
+                                       0,                  /* Start index of the iteration */
+                                       -1,                 /* # of iteration for prediction, <= 0 no limit */
+                                       "",                 /* params */
+                                       &written,           /* Length of output result[out] */
+                                       predictions.data()); /* Pointer to array with predictions[out] */
+  // clang-format on
+  if (ret || written <= 0 || static_cast<size_t>(written) > predictions.size()) return HA_ERR_GENERIC;
+  predictions.resize(static_cast<size_t>(written));
   return 0;
+}
+
+double Utils::ML_encode_feature(const std::string &feature_name, const std::string &value,
+                                const txt2numeric_map_t &txt2numeric_dict) {
+  auto dict_it = txt2numeric_dict.find(feature_name);
+  if (dict_it == txt2numeric_dict.end()) {
+    // A NULL feature reaches us as the literal "null" (see parse_json), and
+    // std::stod throws on it; read_data() feeds NULL numerics to training as 0.0.
+    return Utils::to_double_or(value, 0.0);
+  }
+
+  // Text field: map to the index the model was trained with.
+  const auto &txt2num = dict_it->second;
+  if (txt2num.empty()) return 0.0;
+  auto it = std::find(txt2num.begin(), txt2num.end(), value);
+  return (it != txt2num.end()) ? static_cast<double>(std::distance(txt2num.begin(), it))
+                               : static_cast<double>(txt2num.size());  // unknown value
 }
 
 double Utils::to_double_or(const std::string &str, double default_value) {
@@ -897,8 +987,92 @@ done:
   return ret;
 }
 
+namespace {
+// Cached MODEL_CATALOG.MODEL_METADATA rows, keyed by "user.handle". Metadata is
+// far smaller than the model object, but a wide categorical dictionary can still
+// reach megabytes, so the cache is byte-capped and refuses what does not fit.
+constexpr size_t kModelMetaCacheMaxBytes = 8 * 1024 * 1024;
+constexpr size_t kModelMetaCacheMaxEntries = 256;
+// Plain SQL DML on the catalog tables is invisible in-process; expire entries so
+// an out-of-band change cannot be served forever.
+constexpr std::chrono::seconds kModelMetaCacheTtl{60};
+
+struct Model_meta_cache_entry {
+  Json_dom_ptr dom;
+  size_t bytes{0};
+  uint64_t last_used{0};
+  std::chrono::steady_clock::time_point loaded_at;
+};
+
+std::mutex model_meta_cache_mutex;
+std::unordered_map<std::string, Model_meta_cache_entry> model_meta_cache;
+size_t model_meta_cache_bytes{0};
+uint64_t model_meta_cache_clock{0};
+
+// Caller holds model_meta_cache_mutex.
+void erase_meta_cache_entry(std::unordered_map<std::string, Model_meta_cache_entry>::iterator it) {
+  model_meta_cache_bytes -= it->second.bytes;
+  model_meta_cache.erase(it);
+}
+
+void cache_model_meta(const std::string &key, Json_wrapper &meta) {
+  String serialized;
+  if (meta.to_string(&serialized, false, "model_metadata", [] { assert(false); })) return;
+  const size_t bytes = serialized.length();
+  // Bigger than the whole budget: caching it would cost more than the catalog
+  // read it saves, so serve it straight from the table every time.
+  if (bytes == 0 || bytes > kModelMetaCacheMaxBytes) return;
+
+  Json_dom_ptr dom = meta.clone_dom();
+  if (!dom) return;
+
+  std::lock_guard<std::mutex> lock(model_meta_cache_mutex);
+  auto existing = model_meta_cache.find(key);
+  if (existing != model_meta_cache.end()) erase_meta_cache_entry(existing);
+
+  while (!model_meta_cache.empty() && (model_meta_cache.size() >= kModelMetaCacheMaxEntries ||
+                                       model_meta_cache_bytes + bytes > kModelMetaCacheMaxBytes)) {
+    auto victim = std::min_element(model_meta_cache.begin(), model_meta_cache.end(), [](const auto &l, const auto &r) {
+      return l.second.last_used < r.second.last_used;
+    });
+    erase_meta_cache_entry(victim);
+  }
+
+  model_meta_cache.emplace(
+      key, Model_meta_cache_entry{std::move(dom), bytes, ++model_meta_cache_clock, std::chrono::steady_clock::now()});
+  model_meta_cache_bytes += bytes;
+}
+}  // namespace
+
+void Utils::invalidate_model_meta_cache() {
+  std::lock_guard<std::mutex> lock(model_meta_cache_mutex);
+  model_meta_cache.clear();
+  model_meta_cache_bytes = 0;
+}
+
 int Utils::read_model_content(std::string &model_handle_name, Json_wrapper &options) {
   std::string model_user_name(current_thd->security_context()->user().str);
+  std::string meta_cache_key = model_user_name + "." + model_handle_name;
+
+  // Fast path: a hit costs neither a table open nor an MDL ticket, which is what
+  // makes the per-row ML_MODEL_PREDICT_ROW path affordable.
+  {
+    std::lock_guard<std::mutex> lock(model_meta_cache_mutex);
+    auto it = model_meta_cache.find(meta_cache_key);
+    if (it != model_meta_cache.end()) {
+      if (std::chrono::steady_clock::now() - it->second.loaded_at <= kModelMetaCacheTtl) {
+        Json_dom_ptr copy = it->second.dom ? it->second.dom->clone() : nullptr;
+        if (copy) {
+          it->second.last_used = ++model_meta_cache_clock;
+          options = Json_wrapper(std::move(copy));
+          return 0;
+        }
+      } else {
+        erase_meta_cache_entry(it);
+      }
+    }
+  }
+
   std::string model_schema_name = "ML_SCHEMA_" + model_user_name;
   auto cat_table_ptr = Utils::open_table_by_name(model_schema_name, "MODEL_CATALOG", TL_READ);
   if (!cat_table_ptr) return HA_ERR_GENERIC;
@@ -983,6 +1157,8 @@ int Utils::read_model_content(std::string &model_handle_name, Json_wrapper &opti
     }
     return HA_ERR_GENERIC;
   }
+
+  cache_model_meta(meta_cache_key, options);
   return 0;
 }
 
@@ -1011,9 +1187,15 @@ int Utils::read_model_object_content(std::string &model_handle_name, std::string
 
   struct Chunk {
     uint32_t chunk_id;
-    std::string data;
+    size_t offset;
+    size_t length;
   };
   std::vector<Chunk> chunks;
+  // Chunks are written by ascending id and read back in primary-key order, so
+  // the common case keeps one copy: append into model_content and remember where
+  // each chunk landed. Only a genuinely out-of-order catalog costs a re-copy.
+  bool in_order{true}, have_prev{false};
+  uint32_t prev_chunk_id{0};
 
   int scan_err = 0;
   for (;;) {
@@ -1042,19 +1224,26 @@ int Utils::read_model_object_content(std::string &model_handle_name, std::string
       String model_obj_buf;
       String *model_obj = model_obj_field->val_str(&model_obj_buf);
       if (!model_obj) continue;
-      // val_str() may return a pointer that aliases the row buffer, which the
-      // next ha_rnd_next() overwrites; deep-copy the bytes now.
-      chunks.push_back({chunk_id, std::string(model_obj->ptr(), model_obj->length())});
+
+      if (have_prev && chunk_id < prev_chunk_id) in_order = false;
+      have_prev = true;
+      prev_chunk_id = chunk_id;
+
+      // val_str() may alias the row buffer, which the next ha_rnd_next()
+      // overwrites, but append() copies the bytes out immediately.
+      chunks.push_back({chunk_id, model_content.size(), model_obj->length()});
+      model_content.append(model_obj->ptr(), model_obj->length());
     }
   }
   if (old_map) tmp_restore_column_map(cat_table_ptr->read_set, old_map);
 
-  std::sort(chunks.begin(), chunks.end(), [](const Chunk &a, const Chunk &b) { return a.chunk_id < b.chunk_id; });
-
-  size_t total = 0;
-  for (const auto &c : chunks) total += c.data.size();
-  model_content.reserve(total);
-  for (const auto &c : chunks) model_content.append(c.data);
+  if (!in_order) {
+    std::sort(chunks.begin(), chunks.end(), [](const Chunk &a, const Chunk &b) { return a.chunk_id < b.chunk_id; });
+    std::string ordered;
+    ordered.reserve(model_content.size());
+    for (const auto &c : chunks) ordered.append(model_content, c.offset, c.length);
+    model_content.swap(ordered);
+  }
 
   cat_table_ptr->file->ha_rnd_end();
   cat_table_ptr->file->ha_external_lock(current_thd, F_UNLCK);
@@ -1207,158 +1396,62 @@ double Utils::calculate_balanced_accuracy(size_t n_sample, const std::vector<dou
 
 int Utils::model_predict(int type, std::string &model_handle_name, size_t n_samples, size_t n_features,
                          std::vector<double> &testing_data, std::vector<double> &predictions) {
-  assert(type == C_API_PREDICT_NORMAL || type == C_API_PREDICT_RAW_SCORE || type == C_API_PREDICT_LEAF_INDEX ||
-         type == C_API_PREDICT_CONTRIB);
-  std::string score_params;
-  std::string model_content;
-  if (Utils::get_loaded_model_content(model_handle_name, model_content)) return HA_ERR_GENERIC;
+  auto model = Utils::get_prepared_model(model_handle_name);
+  if (!model) return HA_ERR_GENERIC;
 
-  BoosterHandle handler = Utils::load_trained_model_from_string(model_content);
-  if (!handler) {
-    std::ostringstream err;
-    err << model_handle_name << " can not load model from content string";
-    my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
-    return HA_ERR_GENERIC;
-  }
-
-  assert(sizeof(double) == 8);
-  // A multi-class booster emits one score per class per sample, so sizing the
-  // buffer at n_samples would let LGBM_BoosterPredictForMat write past its end.
-  int num_class{1};
-  if (LGBM_BoosterGetNumClasses(handler, &num_class) || num_class < 1) {
-    LGBM_BoosterFree(handler);
-    return HA_ERR_GENERIC;
-  }
-  predictions.resize(n_samples * static_cast<size_t>(num_class), 0.0);
-  int64_t out_len;
-  // clang-format off
-  auto ret = LGBM_BoosterPredictForMat(handler,    /* model handler */
-                            testing_data.data(),   /* test data */
-                            C_API_DTYPE_FLOAT64,             /* testing data type */
-                            n_samples,             /* # of testing data */
-                            n_features,            /* # of features of testing data */
-                            1,                     /* row-based format */
-                            type,                  /* What should be predicted */
-                            0,                     /* Start index of the iteration */
-                            -1,                    /* # of iteration for prediction, <= 0 no limit*/
-                            score_params.c_str(),  /* params */
-                            &out_len,              /* Length of output result[out] */
-                            predictions.data());   /* Pointer to array with predictions[out] */
-  //clang-format on
-  if (ret) {
-    LGBM_BoosterFree(handler);
-    return HA_ERR_GENERIC;
-  }
-
-  LGBM_BoosterFree(handler);
+  std::vector<double> scores;
+  if (Utils::ML_predict_batch(model, testing_data.data(), n_samples, n_features, type, scores)) return HA_ERR_GENERIC;
 
   // Every caller compares predictions[i] against the label of sample i, so
   // collapse the per-class scores of a multi-class model down to the predicted
   // class index. The scores are laid out row-major, [sample][class].
-  if (num_class > 1) {
-    const size_t stride = static_cast<size_t>(num_class);
+  if (model->num_class > 1) {
+    const size_t stride = static_cast<size_t>(model->num_class);
+    if (scores.size() < n_samples * stride) return HA_ERR_GENERIC;
+    predictions.resize(n_samples);
     for (size_t i = 0; i < n_samples; ++i) {
       const size_t row = i * stride;
       size_t best = 0;
       for (size_t c = 1; c < stride; ++c)
-        if (predictions[row + c] > predictions[row + best]) best = c;
+        if (scores[row + c] > scores[row + best]) best = c;
       predictions[i] = static_cast<double>(best);
     }
-    predictions.resize(n_samples);
+  } else {
+    predictions.assign(scores.begin(), scores.begin() + std::min(scores.size(), n_samples));
   }
 
   return 0;
 }
 
-int Utils::ML_predict_row(int type, std::string &model_handle_name,
-                         std::vector<ml_record_type_t> &input_data,
-                         txt2numeric_map_t& txt2numeric_dict,
-                         std::vector<double> &predictions) {
+void Utils::build_input_row(const std::vector<std::string> &feature_names, const OPTION_VALUE_T &input_values,
+                            std::vector<ml_record_type_t> &row, Json_object *echo_obj) {
+  row.clear();
+  row.reserve(feature_names.size());
+  for (const auto &feature_name : feature_names) {
+    std::string value{"0"};
+    // An empty vector here (e.g. a JSON array feature with no elements) would
+    // make operator[] read out of bounds, so require a value before taking one.
+    auto val_it = input_values.find(feature_name);
+    if (val_it != input_values.end() && !val_it->second.empty()) value = val_it->second[0];
+    row.push_back({feature_name, value});
+    if (echo_obj) echo_obj->add_alias(feature_name, new (std::nothrow) Json_string(value));
+  }
+}
 
-  assert(type == C_API_PREDICT_NORMAL || type == C_API_PREDICT_RAW_SCORE ||
-         type == C_API_PREDICT_LEAF_INDEX || type == C_API_PREDICT_CONTRIB);
+int Utils::ML_predict_row(int type, std::string &model_handle_name, std::vector<ml_record_type_t> &input_data,
+                          txt2numeric_map_t &txt2numeric_dict, std::vector<double> &predictions) {
+  assert(type == C_API_PREDICT_NORMAL || type == C_API_PREDICT_RAW_SCORE || type == C_API_PREDICT_LEAF_INDEX ||
+         type == C_API_PREDICT_CONTRIB);
 
-  std::string model_content;
-  if (Utils::get_loaded_model_content(model_handle_name, model_content)) return HA_ERR_GENERIC;
-
-  auto booster = Utils::load_trained_model_from_string(model_content);
-  if (!booster) return HA_ERR_GENERIC;
-
-  auto n_feature = input_data.size();
-  int64 num_results;
-
-  // First time, get the result dims.
-  const int MAX_TEMP_SIZE = 1024 * 1024;
-  std::vector<double> temp_predictions(MAX_TEMP_SIZE);
+  auto model = Utils::get_prepared_model(model_handle_name);
+  if (!model) return HA_ERR_GENERIC;
 
   std::vector<double> sample_data;
-  for (auto &field : input_data) {
-    auto value = 0.0;
-    if (txt2numeric_dict.find(field.first) == txt2numeric_dict.end()) {
-      // A NULL feature reaches us as the literal "null" (see parse_json), and
-      // std::stod throws on it. Nothing up the stack catches that, so letting
-      // it escape aborts the server. read_data() feeds a NULL numeric to
-      // training as 0.0, so fall back to the same value here.
-      value = Utils::to_double_or(field.second, 0.0);
-    } else {
-      // Text field, to find mapping value.
-      auto txt2num = txt2numeric_dict[field.first];
-      if (txt2num.size()) {
-        auto it = std::find(txt2num.begin(), txt2num.end(), field.second);
-        if (it != txt2num.end()) {
-          value = std::distance(txt2num.begin(), it);
-        } else { // unknown.
-          value = txt2num.size();
-        }
-      } else {
-        value = 0.0;
-      }
-    }
-    sample_data.push_back(value);
-  }
+  sample_data.reserve(input_data.size());
+  for (auto &field : input_data)
+    sample_data.push_back(Utils::ML_encode_feature(field.first, field.second, txt2numeric_dict));
 
-  // clang-format off
-  // The first time, gets the real result number.
-  auto ret = LGBM_BoosterPredictForMat(booster,
-                                       sample_data.data(),
-                                       C_API_DTYPE_FLOAT64,
-                                       1,
-                                       n_feature,
-                                       1,
-                                       type,
-                                       0,
-                                       -1,
-                                       "",
-                                       &num_results,
-                                       temp_predictions.data());
-
-  if (ret || num_results <= 0 || num_results > MAX_TEMP_SIZE) {
-    LGBM_BoosterFree(booster);
-    return HA_ERR_GENERIC;
-  }
-
-  predictions.resize(num_results);
-
-  if (num_results != (int64)temp_predictions.size()) { //re-caculate
-    ret = LGBM_BoosterPredictForMat(booster,
-                                   sample_data.data(),
-                                   C_API_DTYPE_FLOAT64,
-                                   1,
-                                   n_feature,
-                                   1,
-                                   type,
-                                   0,
-                                   -1,
-                                   "",
-                                   &num_results,
-                                   predictions.data());
-  } else {
-    predictions.assign(temp_predictions.begin(), temp_predictions.begin() + num_results);
-  }
-  // clang-format on
-
-  LGBM_BoosterFree(booster);
-  return ret ? HA_ERR_GENERIC : 0;
+  return Utils::ML_predict_batch(model, sample_data.data(), 1, sample_data.size(), type, predictions);
 }
 
 Json_object *Utils::compute_permutation_importance(std::string &model_content_json,

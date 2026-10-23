@@ -298,25 +298,17 @@ int ML_recommendation::train(THD *, Json_wrapper &model_object, Json_wrapper &mo
 }
 
 int ML_recommendation::load(THD *, std::string &model_content) {
-  std::lock_guard<std::mutex> lock(models_mutex);
   assert(model_content.length() && m_handler_name.length());
-  Loaded_models[m_handler_name] = model_content;
-  return 0;
+  return Utils::register_prepared_model(m_handler_name, std::move(model_content)) ? 0 : HA_ERR_GENERIC;
 }
 
 int ML_recommendation::load_from_file(THD *, std::string &model_file_full_path, std::string &model_handle_name) {
-  std::lock_guard<std::mutex> lock(models_mutex);
   if (!model_file_full_path.length() || !model_handle_name.length()) return HA_ERR_GENERIC;
-  Loaded_models[model_handle_name] = Utils::read_file(model_file_full_path);
-  return 0;
+  return Utils::register_prepared_model(model_handle_name, Utils::read_file(model_file_full_path)) ? 0 : HA_ERR_GENERIC;
 }
 
 int ML_recommendation::unload(THD *, std::string &model_handle_name) {
-  std::lock_guard<std::mutex> lock(models_mutex);
-  assert(!Loaded_models.empty());
-  auto cnt = Loaded_models.erase(model_handle_name);
-  assert(cnt == 1);
-  return (cnt == 1) ? 0 : HA_ERR_GENERIC;
+  return Utils::unregister_prepared_model(model_handle_name);
 }
 
 int ML_recommendation::import(THD *, Json_wrapper &, Json_wrapper &, std::string &) {
@@ -449,15 +441,7 @@ int ML_recommendation::predict_row(THD *, Json_wrapper &input_data, std::string 
   if (!root_obj) return HA_ERR_GENERIC;
 
   std::vector<ml_record_type_t> sample_data;
-  for (auto &feature_name : feature_names) {
-    std::string value{"0"};
-    // An empty vector here (e.g. a JSON array feature with no elements) would
-    // make operator[] read out of bounds, so require a value before taking one.
-    auto val_it = input_values.find(feature_name);
-    if (val_it != input_values.end() && !val_it->second.empty()) value = val_it->second[0];
-    sample_data.push_back({feature_name, value});
-    root_obj->add_alias(feature_name, new (std::nothrow) Json_string(value));
-  }
+  Utils::build_input_row(feature_names, input_values, sample_data, root_obj);
 
   std::vector<double> predictions;
   auto ret = Utils::ML_predict_row(C_API_PREDICT_NORMAL, model_handle_name, sample_data, txt2numeric, predictions);
