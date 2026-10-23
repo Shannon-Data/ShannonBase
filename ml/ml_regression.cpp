@@ -46,6 +46,7 @@
 #include "sql/table.h"
 
 #include "ml_info.h"
+#include "ml_predict_adapter.h"
 #include "ml_utils.h"
 #include "storage/innobase/include/ut0dbg.h"
 #include "storage/rapid_engine/include/rapid_config.h"
@@ -246,25 +247,18 @@ int ML_regression::train(THD *thd, Json_wrapper &model_object, Json_wrapper &mod
 }
 
 int ML_regression::load(THD *, std::string &model_content) {
-  std::lock_guard<std::mutex> lock(models_mutex);
   assert(model_content.length() && m_handler_name.length());
-  Loaded_models[m_handler_name] = model_content;
-  return 0;
+  // Moved: a model can be gigabytes, and the caller does not need the bytes.
+  return Utils::register_prepared_model(m_handler_name, std::move(model_content)) ? 0 : HA_ERR_GENERIC;
 }
 
 int ML_regression::load_from_file(THD *, std::string &model_file_full_path, std::string &model_handle_name) {
-  std::lock_guard<std::mutex> lock(models_mutex);
   if (!model_file_full_path.length() || !model_handle_name.length()) return HA_ERR_GENERIC;
-  Loaded_models[model_handle_name] = Utils::read_file(model_file_full_path);
-  return 0;
+  return Utils::register_prepared_model(model_handle_name, Utils::read_file(model_file_full_path)) ? 0 : HA_ERR_GENERIC;
 }
 
 int ML_regression::unload(THD *, std::string &model_handle_name) {
-  std::lock_guard<std::mutex> lock(models_mutex);
-  assert(!Loaded_models.empty());
-  auto cnt = Loaded_models.erase(model_handle_name);
-  assert(cnt == 1);
-  return (cnt == 1) ? 0 : HA_ERR_GENERIC;
+  return Utils::unregister_prepared_model(model_handle_name);
 }
 
 int ML_regression::import(THD *, Json_wrapper &, Json_wrapper &, std::string &) {
@@ -535,18 +529,10 @@ int ML_regression::explain(THD *thd, std::string &sch_tb_name, std::string &targ
     if (it != opt_values.end()) columns_to_explain = it->second;
   }
 
-  std::string model_content;
-  {
-    std::lock_guard<std::mutex> lock(models_mutex);
-    auto it = Loaded_models.find(model_handle_name);
-    if (it == Loaded_models.end()) {
-      std::ostringstream err;
-      err << "Model handle " << model_handle_name << " not loaded";
-      my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
-      return HA_ERR_GENERIC;
-    }
-    model_content = it->second;
-  }
+  // Shared handle: no second copy of a large model, and no deserialization per
+  // explain call. The registry keeps it alive even if another session unloads.
+  auto model = Utils::get_prepared_model(model_handle_name);
+  if (!model) return HA_ERR_GENERIC;
 
   Json_wrapper model_meta;
   if (Utils::read_model_content(model_handle_name, model_meta)) {
@@ -591,7 +577,7 @@ int ML_regression::explain(THD *thd, std::string &sch_tb_name, std::string &targ
 
   size_t n_features = features_name.size();
 
-  BoosterHandle booster = Utils::load_trained_model_from_string(model_content);
+  BoosterHandle booster = static_cast<BoosterHandle>(model->handle());
   if (!booster) {
     my_error(ER_ML_FAIL, MYF(0), "ML_EXPLAIN(regression): failed to load booster");
     return HA_ERR_GENERIC;
@@ -614,7 +600,6 @@ int ML_regression::explain(THD *thd, std::string &sch_tb_name, std::string &targ
 
       if (LGBM_BoosterPredictForMat(booster, train_data.data(), C_API_DTYPE_FLOAT64, n_sample, n_features,
                                     1 /*row_major*/, C_API_PREDICT_CONTRIB, 0, -1, "", &out_len, shap_out.data())) {
-        LGBM_BoosterFree(booster);
         my_error(ER_ML_FAIL, MYF(0), "ML_EXPLAIN(regression): SHAP prediction failed");
         return HA_ERR_GENERIC;
       }
@@ -629,7 +614,6 @@ int ML_regression::explain(THD *thd, std::string &sch_tb_name, std::string &targ
     case MODEL_PREDICTION_EXP_T::MODEL_PARTIAL_DEPENDENCE:
       explanation_type_str = "partial_dependence";
       if (columns_to_explain.empty()) {
-        LGBM_BoosterFree(booster);
         my_error(ER_ML_FAIL, MYF(0), "ML_EXPLAIN(regression): partial_dependence requires columns_to_explain");
         return HA_ERR_GENERIC;
       }
@@ -639,7 +623,6 @@ int ML_regression::explain(THD *thd, std::string &sch_tb_name, std::string &targ
     default:
       explanation_type_str = "permutation_importance";
       if (LGBM_BoosterFeatureImportance(booster, C_API_FEATURE_IMPORTANCE_SPLIT, 0, feature_importance.data())) {
-        LGBM_BoosterFree(booster);
         my_error(ER_ML_FAIL, MYF(0), "ML_EXPLAIN(regression): failed to calculate feature importance");
         return HA_ERR_GENERIC;
       }
@@ -648,14 +631,12 @@ int ML_regression::explain(THD *thd, std::string &sch_tb_name, std::string &targ
 
   ScopedJsonObject explanation_obj = ScopedJsonObject(new (std::nothrow) Json_object());
   if (!explanation_obj) {
-    LGBM_BoosterFree(booster);
     return HA_ERR_GENERIC;
   }
 
   // Normalize importance values to [0, 1] sum = 1
   Json_object *importance_obj = new (std::nothrow) Json_object();
   if (!importance_obj) {
-    LGBM_BoosterFree(booster);
     return HA_ERR_GENERIC;
   }
 
@@ -672,7 +653,6 @@ int ML_regression::explain(THD *thd, std::string &sch_tb_name, std::string &targ
       case MODEL_PREDICTION_EXP_T::PREDICT_SHAP: {
         ScopedJsonObject pred_explanation_obj = ScopedJsonObject(new (std::nothrow) Json_object());
         if (!pred_explanation_obj) {
-          LGBM_BoosterFree(booster);
           return HA_ERR_GENERIC;
         }
         calculate_prediction_shap(booster, n_sample, n_features, train_data, features_name, label_data,
@@ -685,7 +665,6 @@ int ML_regression::explain(THD *thd, std::string &sch_tb_name, std::string &targ
 
         ScopedJsonObject pred_perm_obj = ScopedJsonObject(new (std::nothrow) Json_object());
         if (!pred_perm_obj) {
-          LGBM_BoosterFree(booster);
           return HA_ERR_GENERIC;
         }
 
@@ -699,12 +678,9 @@ int ML_regression::explain(THD *thd, std::string &sch_tb_name, std::string &targ
       } break;
       default:
         my_error(ER_ML_FAIL, MYF(0), "ML_EXPLAIN(regression): unsupported prediction_explainer type");
-        LGBM_BoosterFree(booster);
         return HA_ERR_GENERIC;
     }
   }
-
-  LGBM_BoosterFree(booster);
 
   Json_wrapper explanation_wrapper(explanation_obj.release());
   String explanation_str;
@@ -766,19 +742,10 @@ int ML_regression::explain_row(THD * /*thd*/, Json_wrapper &exp_row, std::string
     return HA_ERR_GENERIC;
   }
 
-  std::string model_content;
-  {
-    std::lock_guard<std::mutex> lock(models_mutex);
-    auto it = Loaded_models.find(model_handle_name);
-    if (it == Loaded_models.end()) {
-      std::ostringstream err;
-      err << "ML_EXPLAIN_ROW(regression): model handle " << model_handle_name << " not loaded";
-      my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
-      return HA_ERR_GENERIC;
-    }
-    model_content = it->second;
-  }
-  BoosterHandle booster = Utils::load_trained_model_from_string(model_content);
+  // Shared handle: no copy of a large model and no deserialization per row.
+  auto model = Utils::get_prepared_model(model_handle_name);
+  if (!model) return HA_ERR_GENERIC;
+  BoosterHandle booster = static_cast<BoosterHandle>(model->handle());
   if (!booster) {
     my_error(ER_ML_FAIL, MYF(0), "ML_EXPLAIN_ROW(regression): failed to load booster");
     return HA_ERR_GENERIC;
@@ -808,7 +775,6 @@ int ML_regression::explain_row(THD * /*thd*/, Json_wrapper &exp_row, std::string
     int64_t out_len = 0;
     if (LGBM_BoosterPredictForMat(booster, feature_vec.data(), C_API_DTYPE_FLOAT64, 1, n_features, 1 /*row_major*/,
                                   C_API_PREDICT_NORMAL, 0, -1, "", &out_len, &baseline_pred)) {
-      LGBM_BoosterFree(booster);
       my_error(ER_ML_FAIL, MYF(0), "ML_EXPLAIN_ROW(regression): baseline prediction failed");
       return HA_ERR_GENERIC;
     }
@@ -821,7 +787,6 @@ int ML_regression::explain_row(THD * /*thd*/, Json_wrapper &exp_row, std::string
       int64_t out_len = 0;
       if (LGBM_BoosterPredictForMat(booster, feature_vec.data(), C_API_DTYPE_FLOAT64, 1, n_features, 1,
                                     C_API_PREDICT_CONTRIB, 0, -1, "", &out_len, shap_out.data())) {
-        LGBM_BoosterFree(booster);
         my_error(ER_ML_FAIL, MYF(0), "ML_EXPLAIN_ROW(regression): SHAP prediction failed");
         return HA_ERR_GENERIC;
       }
@@ -845,8 +810,6 @@ int ML_regression::explain_row(THD * /*thd*/, Json_wrapper &exp_row, std::string
       }
     } break;
   }
-
-  LGBM_BoosterFree(booster);
 
   size_t top_idx = 0;
   double max_abs = 0.0;
@@ -957,15 +920,7 @@ int ML_regression::predict_row(THD *, Json_wrapper &input_data, std::string &mod
   if (!root_obj) return HA_ERR_GENERIC;
 
   std::vector<ml_record_type_t> sample_data;
-  for (auto &feature_name : feature_names) {
-    std::string value{"0"};
-    // An empty vector here (e.g. a JSON array feature with no elements) would
-    // make operator[] read out of bounds, so require a value before taking one.
-    auto val_it = input_values.find(feature_name);
-    if (val_it != input_values.end() && !val_it->second.empty()) value = val_it->second[0];
-    sample_data.push_back({feature_name, value});
-    root_obj->add_alias(feature_name, new (std::nothrow) Json_string(value));
-  }
+  Utils::build_input_row(feature_names, input_values, sample_data, root_obj);
 
   std::vector<double> predictions;
   auto ret = Utils::ML_predict_row(C_API_PREDICT_NORMAL, model_handle_name, sample_data, txt2numeric, predictions);
@@ -1005,6 +960,11 @@ int ML_regression::predict_row(THD *, Json_wrapper &input_data, std::string &mod
   return 0;
 }
 
+namespace {
+// Rows per LightGBM call in ML_MODEL_PREDICT_TABLE(); bounds the row buffer.
+constexpr size_t kPredictBatchRows = 4096;
+}  // namespace
+
 // The one task implemented here, for the native ML_MODEL_PREDICT_TABLE(). It
 // only writes rows: the output table must already exist with its `prediction`
 // and `ml_results` columns. See ML_algorithm::predict_table.
@@ -1018,6 +978,9 @@ int ML_regression::predict_table(THD *, std::string &sch_tb_name, std::string &m
     my_error(ER_ML_FAIL, MYF(0), "Failed to parse options JSON");
     return HA_ERR_GENERIC;
   }
+
+  auto model = Utils::get_prepared_model(model_handle_name);
+  if (!model) return HA_ERR_GENERIC;
 
   std::string in_schema_name, in_table_name;
   split_sch_table(sch_tb_name, in_schema_name, in_table_name);
@@ -1068,22 +1031,12 @@ int ML_regression::predict_table(THD *, std::string &sch_tb_name, std::string &m
     return HA_ERR_GENERIC;
   }
 
-  // Map feature names to input table field indices
-  std::vector<uint> feature_field_indices;
-  for (const auto &feature_name : feature_names) {
-    bool found = false;
-    for (uint i = 0; i < in_tg.get()->s->fields; i++) {
-      if (strcmp(in_tg.get()->field[i]->field_name, feature_name.c_str()) == 0) {
-        feature_field_indices.push_back(i);
-        found = true;
-        break;
-      }
-    }
-    if (!found) {
-      err << "Input table missing required feature column: " << feature_name;
-      my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
-      return HA_ERR_GENERIC;
-    }
+  // Bind every model feature to an input column once.
+  PredictAdapter<Field **, std::vector<double>> adapter;
+  if (!adapter.extract(in_tg.get(), feature_names, txt2numeric)) {
+    err << "Input table is missing a required model feature column";
+    my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
+    return HA_ERR_GENERIC;
   }
 
   // Locate output-table columns by name
@@ -1103,6 +1056,20 @@ int ML_regression::predict_table(THD *, std::string &sch_tb_name, std::string &m
   std::unordered_map<std::string, uint> in_field_map;
   for (uint i = 0; i < in_tg.get()->s->fields; i++) in_field_map[in_tg.get()->field[i]->field_name] = i;
 
+  // Resolve the output columns that mirror an input column once, up front.
+  struct Mapped_column {
+    uint out_idx;
+    uint in_idx;
+  };
+  std::vector<Mapped_column> mapped_columns;
+  for (uint oi = 0; oi < out_tg.get()->s->fields; oi++) {
+    const char *out_fn = out_tg.get()->field[oi]->field_name;
+    if (strcmp(out_fn, "prediction") == 0 || strcmp(out_fn, "ml_results") == 0) continue;
+    auto it = in_field_map.find(out_fn);
+    if (it == in_field_map.end()) continue;
+    mapped_columns.push_back({oi, it->second});
+  }
+
   if (in_tg.get()->file->ha_rnd_init(true)) {
     my_error(ER_ML_FAIL, MYF(0), "Failed to initialize table scan");
     return HA_ERR_GENERIC;
@@ -1113,81 +1080,111 @@ int ML_regression::predict_table(THD *, std::string &sch_tb_name, std::string &m
       !meta_info[ML_KEYWORDS::target_column_name].empty())
     target_name = meta_info[ML_KEYWORDS::target_column_name][0];
 
-  int error_rows = 0;
-  int read_result;
+  const size_t n_features = adapter.width();
+  const size_t batch_rows = kPredictBatchRows;
+  const size_t n_mapped = mapped_columns.size();
+  const size_t stride = (model->num_class > 1) ? static_cast<size_t>(model->num_class) : 1;
 
-  while ((read_result = in_tg.get()->file->ha_rnd_next(in_tg.get()->record[0])) == 0) {
-    // Build sample from current input row
-    std::vector<ml_record_type_t> sample_data;
-    for (size_t i = 0; i < feature_names.size(); i++) {
-      Field *field = in_tg.get()->field[feature_field_indices[i]];
-      std::string value = "0";
-      if (!field->is_null()) {
-        String str_val;
-        field->val_str(&str_val);
-        value = str_val.c_ptr_safe();
-      }
-      sample_data.push_back({feature_names[i], value});
-    }
+  // One buffered row keeps only the text needed to rebuild the output row.
+  struct Buffered_value {
+    bool is_null{true};
+    std::string text;
+    const CHARSET_INFO *charset{nullptr};
+  };
+
+  std::vector<double> batch_features;        // batch_rows * n_features, row-major
+  std::vector<Buffered_value> batch_values;  // batch_rows * n_mapped
+  size_t buffered = 0;
+
+  int error_rows = 0;
+
+  auto flush_batch = [&]() {
+    if (buffered == 0) return;
 
     std::vector<double> preds;
-    if (Utils::ML_predict_row(C_API_PREDICT_NORMAL, model_handle_name, sample_data, txt2numeric, preds) ||
-        preds.empty()) {
-      error_rows++;
-      continue;
+    if (Utils::ML_predict_batch(model, batch_features.data(), buffered, n_features, C_API_PREDICT_NORMAL, preds) ||
+        preds.size() < buffered * stride) {
+      // Same as the per-row path: count the rows and keep the scan going.
+      error_rows += static_cast<int>(buffered);
+      buffered = 0;
+      batch_features.clear();
+      batch_values.clear();
+      return;
     }
-    double predicted_value = preds[0];
 
-    memset(out_tg.get()->record[0], 0, out_tg.get()->s->reclength);
+    for (size_t r = 0; r < buffered; r++) {
+      double predicted_value = PredictAdapter<Field **, std::vector<double>>::assemble(preds, r, stride);
 
-    // Copy matching input fields into the output table
-    for (uint oi = 0; oi < out_tg.get()->s->fields; oi++) {
-      const char *out_fn = out_tg.get()->field[oi]->field_name;
-      if (strcmp(out_fn, "prediction") == 0 || strcmp(out_fn, "ml_results") == 0) continue;
-      auto it = in_field_map.find(out_fn);
-      if (it == in_field_map.end()) continue;
-      Field *src = in_tg.get()->field[it->second];
-      Field *dst = out_tg.get()->field[oi];
-      if (src->is_null()) {
-        dst->set_null();
-      } else {
-        dst->set_notnull();
+      memset(out_tg.get()->record[0], 0, out_tg.get()->s->reclength);
+
+      const Buffered_value *values = batch_values.data() + r * n_mapped;
+      for (size_t c = 0; c < n_mapped; c++) {
+        Field *dst = out_tg.get()->field[mapped_columns[c].out_idx];
+        if (values[c].is_null) {
+          dst->set_null();
+        } else {
+          dst->set_notnull();
+          dst->store(values[c].text.data(), values[c].text.size(), values[c].charset);
+        }
+      }
+
+      // Write prediction column
+      {
+        std::string pred_str = std::to_string(predicted_value);
+        Field *pred_field = out_tg.get()->field[prediction_field_idx];
+        pred_field->set_notnull();
+        pred_field->store(pred_str.c_str(), pred_str.length(), &my_charset_utf8mb4_0900_ai_ci);
+      }
+
+      // Write ml_results JSON column
+      {
+        Json_object *ml_results_obj = new (std::nothrow) Json_object();
+        if (ml_results_obj) {
+          Json_object *preds_obj = new (std::nothrow) Json_object();
+          if (preds_obj) {
+            preds_obj->add_alias(target_name, new (std::nothrow) Json_double(predicted_value));
+            ml_results_obj->add_alias(ML_KEYWORDS::predictions, preds_obj);
+          }
+          Json_wrapper wrapper(ml_results_obj);
+          String json_str;
+          wrapper.to_string(&json_str, false, "predict_table", [] { assert(false); });
+          Field *ml_field = out_tg.get()->field[ml_results_field_idx];
+          ml_field->set_notnull();
+          ml_field->store(json_str.ptr(), json_str.length(), &my_charset_utf8mb4_0900_ai_ci);
+        }
+      }
+
+      if (out_tg.get()->file->ha_write_row(out_tg.get()->record[0])) error_rows++;
+    }
+
+    buffered = 0;
+    batch_features.clear();
+    batch_values.clear();
+  };
+
+  int read_result;
+  while ((read_result = in_tg.get()->file->ha_rnd_next(in_tg.get()->record[0])) == 0) {
+    // Append the current row to the batch: numeric columns are read directly.
+    adapter.encode(in_tg.get()->field, batch_features);
+
+    batch_values.resize((buffered + 1) * n_mapped);
+    Buffered_value *values = batch_values.data() + buffered * n_mapped;
+    for (size_t c = 0; c < n_mapped; c++) {
+      Field *src = in_tg.get()->field[mapped_columns[c].in_idx];
+      values[c].is_null = src->is_null();
+      values[c].text.clear();
+      values[c].charset = nullptr;
+      if (!values[c].is_null) {
         String tmp;
         src->val_str(&tmp);
-        dst->store(tmp.ptr(), tmp.length(), tmp.charset());
+        values[c].text.assign(tmp.ptr(), tmp.length());
+        values[c].charset = tmp.charset();
       }
     }
 
-    // Write prediction column
-    {
-      std::string pred_str = std::to_string(predicted_value);
-      Field *pred_field = out_tg.get()->field[prediction_field_idx];
-      pred_field->set_notnull();
-      pred_field->store(pred_str.c_str(), pred_str.length(), &my_charset_utf8mb4_0900_ai_ci);
-    }
-
-    // Write ml_results JSON column
-    {
-      Json_object *ml_results_obj = new (std::nothrow) Json_object();
-      if (ml_results_obj) {
-        Json_object *preds_obj = new (std::nothrow) Json_object();
-        if (preds_obj) {
-          preds_obj->add_alias(target_name, new (std::nothrow) Json_double(predicted_value));
-          ml_results_obj->add_alias(ML_KEYWORDS::predictions, preds_obj);
-        }
-        Json_wrapper wrapper(ml_results_obj);
-        String json_str;
-        wrapper.to_string(&json_str, false, "predict_table", [] { assert(false); });
-        Field *ml_field = out_tg.get()->field[ml_results_field_idx];
-        ml_field->set_notnull();
-        ml_field->store(json_str.ptr(), json_str.length(), &my_charset_utf8mb4_0900_ai_ci);
-      }
-    }
-
-    if (out_tg.get()->file->ha_write_row(out_tg.get()->record[0])) {
-      error_rows++;
-    }
+    if (++buffered == batch_rows) flush_batch();
   }
+  flush_batch();
 
   in_tg.get()->file->ha_rnd_end();
 

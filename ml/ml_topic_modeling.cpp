@@ -154,24 +154,17 @@ int ML_topic_modeling::train(THD *, Json_wrapper &model_object, Json_wrapper &mo
 }
 
 int ML_topic_modeling::load(THD *, std::string &model_content) {
-  std::lock_guard<std::mutex> lock(models_mutex);
   assert(model_content.length() && m_handler_name.length());
-  Loaded_models[m_handler_name] = model_content;
-  return 0;
+  return Utils::register_prepared_model(m_handler_name, std::move(model_content)) ? 0 : HA_ERR_GENERIC;
 }
 
 int ML_topic_modeling::load_from_file(THD *, std::string &model_file_full_path, std::string &model_handle_name) {
-  std::lock_guard<std::mutex> lock(models_mutex);
   if (!model_file_full_path.length() || !model_handle_name.length()) return HA_ERR_GENERIC;
-  Loaded_models[model_handle_name] = Utils::read_file(model_file_full_path);
-  return 0;
+  return Utils::register_prepared_model(model_handle_name, Utils::read_file(model_file_full_path)) ? 0 : HA_ERR_GENERIC;
 }
 
 int ML_topic_modeling::unload(THD *, std::string &model_handle_name) {
-  std::lock_guard<std::mutex> lock(models_mutex);
-  assert(!Loaded_models.empty());
-  auto cnt = Loaded_models.erase(model_handle_name);
-  return (cnt == 1) ? 0 : HA_ERR_GENERIC;
+  return Utils::unregister_prepared_model(model_handle_name);
 }
 
 int ML_topic_modeling::import(THD *, Json_wrapper &, Json_wrapper &, std::string &) {

@@ -382,26 +382,18 @@ int ML_classification::train(THD * /*thd*/, Json_wrapper &model_object, Json_wra
 }
 
 int ML_classification::load(THD * /*thd*/, std::string &model_content) {
-  std::lock_guard<std::mutex> lock(models_mutex);
   assert(model_content.length() && m_handler_name.length());
-  Loaded_models[m_handler_name] = model_content;
-  return 0;
+  return Utils::register_prepared_model(m_handler_name, std::move(model_content)) ? 0 : HA_ERR_GENERIC;
 }
 
 int ML_classification::load_from_file(THD * /*thd*/, std::string &model_file_full_path,
                                       std::string &model_handle_name) {
-  std::lock_guard<std::mutex> lock(models_mutex);
   if (!model_file_full_path.length() || !model_handle_name.length()) return HA_ERR_GENERIC;
-  Loaded_models[model_handle_name] = Utils::read_file(model_file_full_path);
-  return 0;
+  return Utils::register_prepared_model(model_handle_name, Utils::read_file(model_file_full_path)) ? 0 : HA_ERR_GENERIC;
 }
 
 int ML_classification::unload(THD * /*thd*/, std::string &model_handle_name) {
-  std::lock_guard<std::mutex> lock(models_mutex);
-  assert(!Loaded_models.empty());
-  auto cnt = Loaded_models.erase(model_handle_name);
-  assert(cnt == 1);
-  return (cnt == 1) ? 0 : HA_ERR_GENERIC;
+  return Utils::unregister_prepared_model(model_handle_name);
 }
 
 int ML_classification::import(THD *, Json_wrapper &, Json_wrapper &, std::string &) {
@@ -575,18 +567,10 @@ int ML_classification::explain(THD *thd, std::string &sch_tb_name, std::string &
     if (it != opt_values.end() && !it->second.empty()) target_value = it->second[0];
   }
 
-  std::string model_content;
-  {
-    std::lock_guard<std::mutex> lock(models_mutex);
-    auto it = Loaded_models.find(model_handle_name);
-    if (it == Loaded_models.end()) {
-      std::ostringstream err;
-      err << "Model handle " << model_handle_name << " not loaded";
-      my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
-      return HA_ERR_GENERIC;
-    }
-    model_content = it->second;
-  }
+  // Shared handle: no second copy of a large model, and no deserialization per
+  // explain call. The registry keeps it alive even if another session unloads.
+  auto model = Utils::get_prepared_model(model_handle_name);
+  if (!model) return HA_ERR_GENERIC;
 
   Json_wrapper model_meta;
   if (Utils::read_model_content(model_handle_name, model_meta)) {
@@ -629,7 +613,7 @@ int ML_classification::explain(THD *thd, std::string &sch_tb_name, std::string &
   }
 
   size_t n_features = features_name.size();
-  BoosterHandle booster = Utils::load_trained_model_from_string(model_content);
+  BoosterHandle booster = static_cast<BoosterHandle>(model->handle());
   if (!booster) {
     my_error(ER_ML_FAIL, MYF(0), "Failed to load model for ML_EXPLAIN");
     return HA_ERR_GENERIC;
@@ -659,7 +643,6 @@ int ML_classification::explain(THD *thd, std::string &sch_tb_name, std::string &
 
       if (LGBM_BoosterPredictForMat(booster, train_data.data(), C_API_DTYPE_FLOAT64, n_sample, n_features, 1,
                                     C_API_PREDICT_CONTRIB, 0, -1, "", &out_len, shap_out.data())) {
-        LGBM_BoosterFree(booster);
         my_error(ER_ML_FAIL, MYF(0), "SHAP prediction failed");
         return HA_ERR_GENERIC;
       }
@@ -678,7 +661,6 @@ int ML_classification::explain(THD *thd, std::string &sch_tb_name, std::string &
     case MODEL_PREDICTION_EXP_T::MODEL_PARTIAL_DEPENDENCE:
       explanation_type_str = "partial_dependence";
       if (columns_to_explain.empty()) {
-        LGBM_BoosterFree(booster);
         std::ostringstream err;
         err << "partial_dependence requires columns_to_explain";
         my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
@@ -691,7 +673,6 @@ int ML_classification::explain(THD *thd, std::string &sch_tb_name, std::string &
     default:
       explanation_type_str = "permutation_importance";
       if (LGBM_BoosterFeatureImportance(booster, C_API_FEATURE_IMPORTANCE_SPLIT, 0, feature_importance.data())) {
-        LGBM_BoosterFree(booster);
         my_error(ER_ML_FAIL, MYF(0), "Failed to calculate feature importance");
         return HA_ERR_GENERIC;
       }
@@ -701,13 +682,11 @@ int ML_classification::explain(THD *thd, std::string &sch_tb_name, std::string &
   // Build model explanation JSON object
   ScopedJsonObject explanation_obj(new (std::nothrow) Json_object());
   if (!explanation_obj) {
-    LGBM_BoosterFree(booster);
     return HA_ERR_GENERIC;
   }
 
   ScopedJsonObject importance_obj(new (std::nothrow) Json_object());
   if (!importance_obj) {
-    LGBM_BoosterFree(booster);
     return HA_ERR_GENERIC;
   }
 
@@ -726,7 +705,6 @@ int ML_classification::explain(THD *thd, std::string &sch_tb_name, std::string &
       case MODEL_PREDICTION_EXP_T::PREDICT_SHAP: {
         ScopedJsonObject pred_explanation_obj(new (std::nothrow) Json_object());
         if (!pred_explanation_obj) {
-          LGBM_BoosterFree(booster);
           return HA_ERR_GENERIC;
         }
         calculate_prediction_shap(booster, n_sample, n_features, train_data, features_name, label_data, n_class,
@@ -740,7 +718,6 @@ int ML_classification::explain(THD *thd, std::string &sch_tb_name, std::string &
 
         ScopedJsonObject pred_perm_obj(new (std::nothrow) Json_object());
         if (!pred_perm_obj) {
-          LGBM_BoosterFree(booster);
           return HA_ERR_GENERIC;
         }
 
@@ -755,13 +732,9 @@ int ML_classification::explain(THD *thd, std::string &sch_tb_name, std::string &
       default:
         // Unknown prediction explainer type - should not happen due to prior validation
         my_error(ER_ML_FAIL, MYF(0), "ML_EXPLAIN: unsupported prediction_explainer type");
-        LGBM_BoosterFree(booster);
         return HA_ERR_GENERIC;
     }
   }
-
-  // Serialize and update catalog
-  LGBM_BoosterFree(booster);
 
   Json_wrapper explanation_wrapper(explanation_obj.release());
   String explanation_str;
@@ -811,15 +784,7 @@ int ML_classification::predict_row(THD * /*thd*/, Json_wrapper &input_data, std:
   if (!root_obj) return HA_ERR_GENERIC;
 
   std::vector<ml_record_type_t> sample_data;
-  for (auto &feature_name : feature_names) {
-    std::string value{"0"};
-    // An empty vector here (e.g. a JSON array feature with no elements) would
-    // make operator[] read out of bounds, so require a value before taking one.
-    auto val_it = input_values.find(feature_name);
-    if (val_it != input_values.end() && !val_it->second.empty()) value = val_it->second[0];
-    sample_data.push_back({feature_name, value});
-    root_obj->add_alias(feature_name, new (std::nothrow) Json_string(value));
-  }
+  Utils::build_input_row(feature_names, input_values, sample_data, root_obj.get());
 
   // PREDICT_CONTRIB returns SHAP attribution values, not class probabilities.
   // PREDICT_NORMAL returns the model output (probability for binary, or
@@ -960,19 +925,10 @@ int ML_classification::explain_row(THD * /*thd*/, Json_wrapper &exp_row, std::st
     return HA_ERR_GENERIC;
   }
 
-  std::string model_content;
-  {
-    std::lock_guard<std::mutex> lock(models_mutex);
-    auto it = Loaded_models.find(model_handle_name);
-    if (it == Loaded_models.end()) {
-      std::ostringstream err;
-      err << "ML_EXPLAIN_ROW(classification): model handle " << model_handle_name << " not loaded";
-      my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
-      return HA_ERR_GENERIC;
-    }
-    model_content = it->second;
-  }
-  BoosterHandle booster = Utils::load_trained_model_from_string(model_content);
+  // Shared handle: no copy of a large model and no deserialization per row.
+  auto model = Utils::get_prepared_model(model_handle_name);
+  if (!model) return HA_ERR_GENERIC;
+  BoosterHandle booster = static_cast<BoosterHandle>(model->handle());
   if (!booster) {
     my_error(ER_ML_FAIL, MYF(0), "ML_EXPLAIN_ROW(classification): failed to load booster");
     return HA_ERR_GENERIC;
@@ -992,7 +948,6 @@ int ML_classification::explain_row(THD * /*thd*/, Json_wrapper &exp_row, std::st
   int64_t out_len = 0;
   if (LGBM_BoosterPredictForMat(booster, feature_vec.data(), C_API_DTYPE_FLOAT64, 1, n_features, 1 /*row_major*/,
                                 C_API_PREDICT_NORMAL, 0, -1, "", &out_len, baseline_out.data())) {
-    LGBM_BoosterFree(booster);
     my_error(ER_ML_FAIL, MYF(0), "ML_EXPLAIN_ROW(classification): baseline prediction failed");
     return HA_ERR_GENERIC;
   }
@@ -1017,7 +972,6 @@ int ML_classification::explain_row(THD * /*thd*/, Json_wrapper &exp_row, std::st
       std::vector<double> shap_out(shap_out_size);
       if (LGBM_BoosterPredictForMat(booster, feature_vec.data(), C_API_DTYPE_FLOAT64, 1, n_features, 1,
                                     C_API_PREDICT_CONTRIB, 0, -1, "", &out_len, shap_out.data())) {
-        LGBM_BoosterFree(booster);
         my_error(ER_ML_FAIL, MYF(0), "ML_EXPLAIN_ROW(classification): SHAP prediction failed");
         return HA_ERR_GENERIC;
       }
@@ -1050,8 +1004,6 @@ int ML_classification::explain_row(THD * /*thd*/, Json_wrapper &exp_row, std::st
       }
     } break;
   }
-
-  LGBM_BoosterFree(booster);
 
   size_t top_idx = 0;
   double max_abs = 0.0;
@@ -1306,28 +1258,15 @@ int ML_classification::explain_table(THD *) { return 0; }
 int ML_classification::predict_table(THD * /*thd*/, std::string &sch_tb_name, std::string &model_handle_name,
                                      std::string &out_sch_tb_name, Json_wrapper &options) {
   std::ostringstream err;
-  std::string model_content;
-  if (Utils::get_loaded_model_content(model_handle_name, model_content)) return HA_ERR_GENERIC;
-
-  BoosterHandle booster = Utils::load_trained_model_from_string(model_content);
-  if (!booster) return HA_ERR_GENERIC;
+  if (!Utils::get_prepared_model(model_handle_name)) return HA_ERR_GENERIC;
 
   Json_wrapper model_meta;
-  if (Utils::read_model_content(model_handle_name, model_meta)) {
-    LGBM_BoosterFree(booster);
-    return HA_ERR_GENERIC;
-  }
+  if (Utils::read_model_content(model_handle_name, model_meta)) return HA_ERR_GENERIC;
 
   OPTION_VALUE_T option_values, model_meta_option;
   std::string keystr;
-  if (!options.empty() && Utils::parse_json(options, option_values, keystr, 0)) {
-    LGBM_BoosterFree(booster);
-    return HA_ERR_GENERIC;
-  }
-  if (!model_meta.empty() && Utils::parse_json(model_meta, model_meta_option, keystr, 0)) {
-    LGBM_BoosterFree(booster);
-    return HA_ERR_GENERIC;
-  }
+  if (!options.empty() && Utils::parse_json(options, option_values, keystr, 0)) return HA_ERR_GENERIC;
+  if (!model_meta.empty() && Utils::parse_json(model_meta, model_meta_option, keystr, 0)) return HA_ERR_GENERIC;
 
   std::string remove_seen_str{"true"};
   auto remove_seen_it = option_values.find(ML_KEYWORDS::remove_seen);
@@ -1339,7 +1278,6 @@ int ML_classification::predict_table(THD * /*thd*/, std::string &sch_tb_name, st
   if (batch_size < 1 || batch_size > 1000) {
     err << sch_tb_name << " wrong batch_size option";
     my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
-    LGBM_BoosterFree(booster);
     return HA_ERR_GENERIC;
   }
 
@@ -1350,7 +1288,6 @@ int ML_classification::predict_table(THD * /*thd*/, std::string &sch_tb_name, st
   if (!in_table_ptr) {
     err << sch_tb_name << " open failed for ML";
     my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
-    LGBM_BoosterFree(booster);
     return HA_ERR_GENERIC;
   }
 
@@ -1362,7 +1299,6 @@ int ML_classification::predict_table(THD * /*thd*/, std::string &sch_tb_name, st
   std::string out_schema_name, out_table_name;
   split_sch_table(out_sch_tb_name, out_schema_name, out_table_name);
 
-  LGBM_BoosterFree(booster);
   return 0;
 }
 }  // namespace ML

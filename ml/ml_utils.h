@@ -113,6 +113,17 @@ class Utils {
                             txt2numeric_map_t &txt2numeric_dict, std::vector<double> &predictions);
 
   /**
+   * Build the model input row of one ML_MODEL_PREDICT_ROW call and echo the
+   * values into the result object. Shared by the four task implementations.
+   * @param[in] feature_names, the model features, in model order.
+   * @param[in] input_values, the user-supplied row.
+   * @param[out] row, name/value pairs fed to ML_predict_row().
+   * @param[out] echo_obj, receives the values back; may be nullptr.
+   */
+  static void build_input_row(const std::vector<std::string> &feature_names, const OPTION_VALUE_T &input_values,
+                              std::vector<ml_record_type_t> &row, Json_object *echo_obj);
+
+  /**
    * to build up a json format model metadata.
    * params defintion ref to: https://dev.mysql.com/doc/heatwave/en/mys-hwaml-ml-model-metadata.html
    * @retrun none-nullptr success, meta_data is the built meta inforation, otherwise failed.
@@ -128,12 +139,20 @@ class Utils {
       txt2numeric_map_t &txt2num_dict);
 
   /* get the model content via handle name, sucess return 0, otherise failed.
+   * Served from the in-process metadata cache when possible; the catalog table
+   * is only opened on a miss.
    * @param[in] model_handle_name,model user name.
    * @param[in] options, the model option we got. JSON format.
    * @retval 0 success.
    * @retval error code failed.
    */
   static int read_model_content(std::string &model_handle_name, Json_wrapper &options);
+
+  /* Drop every cached MODEL_CATALOG.MODEL_METADATA row. Called by the paths that
+   * write model catalogs (load/unload/import/train) so a cache hit can never be
+   * served after the row changed.
+   */
+  static void invalidate_model_meta_cache();
 
   /* get the model object content via handle name, sucess return 0, otherise failed.
    * @param[in] model_user_name, model user name.
@@ -151,16 +170,43 @@ class Utils {
   static BoosterHandle load_trained_model_from_string(std::string &model_content);
 
   /**
-   * fetch the content of a model that is currently loaded into Rapid.
-   * Never index Loaded_models directly: operator[] inserts an empty entry for a
-   * handle that was never loaded, and precheck_and_process_meta_info() then
-   * reports that handle as already loaded forever after.
-   * @param[in] model_handle_name, the handle name of the loaded model.
-   * @param[out] model_content, the serialized model.
-   * @retval 0 success.
-   * @retval error code the handle is not loaded (an error is raised).
+   * Deserialize the model once and register it under model_handle_name, so the
+   * prediction path never calls LGBM_BoosterLoadModelFromString again. The
+   * serialized bytes are released before returning; only their size is kept.
+   * @param[in] model_content, the serialized model, moved in and freed here.
+   * @return the registered model, or nullptr on failure (an error is raised).
    */
-  static int get_loaded_model_content(const std::string &model_handle_name, std::string &model_content);
+  static Prepared_model_ptr register_prepared_model(const std::string &model_handle_name, std::string model_content);
+
+  /**
+   * Fetch a registered model.
+   * @retval nullptr when the handle is not loaded (an error is raised).
+   */
+  static Prepared_model_ptr get_prepared_model(const std::string &model_handle_name);
+
+  /**
+   * Drop a model from the registry. In-flight statements keep their handle alive
+   * through their Prepared_model_ptr.
+   * @retval 0 success, HA_ERR_GENERIC when the handle was not loaded.
+   */
+  static int unregister_prepared_model(const std::string &model_handle_name);
+
+  /**
+   * Predict many rows with one LightGBM call.
+   * @param[in] model, the prepared model.
+   * @param[in] data, nrow * ncol doubles, row-major.
+   * @param[out] predictions, nrow * num_class values, row-major.
+   * @retval 0 success, otherwise failed.
+   */
+  static int ML_predict_batch(const Prepared_model_ptr &model, const double *data, size_t nrow, size_t ncol, int type,
+                              std::vector<double> &predictions);
+
+  /**
+   * Encode one feature value the way the model was trained: the txt2numeric
+   * dictionary when the column is categorical, otherwise a plain number.
+   */
+  static double ML_encode_feature(const std::string &feature_name, const std::string &value,
+                                  const txt2numeric_map_t &txt2numeric_dict);
 
   /**
    * parse an option value that must be a number. Option values come straight
