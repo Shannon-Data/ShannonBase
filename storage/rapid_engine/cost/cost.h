@@ -279,6 +279,34 @@ struct RapidCostConstants {
   static constexpr double kIndexScanImcuSkipDamping = 0.7;
 };
 
+// Compare only work changed by moving an aggregate across a unique INNER join.
+// Scans and the unchanged join side cancel out. Semantic proof belongs to the rule.
+struct AggregatePlacementCost {
+  double join_first{0};
+  double aggregate_first{0};
+  bool valid{false};
+
+  bool push_aggregation() const { return valid && aggregate_first < join_first * 0.8; }
+
+  static AggregatePlacementCost estimate(double input_rows, double joined_rows, double output_groups, bool build_side) {
+    if (!std::isfinite(input_rows) || !std::isfinite(joined_rows) || !std::isfinite(output_groups) || input_rows <= 0 ||
+        joined_rows <= 0 || joined_rows > input_rows || output_groups <= 0 || output_groups > joined_rows)
+      return {};
+
+    // The available group estimate is AFTER the join. Extrapolate with its match
+    // fraction; using it unchanged would underprice pre-aggregation precisely
+    // when a selective join removes most groups. This assumes uniform matches.
+    const double groups = std::min(input_rows, (output_groups / joined_rows) * input_rows);
+    const double join_row = build_side ? RapidCostConstants::kHashBuildPerRow + RapidCostConstants::kMemoryWritePerRow
+                                       : RapidCostConstants::kHashProbePerRow;
+    const double agg_row = RapidCostConstants::kVectorCpuPerRow * 2.0;
+    const double first = input_rows * join_row + joined_rows * agg_row;
+    const double pushed = input_rows * agg_row + groups * join_row;
+    if (!std::isfinite(first) || !std::isfinite(pushed)) return {};
+    return {first, pushed, true};
+  }
+};
+
 class RpdCostEstimator;
 class SelectivityEstimator : public MemoryObject {
  public:

@@ -344,6 +344,59 @@ GROUP BY o.customer_id WITH ROLLUP;
 --let $assert_query = SELECT o.customer_id, SUM(o.amount) AS total FROM orders o JOIN customers c ON o.customer_id = c.id GROUP BY o.customer_id WITH ROLLUP
 --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
+# Selective joins should filter raw rows before aggregation.
+# SUM-only shapes exercise placement eligibility (COUNT(*) has no source field).
+# Compare complete multisets, including AVG, DISTINCT, NULL and empty matches.
+--disable_query_log
+--disable_result_log
+--let $assert_queries_off = 1
+--let $assert_results_off = 1
+--let $placement_arm = 2
+while ($placement_arm) {
+  SET SESSION optimizer_switch='hypergraph_optimizer=off';
+  if ($placement_arm == 1) {
+    SET SESSION optimizer_switch='hypergraph_optimizer=on';
+  }
+  let $assert_query = SELECT o.customer_id,SUM(o.amount) FROM orders o JOIN customers c
+    ON o.customer_id=c.id WHERE c.id<=2 GROUP BY o.customer_id;
+  --let $assert_queries_off = 1
+  --let $assert_results_off = 1
+  --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+  let $assert_query = SELECT o.customer_id,AVG(NULLIF(o.amount,3)),SUM(DISTINCT
+    o.amount) FROM orders o JOIN customers c ON o.customer_id=c.id WHERE c.id<=2 GROUP
+    BY o.customer_id;
+  --let $assert_queries_off = 1
+  --let $assert_results_off = 1
+  --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+  let $assert_query = SELECT o.customer_id,SUM(o.amount) FROM orders o JOIN
+    customers_nonunique c ON o.customer_id=c.id WHERE c.id<=2 GROUP BY o.customer_id;
+  --let $assert_queries_off = 1
+  --let $assert_results_off = 1
+  --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+  let $assert_query = SELECT o.customer_id,SUM(o.amount) FROM orders o JOIN customers c
+    ON o.customer_id=c.id WHERE c.id=21 GROUP BY o.customer_id;
+  --let $assert_queries_off = 1
+  --let $assert_results_off = 1
+  --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+  let $assert_query = SELECT o.customer_id,SUM(o.amount) FROM orders o LEFT JOIN
+    customers c ON o.customer_id=c.id AND c.id<=2 GROUP BY o.customer_id;
+  --let $assert_queries_off = 1
+  --let $assert_results_off = 1
+  --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+  # Referencing customer_id inside MOD does not preserve the join key.
+  let $assert_query = SELECT MOD(o.customer_id,10),SUM(o.amount) FROM orders o
+    JOIN customers c ON o.customer_id=c.id WHERE c.region=1
+    GROUP BY MOD(o.customer_id,10);
+  --let $assert_queries_off = 1
+  --let $assert_results_off = 1
+  --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+  dec $placement_arm;
+}
+--let $assert_queries_off = 0
+--let $assert_results_off = 0
+--enable_result_log
+--enable_query_log
+
 SET SESSION optimizer_switch='hypergraph_optimizer=off';
 SET USE_SECONDARY_ENGINE=OFF;
 
