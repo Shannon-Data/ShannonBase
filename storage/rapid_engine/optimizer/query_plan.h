@@ -212,8 +212,8 @@ class HashJoin : public PlanNode {
 
   // child_multiplicity[i] describes children[i]: whether it is proven to contribute at most one
   // row per join-key match against the other child (see JoinMultiplicity above). Only proven for
-  // a child that is directly a ScanTable leaf bound by a UNIQUE NOT NULL index on the equi-join
-  // columns (see Utils::prove_at_most_one); anything else (a further join, aggregate, etc. as a
+  // a ScanTable leaf (optionally under Filters) with a UNIQUE NOT NULL equi-join index.
+  // See Utils::prove_at_most_one; anything else (a further join, aggregate, etc. as a
   // child) is left kUnknown rather than attempting transitive proof.
   std::array<JoinMultiplicity, 2> child_multiplicity{JoinMultiplicity::kUnknown, JoinMultiplicity::kUnknown};
 

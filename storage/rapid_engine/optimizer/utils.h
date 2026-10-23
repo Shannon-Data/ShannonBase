@@ -73,7 +73,7 @@ inline bool is_semijoin(const JoinPredicate *pred) {
 // Proves whether `child` (one side of a HashJoin) contributes at most one row per distinct
 // join-key value, by checking whether `join_conditions` bind a UNIQUE NOT NULL index of child's
 // table in full. Returns kUnknown (not kAtMostOne) whenever the proof cannot be established --
-// including when `child` is anything other than a directly-scanned ScanTable leaf, since a
+// Ordinary Filter chains preserve this proof. Other wrappers remain unknown: a
 // further join/aggregate as a child would require transitive proof this function does not
 // attempt. See JoinMultiplicity in query_plan.h for why this matters to rules like
 // AggregationPushDown/JoinReOrder.

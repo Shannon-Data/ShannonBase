@@ -42,3 +42,181 @@ TEST(RapidColumnarJoinWork, EmptyAndUnknownEstimates) {
     EXPECT_EQ(0, ColumnarJoinCostEstimator::estimate(128, unknown, 8, 9).key_bytes);
   }
 }
+
+using ShannonBase::Optimizer::AggregatePlacementCost;
+
+TEST(RapidAggregatePlacement, SelectiveJoinRemovesRowsBeforeGrouping) {
+  for (bool build : {false, true}) {
+    const auto cost = AggregatePlacementCost::estimate(100000, 1000, 100, build);
+    ASSERT_TRUE(cost.valid);
+    EXPECT_LT(cost.join_first, cost.aggregate_first);
+    EXPECT_FALSE(cost.push_aggregation());
+  }
+}
+
+TEST(RapidAggregatePlacement, DenseJoinWithFewGroupsStillPreAggregates) {
+  for (bool build : {false, true}) {
+    const auto cost = AggregatePlacementCost::estimate(100000, 100000, 100, build);
+    ASSERT_TRUE(cost.valid);
+    EXPECT_TRUE(cost.push_aggregation());
+  }
+}
+
+TEST(RapidAggregatePlacement, NoReductionAndUncertainEstimatesKeepJoinFirst) {
+  EXPECT_FALSE(AggregatePlacementCost::estimate(1000, 1000, 1000, false)
+                   .push_aggregation());
+  for (double bad : {-1.0, 0.0, std::numeric_limits<double>::infinity(),
+                     std::numeric_limits<double>::quiet_NaN()}) {
+    EXPECT_FALSE(AggregatePlacementCost::estimate(bad, 100, 10, false).valid);
+    EXPECT_FALSE(AggregatePlacementCost::estimate(1000, bad, 10, false).valid);
+    EXPECT_FALSE(AggregatePlacementCost::estimate(1000, 100, bad, false).valid);
+  }
+  EXPECT_FALSE(AggregatePlacementCost::estimate(100, 101, 10, false).valid);
+  EXPECT_FALSE(AggregatePlacementCost::estimate(100, 10, 11, false).valid);
+}
+
+TEST(RapidAggregatePlacement, RequiresMeaningfulSavingsAtExtremeCardinalities) {
+  // At full match rate, 50% as many groups saves only 16.7% on the probe side.
+  EXPECT_FALSE(AggregatePlacementCost::estimate(1000, 1000, 500, false)
+                   .push_aggregation());
+  EXPECT_TRUE(AggregatePlacementCost::estimate(1000, 1000, 500, true)
+                  .push_aggregation());
+  const auto huge = AggregatePlacementCost::estimate(
+      std::numeric_limits<double>::max(), std::numeric_limits<double>::max(),
+      std::numeric_limits<double>::max(), true);
+  EXPECT_TRUE(huge.valid);
+  EXPECT_FALSE(huge.push_aggregation());
+}
+
+// Exercise the actual tree rewrite as well as the arithmetic cost policy.
+#include "storage/rapid_engine/imcs/predicate.h"
+#include "sql/item_cmpfunc.h"
+#include "sql/item_sum.h"
+#include "storage/rapid_engine/optimizer/rules/condition_pushdown.h"
+#include "unittest/gunit/fake_table.h"
+#include "unittest/gunit/test_utils.h"
+
+namespace {
+using namespace ShannonBase::Optimizer;
+
+class RapidAggregatePlacementRule : public ::testing::Test {
+ protected:
+  void SetUp() override {
+    server.SetUp();
+    probe = std::make_unique<Fake_TABLE>(2, false);
+    build = std::make_unique<Fake_TABLE>(1, false);
+    probe->s->db = {"test", 4};
+    probe->s->table_name = {"probe", 5};
+    build->s->db = {"test", 4};
+    build->s->table_name = {"build", 5};
+  }
+  void TearDown() override {
+    build.reset();
+    probe.reset();
+    server.TearDown();
+  }
+  Plan make_plan(ha_rows joined, ha_rows groups) {
+    auto left = std::make_unique<ScanTable>();
+    left->source_table = probe.get();
+    left->estimated_rows = 100000;
+    auto right = std::make_unique<ScanTable>();
+    right->source_table = build.get();
+    right->estimated_rows = 1000;
+    auto *key = new Item_field(probe->field[0]);
+    auto join = std::make_unique<HashJoin>();
+    join->join_type = JoinType::INNER;
+    join->child_multiplicity[1] = JoinMultiplicity::kAtMostOne;
+    join->join_conditions.push_back(
+        new Item_func_eq(key, new Item_field(build->field[0])));
+    join->estimated_rows = joined;
+    join->children.push_back(std::move(left));
+    join->children.push_back(std::move(right));
+    auto agg = std::make_unique<LocalAgg>();
+    agg->estimated_rows = groups;
+    agg->group_by.push_back(key);
+    agg->aggregates.push_back(
+        new Item_sum_sum(POS(), new Item_field(probe->field[1]), false, nullptr));
+    agg->children.push_back(std::move(join));
+    return agg;
+  }
+  my_testing::Server_initializer server;
+  std::unique_ptr<Fake_TABLE> probe, build;
+};
+
+TEST_F(RapidAggregatePlacementRule, SelectiveJoinKeepsOriginalTree) {
+  Plan plan = make_plan(1000, 100);
+  auto *original = plan.get();
+  AggregationPushDown().apply(plan);
+  EXPECT_EQ(original, plan.get());
+  EXPECT_EQ(PlanNode::Type::HASH_JOIN, plan->children[0]->type());
+}
+
+TEST_F(RapidAggregatePlacementRule, DenseJoinMovesSameAggregateBelowProbe) {
+  Plan plan = make_plan(100000, 100);
+  auto *aggregate = plan.get();
+  AggregationPushDown().apply(plan);
+  ASSERT_EQ(PlanNode::Type::HASH_JOIN, plan->type());
+  EXPECT_EQ(aggregate, plan->children[0].get());
+  EXPECT_EQ(PlanNode::Type::SCAN, plan->children[0]->children[0]->type());
+}
+
+TEST_F(RapidAggregatePlacementRule, CheapPushStillRequiresUniqueInnerJoin) {
+  for (bool outer : {false, true}) {
+    Plan plan = make_plan(100000, 100);
+    auto *original = plan.get();
+    auto *join = static_cast<HashJoin *>(plan->children[0].get());
+    if (outer)
+      join->join_type = JoinType::OUTER;
+    else
+      join->child_multiplicity[1] = JoinMultiplicity::kUnknown;
+    AggregationPushDown().apply(plan);
+    EXPECT_EQ(original, plan.get());
+  }
+}
+TEST_F(RapidAggregatePlacementRule, ExpressionDoesNotPreserveJoinKey) {
+  Plan plan = make_plan(100000, 100);
+  auto *original = plan.get();
+  auto *agg = static_cast<LocalAgg *>(plan.get());
+  agg->group_by[0] = new Item_func_mod(agg->group_by[0], new Item_int(10));
+  AggregationPushDown().apply(plan);
+  EXPECT_EQ(original, plan.get());
+}
+
+TEST_F(RapidAggregatePlacementRule, DirectKeyAlongsideExpressionIsPreserved) {
+  Plan plan = make_plan(100000, 100);
+  auto *agg = static_cast<LocalAgg *>(plan.get());
+  agg->group_by.push_back(new Item_func_mod(agg->group_by[0], new Item_int(10)));
+  AggregationPushDown().apply(plan);
+  EXPECT_EQ(PlanNode::Type::HASH_JOIN, plan->type());
+}
+
+TEST_F(RapidAggregatePlacementRule, FilterPreservesOnlyProvenUniqueness) {
+  Plan plan = make_plan(100000, 100);
+  auto *join = static_cast<HashJoin *>(plan->children[0].get());
+  auto filter = std::make_unique<Filter>();
+  filter->children.push_back(std::move(join->children[1]));
+  auto outer = std::make_unique<Filter>();
+  outer->children.push_back(std::move(filter));
+  EXPECT_EQ(JoinMultiplicity::kUnknown,
+            Utils::prove_at_most_one(outer.get(), join->join_conditions));
+  build->create_index(build->field[0], HA_NOSAME);
+  EXPECT_EQ(JoinMultiplicity::kAtMostOne,
+            Utils::prove_at_most_one(outer.get(), join->join_conditions));
+  build->key_info[0].flags |= HA_NULL_PART_KEY;
+  EXPECT_EQ(JoinMultiplicity::kUnknown,
+            Utils::prove_at_most_one(outer.get(), join->join_conditions));
+  build->key_info[0].flags &= ~HA_NULL_PART_KEY;
+  join->children[1] = std::move(outer);
+  join->child_multiplicity[1] = Utils::prove_at_most_one(
+      join->children[1].get(), join->join_conditions);
+  AggregationPushDown().apply(plan);
+  EXPECT_EQ(PlanNode::Type::HASH_JOIN, plan->type());
+}
+
+TEST_F(RapidAggregatePlacementRule, EmptyFilterHasNoUniquenessProof) {
+  Filter filter;
+  EXPECT_EQ(JoinMultiplicity::kUnknown, Utils::prove_at_most_one(&filter, {}));
+  filter.children.push_back(nullptr);
+  EXPECT_EQ(JoinMultiplicity::kUnknown, Utils::prove_at_most_one(&filter, {}));
+}
+}  // namespace

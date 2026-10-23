@@ -33,7 +33,10 @@
 #include "sql/item_cmpfunc.h"
 #include "sql/item_func.h"
 #include "sql/item_sum.h"
+#include "sql/opt_trace.h"
 #include "sql/sql_class.h"
+
+#include "storage/rapid_engine/cost/cost.h"
 
 #include "storage/rapid_engine/handler/ha_shannon_rapid.h"
 #include "storage/rapid_engine/imcs/imcs.h"
@@ -873,6 +876,8 @@ Plan AggregationPushDown::create_two_phase_aggregation(Plan global_agg_node) {
  */
 Plan AggregationPushDown::try_push_below_join(Plan agg_node) {
   auto *agg = static_cast<LocalAgg *>(agg_node.get());
+  Opt_trace_object trace(&current_thd->opt_trace, "rapid_aggregation_placement");
+  trace.add("grouped", !agg->group_by.empty()).add("requires_order", agg->hash_output_order != nullptr);
 
   // No GROUP BY (implicit single-group aggregate), ROLLUP super-aggregate rows, or a hash output
   // order a parent depends on: none of these are provably safe to relocate below a join with the
@@ -952,6 +957,8 @@ Plan AggregationPushDown::try_push_below_join(Plan agg_node) {
 
   const int push_side = all_from_left ? 0 : 1;
   const int keep_side = 1 - push_side;
+  trace.add("exclusive_group_side", push_side)
+      .add("unique_other_side", hj->child_multiplicity[keep_side] == JoinMultiplicity::kAtMostOne);
 
   // keep_side must be proven to contribute at most one row per join-key value, or relocating
   // push_side's already-grouped rows below the join could re-duplicate them -- and Rapid's
@@ -964,6 +971,27 @@ Plan AggregationPushDown::try_push_below_join(Plan agg_node) {
 
   TABLE *push_table = get_pushable_scan_table(join->children[push_side].get());
   if (push_table == nullptr || !group_by_covers_join_keys(agg, hj->join_conditions, push_table)) {
+    agg->children[0] = std::move(join);
+    return agg_node;
+  }
+
+  // Issues: #966. Keep selective joins below aggregation unless pre-grouping
+  // has a clear cost advantage. This preserves the original semantic boundaries
+  // and leaves the scan directly reachable by the runtime Bloom filter.
+  auto rows = [](const PlanNode *node) -> double {
+    if (node->estimated_rows > 0 && node->estimated_rows != HA_POS_ERROR) return node->estimated_rows;
+    return node->original_path ? node->original_path->num_output_rows() : -1.0;
+  };
+  const auto placement = AggregatePlacementCost::estimate(rows(join->children[push_side].get()), rows(join.get()),
+                                                          rows(agg), push_side == 1);
+  bool push = placement.push_aggregation();
+  // A/B baseline after all semantic guards; never bypass correctness checks.
+  DBUG_EXECUTE_IF("rapid_aggregate_placement_legacy", { push = true; });
+  trace.add("estimates_valid", placement.valid)
+      .add("join_first_cost", placement.join_first)
+      .add("aggregate_first_cost", placement.aggregate_first)
+      .add("push_aggregation", push);
+  if (!push) {
     agg->children[0] = std::move(join);
     return agg_node;
   }
@@ -1079,25 +1107,16 @@ TABLE *AggregationPushDown::get_pushable_scan_table(const PlanNode *side) {
 bool AggregationPushDown::group_by_covers_join_keys(const LocalAgg *agg, const std::vector<Item *> &join_conditions,
                                                     TABLE *push_table) {
   std::unordered_set<uint> grouped_fields;
-  std::function<void(Item *)> collect = [&](Item *item) {
-    if (!item) return;
-    if (item->type() == Item::FIELD_ITEM) {
-      auto *field_item = static_cast<Item_field *>(item);
-      if (field_item->field != nullptr && field_item->field->table == push_table) {
-        grouped_fields.insert(field_item->field->field_index());
-      }
-    } else if (item->type() == Item::FUNC_ITEM || item->type() == Item::SUM_FUNC_ITEM) {
-      auto *func = static_cast<Item_func *>(item);
-      for (uint i = 0; i < func->argument_count(); i++) collect(func->arguments()[i]);
-    } else if (item->type() == Item::REF_ITEM) {
-      auto *ref = static_cast<Item_ref *>(item);
-      if (ref->ref_item()) collect(ref->ref_item());
-    } else {
-      Item *real = item->real_item();
-      if (real && real != item) collect(real);
-    }
-  };
-  for (auto *group_item : agg->group_by) collect(group_item);
+  // Merely referencing a key does not preserve it: GROUP BY k % 10 merges
+  // different k values. Accept only a direct field, possibly behind Item_ref.
+  for (Item *item : agg->group_by) {
+    if (item == nullptr) continue;
+    Item *real = item->real_item();
+    if (real == nullptr || real->type() != Item::FIELD_ITEM) continue;
+    const auto *field_item = down_cast<Item_field *>(real);
+    if (field_item->field != nullptr && field_item->field->table == push_table)
+      grouped_fields.insert(field_item->field->field_index());
+  }
 
   bool any_key_from_push_table = false;
   for (Item *cond : join_conditions) {

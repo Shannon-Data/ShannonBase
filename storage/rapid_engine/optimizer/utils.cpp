@@ -366,6 +366,12 @@ bool is_storage_index_predicate_safe(const Imcs::Predicate *predicate) {
 }
 
 JoinMultiplicity prove_at_most_one(const PlanNode *child, const std::vector<Item *> &join_conditions) {
+  // Selection only removes rows; it cannot invalidate a unique-key proof.
+  // Do not cross joins, grouping, materialization, or other wrappers.
+  while (child != nullptr && child->type() == PlanNode::Type::FILTER) {
+    if (child->children.size() != 1) return JoinMultiplicity::kUnknown;
+    child = child->children[0].get();
+  }
   if (child == nullptr || child->type() != PlanNode::Type::SCAN) return JoinMultiplicity::kUnknown;
 
   const auto *scan = static_cast<const ScanTable *>(child);

@@ -284,6 +284,9 @@ class AggregationPushDown : public Rule {
    * semantics) or a dependent hash_output_order (relocating below the join would scramble an
    * ordering a parent operator relies on).
    *
+   * After these proofs, require a cost benefit over joining first.
+   * Unknown estimates retain the original join-before-aggregate plan.
+   *
    * @param agg_node Aggregation plan node whose child is a HashJoin
    * @return The relocated plan (join becomes the new subtree root) if the rewrite applied,
    *         otherwise agg_node unchanged
