@@ -1,0 +1,60 @@
+# P5: capacity reuse and joint growth must avoid unnecessary ordered spill.
+--source include/have_debug.inc
+--source include/no_ps_protocol.inc
+SET use_secondary_engine=OFF;
+CREATE TABLE memory_b (id INT PRIMARY KEY, k INT, v INT) SECONDARY_ENGINE=rapid;
+CREATE TABLE memory_p (id INT PRIMARY KEY, k INT, v INT) SECONDARY_ENGINE=rapid;
+INSERT INTO memory_b WITH RECURSIVE n AS
+ (SELECT 1 AS i UNION ALL SELECT i+1 FROM n WHERE i<400) SELECT i,i,i*2 FROM n;
+INSERT INTO memory_p WITH RECURSIVE n AS
+ (SELECT 1 AS i UNION ALL SELECT i+1 FROM n WHERE i<800) SELECT i,MOD(i,500)+1,i FROM n;
+ALTER TABLE memory_b SECONDARY_LOAD;
+ALTER TABLE memory_p SECONDARY_LOAD;
+SET optimizer_switch='hypergraph_optimizer=on';
+SET secondary_engine_cost_threshold=0;
+SET use_secondary_engine=FORCED;
+SET debug='+d,rapid_operator_budget_floor';
+--let $budget = 32768
+while ($budget <= 65536) {
+  --eval SET join_buffer_size=$budget
+  SET debug='+d,rapid_hash_join_legacy_capacity_check';
+  --let $before = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_hash_join_spill_rows_total', Value, 1)
+  SELECT COUNT(*),SUM(b.v),SUM(p.v) FROM memory_p p JOIN memory_b b ON p.k=b.k;
+  --let $after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_hash_join_spill_rows_total', Value, 1)
+  --let $old_spill = `SELECT $after > $before`
+  --let $assert_query = SELECT COUNT(*),SUM(b.v),SUM(p.v) FROM memory_p p JOIN memory_b b ON p.k=b.k
+  --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+  SET debug='-d,rapid_hash_join_legacy_capacity_check';
+  --let $before = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_hash_join_spill_rows_total', Value, 1)
+  SELECT COUNT(*),SUM(b.v),SUM(p.v) FROM memory_p p JOIN memory_b b ON p.k=b.k;
+  --let $after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_hash_join_spill_rows_total', Value, 1)
+  --let $new_spill = `SELECT $after > $before`
+  --let $assert_query = SELECT COUNT(*),SUM(b.v),SUM(p.v) FROM memory_p p JOIN memory_b b ON p.k=b.k
+  --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+  if ($budget == 32768) {
+    if (!$new_spill) {
+      --die Insufficient memory must still spill
+    }
+  }
+  if ($budget >= 49152) {
+    if ($new_spill) {
+      --die Existing capacity or optional growth forced an avoidable spill
+    }
+  }
+  if ($budget == 49152) {
+    if (!$old_spill) {
+      --die Legacy baseline must reproduce the unnecessary spill
+    }
+  }
+  --echo budget=$budget legacy_spilled=$old_spill planned_spilled=$new_spill
+  --let $budget = `SELECT $budget + 16384`
+}
+# Re-execution must rebuild bounded state without inheriting retained buffers.
+SET join_buffer_size=49152;
+PREPARE memory_stmt FROM 'SELECT COUNT(*),SUM(b.v),SUM(p.v) FROM memory_p p JOIN memory_b b ON p.k=b.k';
+EXECUTE memory_stmt;
+EXECUTE memory_stmt;
+DEALLOCATE PREPARE memory_stmt;
+SET debug='-d,rapid_operator_budget_floor';
+SET use_secondary_engine=OFF;
+DROP TABLE memory_p,memory_b;
