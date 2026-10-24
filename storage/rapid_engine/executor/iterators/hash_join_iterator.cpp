@@ -647,53 +647,27 @@ void VectorizedHashJoinIterator::UpdateBuildMemoryPeak() {
   m_stats.build_memory_peak_bytes = std::max(m_stats.build_memory_peak_bytes, CurrentBuildMemoryUsage());
 }
 
-bool VectorizedHashJoinIterator::EnsureHashSlotCapacity(size_t required_slots) {
-  if (required_slots <= m_hash_slots.capacity()) return false;
-
-  size_t desired = GrowthCapacity(m_hash_slots.capacity(), required_slots);
-  auto allocation_bytes = [](size_t capacity) -> size_t {
-    if (capacity > std::numeric_limits<size_t>::max() / sizeof(HashSlot)) return std::numeric_limits<size_t>::max();
-    return capacity * sizeof(HashSlot);
-  };
-
-  // vector::reserve() holds the old allocation until the replacement allocation
-  // succeeds, so charge the complete new allocation as transient memory.
-  size_t bytes = allocation_bytes(desired);
-  if ((bytes == std::numeric_limits<size_t>::max() || BuildMemoryWouldExceed(bytes)) && desired != required_slots) {
-    desired = required_slots;
-    bytes = allocation_bytes(desired);
+bool VectorizedHashJoinIterator::EnsureHashCapacity(size_t required_slots, size_t required_keys, bool *overflowed) {
+  if (required_slots <= m_hash_slots.capacity() && required_keys <= m_hash_key_arena.capacity()) return false;
+  const auto plan = PlanHashJoinGrowth(CurrentBuildMemoryUsage(), m_build_memory.limit(), m_hash_slots.capacity(),
+                                       m_hash_key_arena.capacity(), required_slots, required_keys, sizeof(HashSlot));
+  if (!plan.fits) {
+    if (overflowed != nullptr) {
+      *overflowed = true;
+      return false;  // Let the caller use the existing ordered spill path.
+    }
+    return ReportBuildMemoryLimit();
   }
-  if (bytes == std::numeric_limits<size_t>::max() || BuildMemoryWouldExceed(bytes)) return ReportBuildMemoryLimit();
-
   try {
-    m_hash_slots.reserve(desired);
+    m_hash_slots.reserve(plan.slots);
+    m_hash_key_arena.reserve(plan.key_bytes);
   } catch (const std::bad_alloc &) {
-    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid vectorized hash join could not grow hash slots");
+    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid vectorized hash join could not grow hash storage");
     m_build_error = true;
     return true;
   }
-  UpdateBuildMemoryPeak();
-  return BuildMemoryWouldExceed(0) ? ReportBuildMemoryLimit() : false;
-}
-
-bool VectorizedHashJoinIterator::EnsureHashKeyCapacity(size_t required_bytes) {
-  if (required_bytes <= m_hash_key_arena.capacity()) return false;
-
-  size_t desired = GrowthCapacity(m_hash_key_arena.capacity(), required_bytes);
-  // As with slots, reserve() temporarily retains the old arena while allocating
-  // the replacement, so charge the complete requested capacity.
-  if (BuildMemoryWouldExceed(desired) && desired != required_bytes) desired = required_bytes;
-  if (BuildMemoryWouldExceed(desired)) return ReportBuildMemoryLimit();
-
-  try {
-    m_hash_key_arena.reserve(desired);
-  } catch (const std::bad_alloc &) {
-    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid vectorized hash join could not grow hash key arena");
-    m_build_error = true;
-    return true;
-  }
-  UpdateBuildMemoryPeak();
-  return BuildMemoryWouldExceed(0) ? ReportBuildMemoryLimit() : false;
+  m_stats.build_memory_peak_bytes = std::max(m_stats.build_memory_peak_bytes, plan.peak_bytes);
+  return false;
 }
 
 bool VectorizedHashJoinIterator::SupportsDirectBatchInput(const pack_rows::TableCollection &tables) const {
@@ -876,9 +850,6 @@ void VectorizedHashJoinIterator::GrowHashTableIfNeeded() {
 bool VectorizedHashJoinIterator::IndexBuildRow(size_t row_idx, bool *overflowed, uint64_t *out_hash) {
   if (overflowed != nullptr) *overflowed = false;
 
-  // Before computing bucket_idx below, so this row lands in the grown table.
-  GrowHashTableIfNeeded();
-
   const JoinKeyResult key_result = BuildJoinKey(m_build_columns, row_idx, m_build_input_tables);
   if (key_result == JoinKeyResult::ERROR) return true;
   if (key_result == JoinKeyResult::NULL_KEY) return false;  // never matches
@@ -886,18 +857,26 @@ bool VectorizedHashJoinIterator::IndexBuildRow(size_t row_idx, bool *overflowed,
   const uint64_t hash = XXH64(m_join_key_buffer.ptr(), m_join_key_buffer.length(), 0);
   if (out_hash != nullptr) *out_hash = hash;
 
-  const size_t bucket_idx = hash & (m_hash_table_size - 1);
   const size_t key_offset = m_hash_key_arena.size();
   const size_t key_length = m_join_key_buffer.length();
   if (key_length > std::numeric_limits<size_t>::max() - key_offset) return true;
 
-  const size_t slot_bytes = (m_hash_slots.size() + 1) * sizeof(HashSlot);
-  if (overflowed != nullptr &&
-      (BuildMemoryWouldExceed(slot_bytes) || BuildMemoryWouldExceed(key_offset + key_length))) {
-    *overflowed = true;
-    return false;
-  }
-  if (EnsureHashSlotCapacity(m_hash_slots.size() + 1) || EnsureHashKeyCapacity(key_offset + key_length)) return true;
+  // Debug-only baseline for paired spill measurements of the former check.
+  DBUG_EXECUTE_IF("rapid_hash_join_legacy_capacity_check", {
+    const size_t slot_bytes = (m_hash_slots.size() + 1) * sizeof(HashSlot);
+    if (overflowed != nullptr &&
+        (BuildMemoryWouldExceed(slot_bytes) || BuildMemoryWouldExceed(key_offset + key_length))) {
+      *overflowed = true;
+      return false;
+    }
+  });
+  if (EnsureHashCapacity(m_hash_slots.size() + 1, key_offset + key_length, overflowed)) return true;
+  if (overflowed != nullptr && *overflowed) return false;
+
+  // Reserve essential row/key storage before considering optional rehashing.
+  // Rehash retains insertion order and cannot change the exact join result.
+  GrowHashTableIfNeeded();
+  const size_t bucket_idx = hash & (m_hash_table_size - 1);
 
   if (key_length != 0) {
     const auto *begin = pointer_cast<const uchar *>(m_join_key_buffer.ptr());

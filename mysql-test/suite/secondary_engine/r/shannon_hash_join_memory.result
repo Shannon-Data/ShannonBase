@@ -1,0 +1,57 @@
+SET use_secondary_engine=OFF;
+CREATE TABLE memory_b (id INT PRIMARY KEY, k INT, v INT) SECONDARY_ENGINE=rapid;
+CREATE TABLE memory_p (id INT PRIMARY KEY, k INT, v INT) SECONDARY_ENGINE=rapid;
+INSERT INTO memory_b WITH RECURSIVE n AS
+(SELECT 1 AS i UNION ALL SELECT i+1 FROM n WHERE i<400) SELECT i,i,i*2 FROM n;
+INSERT INTO memory_p WITH RECURSIVE n AS
+(SELECT 1 AS i UNION ALL SELECT i+1 FROM n WHERE i<800) SELECT i,MOD(i,500)+1,i FROM n;
+ALTER TABLE memory_b SECONDARY_LOAD;
+ALTER TABLE memory_p SECONDARY_LOAD;
+SET optimizer_switch='hypergraph_optimizer=on';
+Warnings:
+Warning	1287	The hypergraph optimizer is highly experimental and is meant for testing only. Do not enable it unless you are a MySQL developer.
+SET secondary_engine_cost_threshold=0;
+SET use_secondary_engine=FORCED;
+SET debug='+d,rapid_operator_budget_floor';
+SET join_buffer_size=32768;
+SET debug='+d,rapid_hash_join_legacy_capacity_check';
+SELECT COUNT(*),SUM(b.v),SUM(p.v) FROM memory_p p JOIN memory_b b ON p.k=b.k;
+COUNT(*)	SUM(b.v)	SUM(p.v)
+700	251300	275450
+SET debug='-d,rapid_hash_join_legacy_capacity_check';
+SELECT COUNT(*),SUM(b.v),SUM(p.v) FROM memory_p p JOIN memory_b b ON p.k=b.k;
+COUNT(*)	SUM(b.v)	SUM(p.v)
+700	251300	275450
+budget=32768 legacy_spilled=1 planned_spilled=1
+SET join_buffer_size=49152;
+SET debug='+d,rapid_hash_join_legacy_capacity_check';
+SELECT COUNT(*),SUM(b.v),SUM(p.v) FROM memory_p p JOIN memory_b b ON p.k=b.k;
+COUNT(*)	SUM(b.v)	SUM(p.v)
+700	251300	275450
+SET debug='-d,rapid_hash_join_legacy_capacity_check';
+SELECT COUNT(*),SUM(b.v),SUM(p.v) FROM memory_p p JOIN memory_b b ON p.k=b.k;
+COUNT(*)	SUM(b.v)	SUM(p.v)
+700	251300	275450
+budget=49152 legacy_spilled=1 planned_spilled=0
+SET join_buffer_size=65536;
+SET debug='+d,rapid_hash_join_legacy_capacity_check';
+SELECT COUNT(*),SUM(b.v),SUM(p.v) FROM memory_p p JOIN memory_b b ON p.k=b.k;
+COUNT(*)	SUM(b.v)	SUM(p.v)
+700	251300	275450
+SET debug='-d,rapid_hash_join_legacy_capacity_check';
+SELECT COUNT(*),SUM(b.v),SUM(p.v) FROM memory_p p JOIN memory_b b ON p.k=b.k;
+COUNT(*)	SUM(b.v)	SUM(p.v)
+700	251300	275450
+budget=65536 legacy_spilled=0 planned_spilled=0
+SET join_buffer_size=49152;
+PREPARE memory_stmt FROM 'SELECT COUNT(*),SUM(b.v),SUM(p.v) FROM memory_p p JOIN memory_b b ON p.k=b.k';
+EXECUTE memory_stmt;
+COUNT(*)	SUM(b.v)	SUM(p.v)
+700	251300	275450
+EXECUTE memory_stmt;
+COUNT(*)	SUM(b.v)	SUM(p.v)
+700	251300	275450
+DEALLOCATE PREPARE memory_stmt;
+SET debug='-d,rapid_operator_budget_floor';
+SET use_secondary_engine=OFF;
+DROP TABLE memory_p,memory_b;

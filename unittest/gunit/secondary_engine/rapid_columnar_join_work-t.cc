@@ -296,3 +296,65 @@ TEST_F(RapidCardinalityObservation, InvalidatedAndCancelledExecutionsAreSkipped)
   EXPECT_EQ(std::string::npos, result.find("rapid_cardinality_observation"));
 }
 }  // namespace
+
+#include "storage/rapid_engine/executor/iterators/hash_join_iterator.h"
+
+using ShannonBase::Executor::PlanHashJoinGrowth;
+
+TEST(RapidHashJoinMemory, ReusesCapacityAtBudgetBoundary) {
+  const auto plan = PlanHashJoinGrowth(1000, 1000, 16, 128, 16, 128, 40);
+  ASSERT_TRUE(plan.fits);
+  EXPECT_EQ(1000, plan.peak_bytes);
+}
+
+TEST(RapidHashJoinMemory, AccountsForSequentialAllocationOverlap) {
+  // Slots: 80 old + 120 new. Then keys: 120 retained slots + 60 old + 100 new.
+  const auto plan = PlanHashJoinGrowth(140, 280, 2, 60, 3, 100, 40);
+  ASSERT_TRUE(plan.fits);
+  EXPECT_EQ(3, plan.slots);
+  EXPECT_EQ(100, plan.key_bytes);
+  EXPECT_EQ(280, plan.peak_bytes);
+  EXPECT_FALSE(PlanHashJoinGrowth(140, 279, 2, 60, 3, 100, 40).fits);
+}
+
+TEST(RapidHashJoinMemory, SpareSlotCapacityMustLeaveRoomForKeys) {
+  // Doubling slots alone fits, but would make the subsequent key reserve fail.
+  const auto plan = PlanHashJoinGrowth(3200, 8500, 64, 640, 65, 3000, 40);
+  ASSERT_TRUE(plan.fits);
+  EXPECT_EQ(65, plan.slots);
+  EXPECT_EQ(3000, plan.key_bytes);
+  EXPECT_EQ(6240, plan.peak_bytes);
+}
+
+TEST(RapidHashJoinMemory, KeepsGeometricGrowthWithHeadroom) {
+  const auto plan = PlanHashJoinGrowth(3200, 10000, 64, 640, 65, 641, 40);
+  ASSERT_TRUE(plan.fits);
+  EXPECT_EQ(128, plan.slots);
+  EXPECT_EQ(1280, plan.key_bytes);
+  EXPECT_EQ(8320, plan.peak_bytes);
+}
+
+TEST(RapidHashJoinMemory, RejectsOverflowAndInconsistentAccounting) {
+  const size_t max = std::numeric_limits<size_t>::max();
+  EXPECT_FALSE(PlanHashJoinGrowth(0, max, 0, 0, max, 0, 40).fits);
+  EXPECT_FALSE(PlanHashJoinGrowth(140, 139, 2, 60, 3, 100, 40).fits);
+  EXPECT_FALSE(PlanHashJoinGrowth(140, 1000, 3, 60, 3, 100, 40).fits);
+  EXPECT_FALSE(PlanHashJoinGrowth(0, max, 0, 0, 1, 1, 0).fits);
+}
+
+TEST(RapidHashJoinMemory, PlannedPeakMatchesBoundedAllocator) {
+  using ShannonBase::ResMgmt::BoundedMemoryResource;
+  for (size_t limit : {5800, 6400, 8320, 10000}) {
+    BoundedMemoryResource memory(limit, std::pmr::new_delete_resource());
+    std::pmr::vector<std::array<char, 40>> slots(&memory);
+    std::pmr::vector<char> keys(&memory);
+    slots.reserve(64);
+    keys.reserve(640);
+    const auto plan = PlanHashJoinGrowth(memory.used(), limit, slots.capacity(), keys.capacity(), 65, 1280, 40);
+    ASSERT_TRUE(plan.fits);
+    EXPECT_NO_THROW(slots.reserve(plan.slots));
+    EXPECT_NO_THROW(keys.reserve(plan.key_bytes));
+    EXPECT_EQ(plan.peak_bytes, memory.peak());
+    EXPECT_LE(memory.peak(), limit);
+  }
+}
