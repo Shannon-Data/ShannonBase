@@ -265,6 +265,7 @@ class VectorizedTableScanIterator final : public TableRowIterator, public BatchR
 
   mutable PerformanceMetrics m_metrics;  ///< Instance of performance metrics for this iterator
   VectorizedOperatorStats m_operator_stats;
+  CardinalityObservation m_cardinality;
 
   // When VectorizedAggregateIterator detects a GROUP BY boundary mid-batch,
   // it pushes the tail rows back here.  The next ReadBatch() drains this

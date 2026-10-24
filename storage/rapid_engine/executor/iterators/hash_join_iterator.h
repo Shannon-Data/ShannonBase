@@ -66,7 +66,7 @@ class VectorizedHashJoinIterator final : public RowIterator, public BatchReadabl
                              const std::vector<HashJoinCondition> &join_conditions, bool allow_spill_to_disk,
                              JoinType join_type, const Mem_root_array<Item *> &extra_conditions,
                              HashJoinInput first_input, bool probe_input_batch_mode, uint64_t *hash_table_generation,
-                             double estimated_probe_rows);
+                             double estimated_probe_rows, double estimated_output_rows = -1.0);
 
   ~VectorizedHashJoinIterator() override;
   bool Init() override;
@@ -126,6 +126,7 @@ class VectorizedHashJoinIterator final : public RowIterator, public BatchReadabl
   bool PushbackBatchTail(const std::pmr::vector<ColumnChunk> &chunks, size_t from_row, size_t total_rows) override;
 
  private:
+  CardinalityObservation m_cardinality;
   enum class State { BUILDING_HASH_TABLE = 0, PROBING_HASH_TABLE, END_OF_ROWS };
 
   struct OutputRow {

@@ -68,7 +68,8 @@ VectorizedTableScanIterator::VectorizedTableScanIterator(THD *thd, TABLE *mtable
       m_curr_row_in_batch{0},
       m_batch_exhausted{true},
       m_eof_reached{false},
-      m_fields_cached{false} {
+      m_fields_cached{false},
+      m_cardinality(expected_rows) {
   m_opt_batch_size = CalculateOptimalBatchSize(expected_rows);
   m_batch_size = m_opt_batch_size;
 
@@ -109,6 +110,7 @@ size_t VectorizedTableScanIterator::EstimateRowSize() const {
 }
 
 bool VectorizedTableScanIterator::Init() {
+  m_cardinality.Reset();
   DBUG_EXECUTE_IF("rapid_iterator_bad_alloc", {
     my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid iterator allocation failure");
     return true;
@@ -382,13 +384,17 @@ int VectorizedTableScanIterator::Read() {
   if (m_batch_exhausted && !m_eof_reached) {
     result = ReadNextBatch();
     if (result) {
-      if (result == HA_ERR_END_OF_FILE && m_curr_batch_size == 0) return HandleError(HA_ERR_END_OF_FILE);
+      if (result == HA_ERR_END_OF_FILE && m_curr_batch_size == 0) {
+        m_cardinality.Finish(thd(), "scan", m_operator_stats.rows_in);
+        return HandleError(HA_ERR_END_OF_FILE);
+      }
       if (result != HA_ERR_END_OF_FILE) return HandleError(result);
     }
   }
 
   if (m_curr_row_in_batch >= m_curr_batch_size) {
     if (m_eof_reached) {
+      m_cardinality.Finish(thd(), "scan", m_operator_stats.rows_in);
       return HandleError(HA_ERR_END_OF_FILE);
     } else {  // read the next batch.
       m_batch_exhausted = true;
@@ -527,7 +533,10 @@ int VectorizedTableScanIterator::ReadBatch(std::pmr::vector<ColumnChunk> &col_ch
     return 0;
   }
 
-  if (m_eof_reached) return HA_ERR_END_OF_FILE;
+  if (m_eof_reached) {
+    m_cardinality.Finish(thd(), "scan", m_operator_stats.rows_in);
+    return HA_ERR_END_OF_FILE;
+  }
 
   // RapidCursor addresses chunks directly by Field::field_index().
   if (col_chunks.size() != table()->s->fields) return HA_ERR_GENERIC;
@@ -557,6 +566,7 @@ int VectorizedTableScanIterator::ReadBatch(std::pmr::vector<ColumnChunk> &col_ch
       m_operator_stats.rows_out += rows_read;
       ++m_operator_stats.batches;
     }
+    m_cardinality.Finish(thd(), "scan", m_operator_stats.rows_in);
     return HA_ERR_END_OF_FILE;
   }
 
@@ -564,6 +574,7 @@ int VectorizedTableScanIterator::ReadBatch(std::pmr::vector<ColumnChunk> &col_ch
 
   if (rows_read == 0) {
     m_eof_reached = true;
+    m_cardinality.Finish(thd(), "scan", m_operator_stats.rows_in);
     return HA_ERR_END_OF_FILE;
   }
 
@@ -617,6 +628,7 @@ int VectorizedTableScanIterator::ReadFilteredBatch(std::pmr::vector<ColumnChunk>
 bool VectorizedTableScanIterator::PushbackBatchTail(const std::pmr::vector<ColumnChunk> &chunks, size_t from_row,
                                                     size_t total_rows) {
   assert(from_row <= total_rows);
+  if (from_row < total_rows) m_cardinality.Invalidate();
   // Unlike VectorizedFilterIterator/VectorizedHashJoinIterator, this call site doesn't track
   // bytes_copied for pushback (matches pre-existing behavior).
   return PushbackBatchTailShared(chunks, from_row, total_rows, &m_lookahead_chunks, &m_lookahead_start,

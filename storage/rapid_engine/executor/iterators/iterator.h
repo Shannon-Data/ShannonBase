@@ -125,6 +125,24 @@ struct VectorizedOperatorStats {
   }
 };
 
+/** Execution-local diagnostics only; never reused as optimizer statistics. */
+class CardinalityObservation {
+ public:
+  explicit CardinalityObservation(double estimate = -1.0) : m_estimate(estimate) {}
+  void Reset() {
+    m_finished = false;
+    m_invalid = false;
+  }
+  void Invalidate() { m_invalid = true; }
+  // A single observation per Init, only after the operator reaches EOF.
+  void Finish(THD *thd, const char *operator_name, size_t rows);
+
+ private:
+  double m_estimate;
+  bool m_finished{false};
+  bool m_invalid{false};
+};
+
 using filter_func_t = std::function<bool(const uchar *)>;
 
 inline void PrepareBudgetedString(String *value, std::pmr::vector<char> *buffer, size_t bytes) {
@@ -729,7 +747,8 @@ bool PushbackBatchTailShared(const std::pmr::vector<ColumnChunk> &chunks, size_t
  */
 class VectorizedFilterIterator final : public RowIterator, public BatchReadable {
  public:
-  VectorizedFilterIterator(THD *thd, unique_ptr_destroy_only<RowIterator> source, Item *condition);
+  VectorizedFilterIterator(THD *thd, unique_ptr_destroy_only<RowIterator> source, Item *condition,
+                           double estimated_rows = -1.0);
 
   bool Init() override;
   int Read() override;
@@ -776,6 +795,7 @@ class VectorizedFilterIterator final : public RowIterator, public BatchReadable 
   size_t m_lookahead_start{0};
   size_t m_lookahead_count{0};
   VectorizedOperatorStats m_stats;
+  CardinalityObservation m_cardinality;
 };
 }  // namespace Executor
 }  // namespace ShannonBase

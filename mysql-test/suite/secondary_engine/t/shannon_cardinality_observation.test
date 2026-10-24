@@ -1,0 +1,74 @@
+--source include/no_ps_protocol.inc
+# P4 starts with execution-local observations, without feedback reuse.
+SET use_secondary_engine=OFF;
+CREATE TABLE cardinality_t (id INT PRIMARY KEY, v INT NOT NULL) SECONDARY_ENGINE=rapid;
+INSERT INTO cardinality_t VALUES (1,1),(2,2),(3,3),(4,4),(5,5),(6,6),(7,7),(8,8);
+ALTER TABLE cardinality_t SECONDARY_LOAD;
+SET optimizer_switch='hypergraph_optimizer=on';
+SET secondary_engine_cost_threshold=0;
+SET use_secondary_engine=FORCED;
+SET optimizer_trace_max_mem_size=1048576;
+SET optimizer_trace='enabled=on';
+SELECT id FROM cardinality_t WHERE ABS(v)>5;
+SET @observation=(SELECT TRACE FROM information_schema.OPTIMIZER_TRACE);
+SELECT JSON_VALID(@observation) AS valid_trace,
+       JSON_SEARCH(@observation, 'one', 'scan', NULL, '$**.rapid_cardinality_observation.operator') IS NOT NULL AS observed_scan,
+       JSON_SEARCH(@observation, 'one', 'filter', NULL, '$**.rapid_cardinality_observation.operator') IS NOT NULL AS observed_filter;
+# Aggregate parent consumes the residual filter through ReadBatch.
+SELECT COUNT(*) FROM cardinality_t WHERE ABS(v)>5;
+SET @observation=(SELECT TRACE FROM information_schema.OPTIMIZER_TRACE);
+SELECT o.actual_rows FROM JSON_TABLE(@observation, '$**.rapid_cardinality_observation'
+  COLUMNS (op VARCHAR(16) PATH '$.operator', actual_rows INT PATH '$.actual_rows')) o
+WHERE o.op='filter';
+SELECT COUNT(*) FROM cardinality_t a JOIN cardinality_t b ON a.v=b.v;
+SET @observation=(SELECT TRACE FROM information_schema.OPTIMIZER_TRACE);
+SELECT JSON_SEARCH(@observation, 'one', 'hash_join', NULL, '$**.rapid_cardinality_observation.operator') IS NOT NULL AS observed_join;
+# Early stop must not report a complete residual filter.
+SELECT id FROM cardinality_t WHERE ABS(v)>0 LIMIT 1;
+SET @observation=(SELECT TRACE FROM information_schema.OPTIMIZER_TRACE);
+SELECT JSON_SEARCH(@observation, 'one', 'filter', NULL, '$**.rapid_cardinality_observation.operator') IS NULL AS incomplete_filter_skipped;
+# Re-execution must reset observations and use the current parameter.
+PREPARE cardinality_stmt FROM 'SELECT id FROM cardinality_t WHERE ABS(v)>?';
+SET @cutoff=5;
+EXECUTE cardinality_stmt USING @cutoff;
+SET @observation=(SELECT TRACE FROM information_schema.OPTIMIZER_TRACE);
+SELECT o.actual_rows, o.q_error >= 1 AS valid_error
+FROM JSON_TABLE(@observation, '$**.rapid_cardinality_observation'
+  COLUMNS (op VARCHAR(16) PATH '$.operator', actual_rows INT PATH '$.actual_rows',
+           q_error DOUBLE PATH '$.q_error')) o WHERE o.op='filter';
+SET @cutoff=100;
+EXECUTE cardinality_stmt USING @cutoff;
+SET @observation=(SELECT TRACE FROM information_schema.OPTIMIZER_TRACE);
+SELECT o.actual_rows, o.q_error >= 1 AS valid_error
+FROM JSON_TABLE(@observation, '$**.rapid_cardinality_observation'
+  COLUMNS (op VARCHAR(16) PATH '$.operator', actual_rows INT PATH '$.actual_rows',
+           q_error DOUBLE PATH '$.q_error')) o WHERE o.op='filter';
+DEALLOCATE PREPARE cardinality_stmt;
+SET optimizer_trace='enabled=off';
+SET use_secondary_engine=OFF;
+DROP TABLE cardinality_t;
+# Scan observations must retain pre-Bloom cardinality under actual rejection.
+CREATE TABLE cardinality_b (id INT PRIMARY KEY, k INT) SECONDARY_ENGINE=rapid;
+CREATE TABLE cardinality_p (id INT PRIMARY KEY, k INT) SECONDARY_ENGINE=rapid;
+SET cte_max_recursion_depth=3000;
+INSERT INTO cardinality_b WITH RECURSIVE n AS
+  (SELECT 1 AS i UNION ALL SELECT i+1 FROM n WHERE i<256) SELECT i,i FROM n;
+INSERT INTO cardinality_p WITH RECURSIVE n AS
+  (SELECT 1 AS i UNION ALL SELECT i+1 FROM n WHERE i<2048) SELECT i,i FROM n;
+ALTER TABLE cardinality_b SECONDARY_LOAD;
+ALTER TABLE cardinality_p SECONDARY_LOAD;
+SET use_secondary_engine=FORCED;
+--let $before = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_hash_join_bloom_scan_rejects_total', Value, 1)
+SET optimizer_trace='enabled=on';
+SELECT COUNT(*) FROM cardinality_p p JOIN cardinality_b b ON p.k=b.k;
+SET @observation=(SELECT TRACE FROM information_schema.OPTIMIZER_TRACE);
+SELECT o.actual_rows FROM JSON_TABLE(@observation, '$**.rapid_cardinality_observation'
+  COLUMNS (op VARCHAR(16) PATH '$.operator', actual_rows INT PATH '$.actual_rows')) o
+WHERE o.op='scan' ORDER BY o.actual_rows;
+--let $after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_hash_join_bloom_scan_rejects_total', Value, 1)
+if ($after <= $before) {
+  --die Expected runtime Bloom scan rejection
+}
+SET optimizer_trace='enabled=off';
+SET use_secondary_engine=OFF;
+DROP TABLE cardinality_p, cardinality_b;

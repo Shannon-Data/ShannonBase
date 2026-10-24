@@ -30,6 +30,7 @@
 #include "storage/rapid_engine/executor/iterators/iterator.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <limits>
 
@@ -37,11 +38,30 @@
 #include "sql/item.h"
 #include "sql/item_cmpfunc.h"
 #include "sql/item_func.h"
+#include "sql/opt_trace.h"
 #include "sql/sql_class.h"
 #include "sql/table.h"  // TABLE
 
 namespace ShannonBase {
 namespace Executor {
+void CardinalityObservation::Finish(THD *thd, const char *operator_name, size_t rows) {
+  if (m_finished || m_invalid) return;
+  m_finished = true;
+  if (thd->is_error() || thd->killed || !thd->opt_trace.is_started()) return;
+  Opt_trace_object wrapper(&thd->opt_trace);
+  Opt_trace_object observation(&thd->opt_trace, "rapid_cardinality_observation");
+  observation.add_alnum("operator", operator_name).add("actual_rows", static_cast<ulonglong>(rows));
+  const bool valid = std::isfinite(m_estimate) && m_estimate >= 0.0;
+  observation.add("estimate_known", valid);
+  if (valid) {
+    observation.add("estimated_rows", m_estimate);
+    // Clamp both sides to one: empty results remain finite and inspectable.
+    const double actual = std::max(1.0, static_cast<double>(rows));
+    const double estimated = std::max(1.0, m_estimate);
+    observation.add("q_error", std::max(actual, estimated) / std::min(actual, estimated));
+  }
+}
+
 ColumnChunk::ColumnChunk(Field *mysql_fld, size_t chunk_size, ResMgmt::BoundedMemoryResource *memory)
     : m_memory(memory), m_source_fld(mysql_fld), m_current_size(0), m_chunk_size(chunk_size) {
   if (mysql_fld) {
@@ -868,8 +888,8 @@ double ColumnChunkOper::Average<my_decimal>(const ColumnChunk &chunk, size_t row
 }
 
 VectorizedFilterIterator::VectorizedFilterIterator(THD *thd, unique_ptr_destroy_only<RowIterator> source,
-                                                   Item *condition)
-    : RowIterator(thd), m_source(std::move(source)), m_condition(condition) {}
+                                                   Item *condition, double estimated_rows)
+    : RowIterator(thd), m_source(std::move(source)), m_condition(condition), m_cardinality(estimated_rows) {}
 
 void VectorizedFilterIterator::CollectConditionFields() {
   m_condition_fields.clear();
@@ -1038,6 +1058,7 @@ bool VectorizedFilterIterator::EvaluateSimplePredicateBatch(const std::pmr::vect
 }
 
 bool VectorizedFilterIterator::Init() {
+  m_cardinality.Reset();
   DBUG_EXECUTE_IF("rapid_iterator_bad_alloc", {
     my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid iterator allocation failure");
     return true;
@@ -1064,7 +1085,10 @@ bool VectorizedFilterIterator::Init() {
 int VectorizedFilterIterator::Read() {
   for (;;) {
     const int result = m_source->Read();
-    if (result != 0) return result;
+    if (result != 0) {
+      if (result == -1) m_cardinality.Finish(thd(), "filter", m_stats.rows_out);
+      return result;
+    }
     ++m_stats.rows_in;
     if (m_condition == nullptr) {
       ++m_stats.rows_out;
@@ -1221,10 +1245,14 @@ int VectorizedFilterIterator::ReadBatch(std::pmr::vector<ColumnChunk> &col_chunk
       }
       rows_read = m_selection.size();
       m_stats.rows_out += rows_read;
+      if (result == HA_ERR_END_OF_FILE) m_cardinality.Finish(thd(), "filter", m_stats.rows_out);
       return result;
     }
 
-    if (result == HA_ERR_END_OF_FILE || input_rows == 0) return HA_ERR_END_OF_FILE;
+    if (result == HA_ERR_END_OF_FILE || input_rows == 0) {
+      m_cardinality.Finish(thd(), "filter", m_stats.rows_out);
+      return HA_ERR_END_OF_FILE;
+    }
   }
 }
 
@@ -1278,6 +1306,7 @@ bool PushbackBatchTailShared(const std::pmr::vector<ColumnChunk> &chunks, size_t
 
 bool VectorizedFilterIterator::PushbackBatchTail(const std::pmr::vector<ColumnChunk> &chunks, size_t from_row,
                                                  size_t total_rows) {
+  if (from_row < total_rows) m_cardinality.Invalidate();
   return PushbackBatchTailShared(chunks, from_row, total_rows, &m_lookahead_chunks, &m_lookahead_start,
                                  &m_lookahead_count, &m_stats.bytes_copied);
 }
