@@ -93,7 +93,8 @@ VectorizedHashJoinIterator::VectorizedHashJoinIterator(
     const Prealloced_array<TABLE *, 4> &probe_input_tables, bool store_rowids, table_map tables_to_get_rowid_for,
     size_t max_memory_available, const std::vector<HashJoinCondition> &join_conditions, bool allow_spill_to_disk,
     JoinType join_type, const Mem_root_array<Item *> &extra_conditions, HashJoinInput first_input,
-    bool probe_input_batch_mode, uint64_t *hash_table_generation, double estimated_probe_rows)
+    bool probe_input_batch_mode, uint64_t *hash_table_generation, double estimated_probe_rows,
+    double estimated_output_rows)
     : RowIterator(thd),
       // Recursive 16-way partitions need workspace independently of the build
       // buffer. This is a request; global/query/operator caps still take precedence.
@@ -105,6 +106,7 @@ VectorizedHashJoinIterator::VectorizedHashJoinIterator(
                      m_memory_reservation.bytes()),
       m_aux_memory(m_memory_reservation.bytes() / 4),
       m_build_memory(RetainedBuildLimit(max_memory_available, m_memory_reservation.bytes())),
+      m_cardinality(estimated_output_rows),
       m_build_input(std::move(build_input)),
       m_probe_input(std::move(probe_input)),
       m_build_input_tables(build_input_tables, store_rowids, store_rowids ? tables_to_get_rowid_for : 0, 0),
@@ -167,6 +169,7 @@ void VectorizedHashJoinIterator::PublishBloomStats() {
 }
 
 bool VectorizedHashJoinIterator::Init() try {
+  m_cardinality.Reset();
   PublishBloomStats();
   if (m_aux_initialization_failed) return true;
   if (!m_memory_reservation) {
@@ -718,13 +721,17 @@ int VectorizedHashJoinIterator::Read() try {
       ResetProbeCursor();
     }
 
-    if (m_state == State::END_OF_ROWS) return -1;
+    if (m_state == State::END_OF_ROWS) {
+      m_cardinality.Finish(thd(), "hash_join", m_stats.output_rows);
+      return -1;
+    }
 
     if (m_spilled) {
       bool have_row = false;
       if (NextMergedOutput(&have_row) != 0) return 1;
       if (!have_row) {
         m_state = State::END_OF_ROWS;
+        m_cardinality.Finish(thd(), "hash_join", m_stats.output_rows);
         return -1;
       }
       return 0;
@@ -2290,7 +2297,10 @@ int VectorizedHashJoinIterator::ReadBatch(std::pmr::vector<ColumnChunk> &col_chu
   }
 
   rows_read = produced;
-  if (produced == 0 && m_state == State::END_OF_ROWS) return HA_ERR_END_OF_FILE;
+  if (produced == 0 && m_state == State::END_OF_ROWS) {
+    m_cardinality.Finish(thd(), "hash_join", m_stats.output_rows);
+    return HA_ERR_END_OF_FILE;
+  }
   return 0;
 } catch (const std::bad_alloc &) {
   my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid hash join auxiliary memory exhausted");
@@ -2300,6 +2310,7 @@ int VectorizedHashJoinIterator::ReadBatch(std::pmr::vector<ColumnChunk> &col_chu
 bool VectorizedHashJoinIterator::PushbackBatchTail(const std::pmr::vector<ColumnChunk> &chunks, size_t from_row,
                                                    size_t total_rows) try {
   assert(from_row <= total_rows);
+  if (from_row < total_rows) m_cardinality.Invalidate();
   return PushbackBatchTailShared(chunks, from_row, total_rows, &m_lookahead_chunks, &m_lookahead_start,
                                  &m_lookahead_count, &m_stats.bytes_copied, &m_aux_memory);
 } catch (const std::bad_alloc &) {

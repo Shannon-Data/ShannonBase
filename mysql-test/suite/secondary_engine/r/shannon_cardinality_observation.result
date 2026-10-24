@@ -1,0 +1,97 @@
+SET use_secondary_engine=OFF;
+CREATE TABLE cardinality_t (id INT PRIMARY KEY, v INT NOT NULL) SECONDARY_ENGINE=rapid;
+INSERT INTO cardinality_t VALUES (1,1),(2,2),(3,3),(4,4),(5,5),(6,6),(7,7),(8,8);
+ALTER TABLE cardinality_t SECONDARY_LOAD;
+SET optimizer_switch='hypergraph_optimizer=on';
+Warnings:
+Warning	1287	The hypergraph optimizer is highly experimental and is meant for testing only. Do not enable it unless you are a MySQL developer.
+SET secondary_engine_cost_threshold=0;
+SET use_secondary_engine=FORCED;
+SET optimizer_trace_max_mem_size=1048576;
+SET optimizer_trace='enabled=on';
+SELECT id FROM cardinality_t WHERE ABS(v)>5;
+id
+6
+7
+8
+SET @observation=(SELECT TRACE FROM information_schema.OPTIMIZER_TRACE);
+SELECT JSON_VALID(@observation) AS valid_trace,
+JSON_SEARCH(@observation, 'one', 'scan', NULL, '$**.rapid_cardinality_observation.operator') IS NOT NULL AS observed_scan,
+JSON_SEARCH(@observation, 'one', 'filter', NULL, '$**.rapid_cardinality_observation.operator') IS NOT NULL AS observed_filter;
+valid_trace	observed_scan	observed_filter
+1	1	1
+SELECT COUNT(*) FROM cardinality_t WHERE ABS(v)>5;
+COUNT(*)
+3
+SET @observation=(SELECT TRACE FROM information_schema.OPTIMIZER_TRACE);
+SELECT o.actual_rows FROM JSON_TABLE(@observation, '$**.rapid_cardinality_observation'
+  COLUMNS (op VARCHAR(16) PATH '$.operator', actual_rows INT PATH '$.actual_rows')) o
+WHERE o.op='filter';
+actual_rows
+3
+SELECT COUNT(*) FROM cardinality_t a JOIN cardinality_t b ON a.v=b.v;
+COUNT(*)
+8
+SET @observation=(SELECT TRACE FROM information_schema.OPTIMIZER_TRACE);
+SELECT JSON_SEARCH(@observation, 'one', 'hash_join', NULL, '$**.rapid_cardinality_observation.operator') IS NOT NULL AS observed_join;
+observed_join
+1
+SELECT id FROM cardinality_t WHERE ABS(v)>0 LIMIT 1;
+id
+1
+SET @observation=(SELECT TRACE FROM information_schema.OPTIMIZER_TRACE);
+SELECT JSON_SEARCH(@observation, 'one', 'filter', NULL, '$**.rapid_cardinality_observation.operator') IS NULL AS incomplete_filter_skipped;
+incomplete_filter_skipped
+1
+PREPARE cardinality_stmt FROM 'SELECT id FROM cardinality_t WHERE ABS(v)>?';
+SET @cutoff=5;
+EXECUTE cardinality_stmt USING @cutoff;
+id
+6
+7
+8
+SET @observation=(SELECT TRACE FROM information_schema.OPTIMIZER_TRACE);
+SELECT o.actual_rows, o.q_error >= 1 AS valid_error
+FROM JSON_TABLE(@observation, '$**.rapid_cardinality_observation'
+  COLUMNS (op VARCHAR(16) PATH '$.operator', actual_rows INT PATH '$.actual_rows',
+q_error DOUBLE PATH '$.q_error')) o WHERE o.op='filter';
+actual_rows	valid_error
+3	1
+SET @cutoff=100;
+EXECUTE cardinality_stmt USING @cutoff;
+id
+SET @observation=(SELECT TRACE FROM information_schema.OPTIMIZER_TRACE);
+SELECT o.actual_rows, o.q_error >= 1 AS valid_error
+FROM JSON_TABLE(@observation, '$**.rapid_cardinality_observation'
+  COLUMNS (op VARCHAR(16) PATH '$.operator', actual_rows INT PATH '$.actual_rows',
+q_error DOUBLE PATH '$.q_error')) o WHERE o.op='filter';
+actual_rows	valid_error
+0	1
+DEALLOCATE PREPARE cardinality_stmt;
+SET optimizer_trace='enabled=off';
+SET use_secondary_engine=OFF;
+DROP TABLE cardinality_t;
+CREATE TABLE cardinality_b (id INT PRIMARY KEY, k INT) SECONDARY_ENGINE=rapid;
+CREATE TABLE cardinality_p (id INT PRIMARY KEY, k INT) SECONDARY_ENGINE=rapid;
+SET cte_max_recursion_depth=3000;
+INSERT INTO cardinality_b WITH RECURSIVE n AS
+(SELECT 1 AS i UNION ALL SELECT i+1 FROM n WHERE i<256) SELECT i,i FROM n;
+INSERT INTO cardinality_p WITH RECURSIVE n AS
+(SELECT 1 AS i UNION ALL SELECT i+1 FROM n WHERE i<2048) SELECT i,i FROM n;
+ALTER TABLE cardinality_b SECONDARY_LOAD;
+ALTER TABLE cardinality_p SECONDARY_LOAD;
+SET use_secondary_engine=FORCED;
+SET optimizer_trace='enabled=on';
+SELECT COUNT(*) FROM cardinality_p p JOIN cardinality_b b ON p.k=b.k;
+COUNT(*)
+256
+SET @observation=(SELECT TRACE FROM information_schema.OPTIMIZER_TRACE);
+SELECT o.actual_rows FROM JSON_TABLE(@observation, '$**.rapid_cardinality_observation'
+  COLUMNS (op VARCHAR(16) PATH '$.operator', actual_rows INT PATH '$.actual_rows')) o
+WHERE o.op='scan' ORDER BY o.actual_rows;
+actual_rows
+256
+2048
+SET optimizer_trace='enabled=off';
+SET use_secondary_engine=OFF;
+DROP TABLE cardinality_p, cardinality_b;

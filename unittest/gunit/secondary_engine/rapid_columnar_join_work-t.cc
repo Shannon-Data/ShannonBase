@@ -220,3 +220,79 @@ TEST_F(RapidAggregatePlacementRule, EmptyFilterHasNoUniquenessProof) {
   EXPECT_EQ(JoinMultiplicity::kUnknown, Utils::prove_at_most_one(&filter, {}));
 }
 }  // namespace
+
+#include "storage/rapid_engine/executor/iterators/iterator.h"
+#include "sql/opt_trace.h"
+
+namespace {
+class RapidCardinalityObservation : public ::testing::Test {
+ protected:
+  void SetUp() override { server.SetUp(); }
+  void TearDown() override { server.TearDown(); }
+  template <class F> std::string trace(F body) {
+    auto &context = server.thd()->opt_trace;
+    EXPECT_FALSE(context.start(true, false, false, false, -1, 1, 1024 * 1024,
+                               Opt_trace_context::default_features));
+    {
+      Opt_trace_object root(&context);
+      Opt_trace_array steps(&context, "steps");
+      body();
+    }
+    context.end();
+    Opt_trace_iterator it(&context);
+    Opt_trace_info info;
+    it.get_value(&info);
+    return std::string(info.trace_ptr, info.trace_length);
+  }
+  my_testing::Server_initializer server;
+};
+
+TEST_F(RapidCardinalityObservation, CompletesOnceAndResetsOnReexecution) {
+  ShannonBase::Executor::CardinalityObservation observation(10);
+  const auto first = trace([&] {
+    observation.Finish(server.thd(), "filter", 100);
+    observation.Finish(server.thd(), "filter", 999);
+  });
+  EXPECT_NE(std::string::npos, first.find("\"actual_rows\": 100"));
+  EXPECT_NE(std::string::npos, first.find("\"q_error\": 10"));
+  EXPECT_EQ(std::string::npos, first.find("999"));
+  observation.Reset();
+  const auto second = trace([&] { observation.Finish(server.thd(), "filter", 0); });
+  EXPECT_NE(std::string::npos, second.find("\"actual_rows\": 0"));
+  EXPECT_NE(std::string::npos, second.find("\"q_error\": 10"));
+}
+
+TEST_F(RapidCardinalityObservation, EmptyEstimateAndResultHaveFiniteError) {
+  ShannonBase::Executor::CardinalityObservation observation(0);
+  const auto result = trace([&] { observation.Finish(server.thd(), "scan", 0); });
+  EXPECT_NE(std::string::npos, result.find("\"actual_rows\": 0"));
+  EXPECT_NE(std::string::npos, result.find("\"q_error\": 1"));
+}
+
+TEST_F(RapidCardinalityObservation, UnknownEstimateHasNoErrorRatio) {
+  for (double estimate : {-1.0, std::numeric_limits<double>::infinity(),
+                          std::numeric_limits<double>::quiet_NaN()}) {
+    ShannonBase::Executor::CardinalityObservation observation(estimate);
+    const auto result = trace([&] { observation.Finish(server.thd(), "scan", 8); });
+    EXPECT_NE(std::string::npos, result.find("\"estimate_known\": false"));
+    EXPECT_EQ(std::string::npos, result.find("q_error"));
+  }
+}
+
+TEST_F(RapidCardinalityObservation, InvalidatedAndCancelledExecutionsAreSkipped) {
+  ShannonBase::Executor::CardinalityObservation observation(10);
+  observation.Invalidate();
+  auto result = trace([&] { observation.Finish(server.thd(), "scan", 8); });
+  EXPECT_EQ(std::string::npos, result.find("rapid_cardinality_observation"));
+  observation.Reset();
+  server.thd()->killed = THD::KILL_QUERY;
+  result = trace([&] { observation.Finish(server.thd(), "scan", 8); });
+  server.thd()->killed = THD::NOT_KILLED;
+  EXPECT_EQ(std::string::npos, result.find("rapid_cardinality_observation"));
+  observation.Reset();
+  server.thd()->get_stmt_da()->set_error_status(ER_UNKNOWN_ERROR, "test error", "HY000");
+  result = trace([&] { observation.Finish(server.thd(), "scan", 8); });
+  server.thd()->clear_error();
+  EXPECT_EQ(std::string::npos, result.find("rapid_cardinality_observation"));
+}
+}  // namespace
