@@ -25,8 +25,10 @@
 */
 #ifndef __SHANNONBASE_HASH_JOIN_ITERATOR_H__
 #define __SHANNONBASE_HASH_JOIN_ITERATOR_H__
+#include <algorithm>
 #include <array>
 #include <atomic>
+#include <cstddef>
 #include <cstdio>
 #include <limits>
 #include <memory>
@@ -45,6 +47,52 @@
 class Item_eq_base;
 namespace ShannonBase {
 namespace Executor {
+
+struct HashJoinGrowth {
+  bool fits{false};
+  size_t slots{0};
+  size_t key_bytes{0};
+  size_t peak_bytes{0};
+};
+
+// Plan the two sequential reserve() calls, including old/new overlap. Existing
+// capacity costs nothing extra. Optional spare capacity must not force a spill.
+inline HashJoinGrowth PlanHashJoinGrowth(size_t used, size_t limit, size_t slot_capacity, size_t key_capacity,
+                                         size_t required_slots, size_t required_keys, size_t slot_width) {
+  const size_t max = std::numeric_limits<size_t>::max();
+  if (slot_width == 0 || used > limit || slot_capacity > max / slot_width) return {};
+  const size_t old_slots = slot_capacity * slot_width;
+  if (old_slots > used || key_capacity > used - old_slots) return {};
+  const auto grow = [max](size_t current, size_t required) {
+    if (required <= current) return current;
+    size_t result = std::max<size_t>(64, current);
+    while (result < required) {
+      if (result > max / 2) return required;
+      result *= 2;
+    }
+    return result;
+  };
+  const auto attempt = [&](size_t slots, size_t keys) -> HashJoinGrowth {
+    if (slots > max / slot_width) return {};
+    size_t retained = used;
+    size_t peak = used;
+    if (slots > slot_capacity) {
+      const size_t bytes = slots * slot_width;
+      if (bytes > limit - retained) return {};
+      peak = retained + bytes;
+      retained += bytes - old_slots;
+    }
+    if (keys > key_capacity) {
+      if (keys > limit - retained) return {};
+      peak = std::max(peak, retained + keys);
+    }
+    return {true, slots, keys, peak};
+  };
+  auto plan = attempt(grow(slot_capacity, required_slots), grow(key_capacity, required_keys));
+  if (plan.fits) return plan;
+  return attempt(std::max(slot_capacity, required_slots), std::max(key_capacity, required_keys));
+}
+
 // this vectorized version of HashJoinIterator. The More Hash Iterator, refere to HashJoinIterator.
 class VectorizedHashJoinIterator final : public RowIterator, public BatchReadable {
   // Declared first so the reservation outlives all retained buffers.
@@ -315,8 +363,7 @@ class VectorizedHashJoinIterator final : public RowIterator, public BatchReadabl
   // Reusable scratch for one column's payload while reading a spilled row.
   std::pmr::vector<uchar> m_spill_row_buffer{&m_aux_memory};
   void UpdateBuildMemoryPeak();
-  bool EnsureHashSlotCapacity(size_t required_slots);
-  bool EnsureHashKeyCapacity(size_t required_bytes);
+  bool EnsureHashCapacity(size_t required_slots, size_t required_keys, bool *overflowed);
 
  private:
   unique_ptr_destroy_only<RowIterator> m_build_input;
