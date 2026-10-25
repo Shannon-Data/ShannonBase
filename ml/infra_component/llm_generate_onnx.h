@@ -85,6 +85,8 @@ class TextGenerator {
                           (OpenAI tool_calls, Anthropic tool_use)
         "content_filter"  refused by the provider's filter
         "stop_sequence"   hit a caller-supplied stop string
+        "cancelled"       local only: the session was killed mid-generation
+        "error"           local only: inference failed; LastError() has the text
         ""                the provider did not say
 
       Empty is a real answer and means "unknown", never "stop": guessing
@@ -139,6 +141,11 @@ class TextGenerator {
 
   inline bool Initialized() const { return m_initialized; }
   inline void Reset() { ClearKVCache(); }
+  inline const std::string &LastError() const { return m_error_string; }
+
+  /* Replace the per-call options on a reused generator. The loaded session,
+   * tokenizer and architecture detection are independent of them. */
+  inline void SetOptions(const GenerationOptions &opt) { m_gen_option = opt; }
 
   Result Generate(const std::string &userPrompt, int maxNewTokens = 2048);
 

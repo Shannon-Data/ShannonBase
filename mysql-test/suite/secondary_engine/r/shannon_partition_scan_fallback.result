@@ -37,6 +37,8 @@ id	v
 15	600
 20	700
 25	800
+# ===== Partition pruning boundaries =====
+set session optimizer_switch='hypergraph_optimizer=off';
 set session optimizer_switch = default;
 use test;
 drop database sh_pt;

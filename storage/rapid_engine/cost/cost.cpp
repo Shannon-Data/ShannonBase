@@ -1653,6 +1653,11 @@ bool ModifyIndexScanCost(THD *thd, const JoinHypergraph &graph [[maybe_unused]],
 
   double estimated_rows = 0.0;
   double index_cost = 0.0;
+  // Native REF/EQ_REF iterators reconstruct projected TABLE fields one row at
+  // a time. A returned row pays for every projected cell, even when its ART
+  // lookup is cheap. Do not price these as index_next_batch().
+  const size_t projected_cols = table->read_set ? std::max<uint>(1, bitmap_bits_set(table->read_set))
+                                                : (table_meta ? std::max<size_t>(1, table_meta->fields.size()) : 1);
 
   if (path->type == AccessPath::EQ_REF) {
     // The cardinality is right -- one row -- but the price was the B-tree price
@@ -1662,7 +1667,6 @@ bool ModifyIndexScanCost(THD *thd, const JoinHypergraph &graph [[maybe_unused]],
     // what lets the hypergraph optimizer drive a nested loop per outer row
     // against a table it should be scanning once.
     estimated_rows = 1.0;
-    const size_t projected_cols = table_meta ? std::max<size_t>(1, table_meta->fields.size()) : 1;
     if (index != nullptr) {
       constexpr double kArtProbeCost = 0.001;
       index_cost = kArtProbeCost + projected_cols * RapidCostConstants::kVectorDecompCostPerCell +
@@ -1689,9 +1693,11 @@ bool ModifyIndexScanCost(THD *thd, const JoinHypergraph &graph [[maybe_unused]],
         std::max(1.0, std::min(estimated_rows, total_rows * RapidCostConstants::kIndexLookupMaxSelectivity));
     double art_range_cost =
         RapidCostConstants::kArtRangeSetupCost + estimated_rows * RapidCostConstants::kArtRangePerRow;
-    double batch_fetch_cost =
-        estimated_rows * RapidCostConstants::kVectorCpuPerRow * RapidCostConstants::kArtBatchFetchFactor;
-    index_cost = art_range_cost + batch_fetch_cost;
+    const double row_fetch_cost = estimated_rows * (RapidCostConstants::kVectorCpuPerRow +
+                                                    projected_cols * RapidCostConstants::kVectorDecompCostPerCell);
+    index_cost = index != nullptr
+                     ? art_range_cost + row_fetch_cost
+                     : static_cast<double>(total_rows) * RapidCostConstants::kVectorCpuPerRow + row_fetch_cost;
   } else {  // INDEX_SCAN / INDEX_RANGE_SCAN
     double selectivity = 1.0;
     if (path->type == AccessPath::INDEX_RANGE_SCAN) {
@@ -1960,7 +1966,7 @@ bool WideningLookupPays(THD *thd, const AccessPath *lookup, double outer_rows) {
   const double rows = (table->file->stats.records != HA_POS_ERROR) ? static_cast<double>(table->file->stats.records)
                                                                    : lookup->num_output_rows();
   const double widened = cost + VectorizedHashJoinCost(rows, outer_rows);
-  const double probed = outer_rows * lookup->cost() * RapidCostConstants::kNestedLoopImcsFactor;
+  const double probed = outer_rows * lookup->cost();
   return widened <= probed;
 }
 
@@ -2031,17 +2037,10 @@ bool ModifyNestedLoopJoinCost(THD *thd, const JoinHypergraph &graph, AccessPath 
     return false;
   }
 
-  // kNestedLoopImcsFactor credits the batched inner scan -- the work this join
-  // re-drives once per outer row. It must not scale outer_cost: that subtree is
-  // already fully priced, and discounting it lets the join come out cheaper
-  // than its own input. TPC-H q9 showed exactly that, a nested loop at
-  // cost=1315 sitting on a sort costing 2180 (0.6 * 2180). The hypergraph
-  // optimizer ranks subplans by cost, so a join operator that *lowers* cost
-  // below its input dominates every alternative: hash joins, which are charged
-  // outer_cost + inner_cost + join_cost with no discount, can never win, and
-  // the plan degenerates into nested loops driving per-row index lookups --
-  // the one shape a columnar engine is worst at.
-  double nlj_cost = outer_cost + (outer_rows * inner_cost * RapidCostConstants::kNestedLoopImcsFactor);
+  // Child costs already include any vectorized execution benefit. Re-driving
+  // that child does not earn another discount, particularly for FILTER(REF)
+  // and EQ_REF, which use scalar index reads and TABLE row reconstruction.
+  double nlj_cost = outer_cost + outer_rows * inner_cost;
   if (convertible && !inner_is_lookup)
     nlj_cost = std::max(nlj_cost, outer_cost + inner_cost + VectorizedHashJoinCost(inner_rows, outer_rows));
 

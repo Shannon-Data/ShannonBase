@@ -196,6 +196,23 @@ UPDATE LINEITEM l
   SET l.l_shipdate = '1994-06-15'
   WHERE p.p_name LIKE 'forest%' AND n.n_name = 'CANADA';
 
+# Q8 used to return two zero market shares: there were no BRAZIL suppliers
+# among its qualifying rows. A wrong denominator was then invisible to parity.
+# Seed a qualifying supplier in EACH year without changing table cardinality.
+UPDATE SUPPLIER s
+JOIN (
+  SELECT MIN(l.l_suppkey) AS supplier_no
+  FROM LINEITEM l JOIN PART p ON p.p_partkey=l.l_partkey
+    JOIN ORDERS o ON o.o_orderkey=l.l_orderkey
+    JOIN CUSTOMER c ON c.c_custkey=o.o_custkey
+    JOIN NATION n ON n.n_nationkey=c.c_nationkey
+    JOIN REGION r ON r.r_regionkey=n.n_regionkey
+  WHERE r.r_name='AMERICA' AND p.p_type='ECONOMY ANODIZED STEEL'
+    AND o.o_orderdate BETWEEN '1995-01-01' AND '1996-12-31'
+  GROUP BY YEAR(o.o_orderdate)
+) q8_seed ON q8_seed.supplier_no=s.s_suppkey
+SET s.s_nationkey=2;
+
 DROP TABLE seq;
 
 --enable_result_log
@@ -271,6 +288,21 @@ SET SESSION use_secondary_engine=FORCED;
 --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo # Q8 -- National Market Share
+# Assert that each year has a nonzero numerator, independently of engine parity.
+# Keep the separate probe-resume test for the indexed, cross-batch plan shape;
+# the miniature dataset alone does not guarantee that physical plan.
+--disable_query_log
+--disable_warnings
+SET use_secondary_engine=OFF;
+SET optimizer_switch='hypergraph_optimizer=off';
+--let $q8_nonzero_years = `SELECT COUNT(DISTINCT YEAR(o.o_orderdate)) FROM PART p JOIN LINEITEM l ON p.p_partkey=l.l_partkey JOIN SUPPLIER s ON s.s_suppkey=l.l_suppkey JOIN NATION n2 ON n2.n_nationkey=s.s_nationkey JOIN ORDERS o ON o.o_orderkey=l.l_orderkey JOIN CUSTOMER c ON c.c_custkey=o.o_custkey JOIN NATION n1 ON n1.n_nationkey=c.c_nationkey JOIN REGION r ON r.r_regionkey=n1.n_regionkey WHERE r.r_name='AMERICA' AND n2.n_name='BRAZIL' AND p.p_type='ECONOMY ANODIZED STEEL' AND o.o_orderdate BETWEEN '1995-01-01' AND '1996-12-31' AND l.l_extendedprice*(1-l.l_discount)>0`
+if ($q8_nonzero_years != 2) {
+  --die Q8 must have nonzero BRAZIL revenue in both years
+}
+SET use_secondary_engine=FORCED;
+SET optimizer_switch='hypergraph_optimizer=on';
+--enable_warnings
+--enable_query_log
 --let $assert_query = select o_year, sum(case when nation = 'BRAZIL' then volume else 0 end) / sum(volume) as mkt_share from ( select extract(year from o_orderdate) as o_year, l_extendedprice * (1 - l_discount) as volume, n2.n_name as nation from PART, SUPPLIER, LINEITEM, ORDERS, CUSTOMER, NATION n1, NATION n2, REGION where p_partkey = l_partkey and s_suppkey = l_suppkey and l_orderkey = o_orderkey and o_custkey = c_custkey and c_nationkey = n1.n_nationkey and n1.n_regionkey = r_regionkey and r_name = 'AMERICA' and s_nationkey = n2.n_nationkey and o_orderdate between date '1995-01-01' and date '1996-12-31' and p_type = 'ECONOMY ANODIZED STEEL' ) as all_nations group by o_year order by o_year
 --let $assert_ordered = 1
 --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc

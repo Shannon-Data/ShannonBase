@@ -1,0 +1,41 @@
+SET use_secondary_engine=OFF;
+CREATE TABLE agg_order_seq (i INT PRIMARY KEY);
+INSERT INTO agg_order_seq WITH RECURSIVE n AS
+(SELECT 1 i UNION ALL SELECT i+1 FROM n WHERE i<1000) SELECT i FROM n;
+CREATE TABLE agg_order_cost (
+g INT NOT NULL, slot INT NOT NULL, v DECIMAL(15,2), PRIMARY KEY(g,slot), KEY(slot,g)
+) SECONDARY_ENGINE=rapid;
+INSERT INTO agg_order_cost
+SELECT (a.i-1)*100+b.i,c.i,IF(MOD(a.i,7)=0,NULL,(b.i-c.i)*1.25)
+FROM agg_order_seq a JOIN agg_order_seq b ON b.i<=100
+JOIN agg_order_seq c ON c.i<=5 AND c.i<=MOD(a.i+b.i,5)+1;
+ANALYZE TABLE agg_order_cost;
+Table	Op	Msg_type	Msg_text
+test.agg_order_cost	analyze	status	OK
+ALTER TABLE agg_order_cost SECONDARY_LOAD;
+SET optimizer_switch='hypergraph_optimizer=on';
+SET use_secondary_engine=FORCED;
+EXPLAIN FORMAT=TREE SELECT g,SUM(v),COUNT(v) FROM agg_order_cost GROUP BY g;
+EXPLAIN
+-> Group vectorized aggregate: sum(agg_order_cost.v), count(agg_order_cost.v)  (...)
+    -> Vectorized index scan on agg_order_cost using PRIMARY in secondary engine Rapid  (...)
+
+Warnings:
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+EXPLAIN FORMAT=TREE SELECT slot,SUM(v),COUNT(v) FROM agg_order_cost GROUP BY slot;
+EXPLAIN
+-> Group vectorized aggregate: sum(agg_order_cost.v), count(agg_order_cost.v)  (...)
+    -> Vectorized table scan on agg_order_cost in secondary engine Rapid  (...)
+
+Warnings:
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+SET use_secondary_engine=OFF;
+CREATE TABLE agg_order_small LIKE agg_order_cost;
+INSERT INTO agg_order_small SELECT * FROM agg_order_cost WHERE g<=100;
+ANALYZE TABLE agg_order_small;
+Table	Op	Msg_type	Msg_text
+test.agg_order_small	analyze	status	OK
+ALTER TABLE agg_order_small SECONDARY_LOAD;
+SET use_secondary_engine=FORCED;
+SET use_secondary_engine=OFF;
+DROP TABLE agg_order_small,agg_order_cost,agg_order_seq;

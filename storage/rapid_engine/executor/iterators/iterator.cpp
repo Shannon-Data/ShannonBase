@@ -1261,6 +1261,40 @@ bool PushbackBatchTailShared(const std::pmr::vector<ColumnChunk> &chunks, size_t
                              size_t *lookahead_count, size_t *bytes_copied, ResMgmt::BoundedMemoryResource *memory) {
   if (from_row >= total_rows) return false;
   const size_t tail = total_rows - from_row;
+  if (*lookahead_count != 0) {
+    // ReadBatch may have drained only part of a previously buffered batch.
+    // The caller's unused tail precedes those unread rows; replacing the
+    // buffer here drops them (e.g. scalar Read -> small ReadBatch -> GROUP BY
+    // pushback on an ART scan). Build the combined buffer before committing.
+    const size_t pending = *lookahead_count;
+    if (tail > std::numeric_limits<size_t>::max() - pending || lookahead_chunks->size() != chunks.size()) return true;
+    std::pmr::vector<ColumnChunk> merged(lookahead_chunks->get_allocator());
+    merged.reserve(chunks.size());
+    size_t copied = 0;
+    for (size_t col = 0; col < chunks.size(); ++col) {
+      const ColumnChunk &source = chunks[col];
+      const ColumnChunk &old = (*lookahead_chunks)[col];
+      if (source.valid() != old.valid()) return true;
+      merged.emplace_back(source.valid() ? source.source_field() : nullptr, source.valid() ? tail + pending : 0,
+                          source.valid() ? source.width() : 0, memory);
+      if (!source.valid()) continue;
+      if (source.size() < total_rows || *lookahead_start > old.size() || pending > old.size() - *lookahead_start)
+        return true;
+      for (size_t row = from_row; row < total_rows; ++row) {
+        if (!merged.back().append_from(source, row)) return true;
+        if (!source.nullable_fast(row)) copied += source.width();
+      }
+      for (size_t row = *lookahead_start; row < *lookahead_start + pending; ++row) {
+        if (!merged.back().append_from(old, row)) return true;
+        if (!old.nullable_fast(row)) copied += old.width();
+      }
+    }
+    *lookahead_chunks = std::move(merged);
+    *lookahead_start = 0;
+    *lookahead_count = tail + pending;
+    if (bytes_copied) *bytes_copied += copied;
+    return false;
+  }
   bool rebuild = lookahead_chunks->size() != chunks.size();
   for (size_t idx = 0; !rebuild && idx < chunks.size(); ++idx) {
     if (chunks[idx].valid() != (*lookahead_chunks)[idx].valid()) {

@@ -721,10 +721,11 @@ class BatchReadable {
 
 /**
  * Shared implementation for BatchReadable::PushbackBatchTail(). Copies rows [from_row, total_rows)
- * from `chunks` into `*lookahead_chunks`, (re)allocating it to match `chunks`' layout only when
- * the existing buffer can't hold the tail or its layout has drifted, and resets
- * `*lookahead_start`/`*lookahead_count` to describe the buffered range. On a failed append, resets
- * the lookahead state to empty rather than leaving a partially-written buffer.
+ * from `chunks` before any unread rows in `*lookahead_chunks`. With no unread rows, reuse
+ * the existing buffer when its layout and capacity permit. Update `*lookahead_start` and
+ * `*lookahead_count` only after the new buffered range is complete. A failed prepend leaves
+ * the old unread range intact; a failed empty-buffer append resets the state to empty.
+ * Callers must abort on failure, since the newly pushed rows were not buffered.
  *
  * Every BatchReadable iterator (table scan, filter, hash join) needs identical pushback logic;
  * this is the single implementation they all call instead of each carrying its own copy.

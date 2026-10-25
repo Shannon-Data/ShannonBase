@@ -71,6 +71,34 @@ struct ColumnarJoinCostEstimator {
   }
 };
 
+// Incremental work when choosing between an already ordered input and hash
+// aggregation of the same rows. Eligibility and proof of ordering belong to
+// the translator; this model cannot manufacture an ordering.
+struct AggregateOrderEstimator {
+  double groups{0};
+  double index_rows{0};
+  double spill_bytes{0};
+  bool valid{false};
+
+  static AggregateOrderEstimator estimate(double rows, double groups, double spill_row_bytes, double group_bytes,
+                                          double budget) {
+    if (!std::isfinite(rows) || !std::isfinite(groups) || !std::isfinite(spill_row_bytes) ||
+        !std::isfinite(group_bytes) || !std::isfinite(budget) || rows <= 0 || groups <= 0 || groups > rows ||
+        spill_row_bytes < 0 || group_bytes <= 0 || budget < 0)
+      return {};
+    const double retained = groups * group_bytes;
+    if (!std::isfinite(retained)) return {};
+    const double resident = std::min(1.0, budget / retained);
+    const double spill = (1.0 - resident) * rows * spill_row_bytes;
+    if (!std::isfinite(spill)) return {};
+    return {groups, rows, spill, true};
+  }
+
+  bool prefer_ordered(double group_init_cost, double index_row_cost, double spill_byte_cost) const {
+    return valid && index_rows * index_row_cost < groups * group_init_cost + spill_bytes * spill_byte_cost;
+  }
+};
+
 /**
  * MySQL Cost Model Constants (for reference)
  *
@@ -132,14 +160,6 @@ struct RapidCostConstants {
   // Fraction of the uncompressed I/O an IMCU read is assumed to cost, crediting
   // LZ4/ZSTD/dictionary compression for moving fewer bytes.
   static constexpr double kCompressionBenefit = 0.5;
-
-  // Discount applied to the *re-driven inner scan* of a nested-loop join costed
-  // against IMCS rather than a row store, crediting the batched inner scan.
-  // Note this is an executor capability claim: it holds only for shapes Rapid
-  // actually runs vectorized. It multiplies the per-outer-row inner term only,
-  // never the outer child's cost -- see ModifyNestedLoopJoinCost() for what
-  // discounting an already-priced subtree did to the plan search.
-  static constexpr double kNestedLoopImcsFactor = 0.6;
 
   // Selectivity assumed for a filter when not one of its tables produced a
   // usable per-column estimate -- i.e. the value that stands in for "we have no

@@ -232,6 +232,12 @@ bool VectorizedAggregateIterator::HashSpillFile::RewindForRead() {
   return std::fseek(file, 0, SEEK_SET) != 0;
 }
 
+size_t VectorizedAggregateIterator::HashGroupFixedBytes(size_t aggregate_count) {
+  // The unordered index retains a hash, group index, link and bucket share.
+  return sizeof(HashGroupState) + aggregate_count * sizeof(HashAggregateState) +
+         sizeof(std::pair<const uint64_t, size_t>) + kHashIndexNodePointers * sizeof(void *);
+}
+
 VectorizedAggregateIterator::VectorizedAggregateIterator(THD *thd, unique_ptr_destroy_only<RowIterator> source,
                                                          JOIN *join, pack_rows::TableCollection tables, bool rollup,
                                                          AggregateStrategy strategy, ORDER *hash_output_order,

@@ -31,8 +31,11 @@
 
 #include <chrono>
 #include <map>
+#include <mutex>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
 /* my_rapidjson_size_t.h must precede the rapidjson headers: it fixes
    rapidjson::SizeType to size_t for the whole server, and including a
@@ -74,6 +77,81 @@ namespace ML {
  **/
 static const std::unordered_set<std::string> k_remote_providers = {"ollama",  "openai",   "dashscope",
                                                                    "qianfan", "deepseek", "anthropic"};
+
+/*
+ * Process-wide pool of loaded local generators. Constructing a TextGenerator is
+ * a full ONNX session load plus tokenizer load, and ML_GENERATE used to pay it
+ * on every call. A generator carries per-call state (KV cache, bound buffers),
+ * so it is never shared concurrently: a call takes one out of the pool for its
+ * duration (or builds a new one) and puts it back, reset, when done.
+ *
+ * Bounded per key so idle sessions cannot pin unbounded memory. Files replaced
+ * on disk are not noticed until the server restarts or the entry is evicted.
+ */
+namespace {
+constexpr size_t k_max_idle_per_model = 2;
+
+class Local_generator_pool {
+ public:
+  using Gen = LLM_Generate::TextGenerator;
+
+  class Lease {
+   public:
+    Lease(Local_generator_pool *pool, std::string key, std::unique_ptr<Gen> gen)
+        : m_pool(pool), m_key(std::move(key)), m_gen(std::move(gen)) {}
+    Lease(Lease &&) = default;
+    ~Lease() {
+      if (m_gen) m_pool->release(m_key, std::move(m_gen));
+    }
+    Gen *operator->() { return m_gen.get(); }
+    Gen &operator*() { return *m_gen; }
+
+   private:
+    Local_generator_pool *m_pool;
+    std::string m_key;
+    std::unique_ptr<Gen> m_gen;
+  };
+
+  Lease acquire(const std::string &model_path, const std::string &token_path,
+                const LLM_Generate::GenerationOptions &opts) {
+    std::string key = model_path + "|" + token_path + "|" + opts.model_id;
+    std::unique_ptr<Gen> gen;
+    {
+      std::lock_guard<std::mutex> guard(m_mutex);
+      auto it = m_idle.find(key);
+      if (it != m_idle.end() && !it->second.empty()) {
+        gen = std::move(it->second.back());
+        it->second.pop_back();
+      }
+    }
+    if (gen) {
+      gen->SetOptions(opts);
+    } else {
+      gen = std::make_unique<Gen>(model_path, token_path, opts);  // load outside the lock
+    }
+    return Lease(this, std::move(key), std::move(gen));
+  }
+
+ private:
+  void release(const std::string &key, std::unique_ptr<Gen> gen) {
+    if (!gen->Initialized()) return;  // never pool a failed load
+    gen->Reset();                     // drop KV cache and recurrent state
+    std::lock_guard<std::mutex> guard(m_mutex);
+    auto &slot = m_idle[key];
+    if (slot.size() < k_max_idle_per_model) slot.push_back(std::move(gen));
+  }
+
+  std::mutex m_mutex;
+  std::unordered_map<std::string, std::vector<std::unique_ptr<Gen>>> m_idle;
+};
+
+// Intentionally leaked, like the embedding model cache: avoids static
+// destruction order problems with ORT at shutdown.
+Local_generator_pool &local_pool() {
+  static Local_generator_pool *pool = new Local_generator_pool();
+  return *pool;
+}
+}  // namespace
 
 std::string ML_generate_table::Generate(std::string &, Json_wrapper &) {
   std::string result;
@@ -306,8 +384,18 @@ std::string ML_generate_row::text_generation_task(const std::string &text,
   }
 
   // Default: local ONNX inference
-  auto tg = std::make_unique<LLM_Generate::TextGenerator>(model_path, token_path, gen_options);
-  return envelope(tg->Generate(text, gen_options.max_tokens));
+  auto tg = local_pool().acquire(model_path, token_path, gen_options);
+  if (!tg->Initialized()) {
+    my_error(ER_ML_FAIL, MYF(0),
+             tg->LastError().empty() ? "local model failed to initialize" : tg->LastError().c_str());
+    return {};
+  }
+  auto result = tg->Generate(text, gen_options.max_tokens);
+  if (result.finish_reason == "error") {
+    my_error(ER_ML_FAIL, MYF(0), tg->LastError().c_str());
+    return {};
+  }
+  return envelope(result);
 }
 
 std::string ML_generate_row::pii_task(const std::string &text, const ShannonBase::ML::OPTION_VALUE_T &opt_values,

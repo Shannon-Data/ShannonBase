@@ -48,6 +48,24 @@ select id, v from t_part where v >= 500 order by id;
 --let $assert_digest = select id, v from t_part where v >= 500 order by id
 --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
+# Partition-key ranges must prune partitions, not merely filter their rows.
+# Check the physical partition set in legacy EXPLAIN, then compare complete
+# answers under both Rapid optimizers (including exact partition boundaries).
+--echo # ===== Partition pruning boundaries =====
+set session optimizer_switch='hypergraph_optimizer=off';
+--let $pruned_parts = query_get_value(EXPLAIN SELECT id FROM t_part WHERE id >= 10 AND id < 20, partitions, 1)
+if ($pruned_parts != p1) {
+  --die Expected only partition p1 for the half-open range [10,20)
+}
+--let $assert_digest = SELECT GROUP_CONCAT(id ORDER BY id) FROM t_part WHERE id >= 10 AND id < 20
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_digest = SELECT GROUP_CONCAT(id ORDER BY id) FROM t_part WHERE id >= 9 AND id <= 20
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_digest = SELECT COUNT(*) FROM t_part WHERE id >= 10 AND id < 10
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_digest = SELECT GROUP_CONCAT(id ORDER BY id) FROM t_part WHERE id < 10 OR v >= 700
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+
 set session optimizer_switch = default;
 
 use test;
