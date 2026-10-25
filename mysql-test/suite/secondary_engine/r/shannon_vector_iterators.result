@@ -183,10 +183,11 @@ EXPLAIN
 -> Sort: total_orders DESC  (...)
     -> Stream results  (...)
         -> Group aggregate: count(distinct c.customer_id), count(o.order_id), sum(c.customer_id), sum(o.order_id), sum(o.total_amount)  (...)
-            -> Nested loop inner join  (...)
-                -> Sort: c.country  (...)
-                    -> Table scan on c in secondary engine Rapid  (...)
-                -> Index lookup on o using customer_id (customer_id=c.customer_id) in secondary engine Rapid  (...)
+            -> Sort: c.country  (...)
+                -> Inner hash join (c.customer_id = o.customer_id)  (...)
+                    -> Table scan on o in secondary engine Rapid  (...)
+                    -> Hash
+                        -> Table scan on c in secondary engine Rapid  (...)
 
 SELECT 
 c.country,

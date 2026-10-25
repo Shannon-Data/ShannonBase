@@ -1,0 +1,51 @@
+# A row-mode nested loop below a vectorized hash join must retain its current
+# outer row when the parent consumes a buffered probe batch. Only the LAST
+# line of each order matches: a batch boundary inside an order leaves the
+# shared order buffer holding an earlier matching order. The next line then
+# gets the wrong year unless ReadProbeBatch restores its last input row.
+# Small indexed fixture: 100 customers, 100 orders, 4100 lines, 204 parts.
+# Unlike the original miniature TPC-H Q8, both years have nonzero sums.
+--disable_warnings
+SET use_secondary_engine=OFF;
+CREATE TABLE resume_c (id INT PRIMARY KEY, r INT, KEY(r)) SECONDARY_ENGINE=rapid;
+CREATE TABLE resume_o (id INT PRIMARY KEY, d DATE NOT NULL, cid INT, KEY(cid)) SECONDARY_ENGINE=rapid;
+CREATE TABLE resume_l (oid INT NOT NULL, id INT NOT NULL, pid INT NOT NULL,
+  v DECIMAL(15,2) NOT NULL, PRIMARY KEY(oid,id)) SECONDARY_ENGINE=rapid;
+CREATE TABLE resume_p (pk INT PRIMARY KEY, id INT NOT NULL, flag INT NOT NULL) SECONDARY_ENGINE=rapid;
+INSERT INTO resume_c WITH RECURSIVE n AS
+ (SELECT 1 i UNION ALL SELECT i+1 FROM n WHERE i<100)
+ SELECT i,IF(i<=6,1,2) FROM n;
+INSERT INTO resume_o SELECT id,IF(MOD(id DIV 10,2)=0,'1995-01-01','1996-01-01'),MOD(id,10)+1 FROM resume_c;
+INSERT INTO resume_l WITH RECURSIVE n AS
+ (SELECT 1 i UNION ALL SELECT i+1 FROM n WHERE i<41)
+ SELECT o.id,n.i,IF(n.i=41,1,99),o.id FROM resume_o o,n;
+INSERT INTO resume_p VALUES (1,1,1),(2,2,1),(3,3,0),(4,4,0);
+INSERT INTO resume_p WITH RECURSIVE n AS
+ (SELECT 1 i UNION ALL SELECT i+1 FROM n WHERE i<200)
+ SELECT i+4,i+1000,1 FROM n;
+ANALYZE TABLE resume_c,resume_o,resume_l,resume_p;
+ALTER TABLE resume_c SECONDARY_LOAD;
+ALTER TABLE resume_o SECONDARY_LOAD;
+ALTER TABLE resume_l SECONDARY_LOAD;
+ALTER TABLE resume_p SECONDARY_LOAD;
+SET optimizer_switch='hypergraph_optimizer=on';
+SET secondary_engine_cost_threshold=0;
+SET use_secondary_engine=FORCED;
+--enable_warnings
+
+# Check complete answers against InnoDB, not a recorded Rapid-only result.
+--let $assert_query = SELECT YEAR(o.d) AS y,COUNT(*) AS n,SUM(l.v) AS volume FROM resume_c c JOIN resume_o o ON c.id=o.cid JOIN resume_l l ON l.oid=o.id JOIN resume_p p ON p.id=l.pid WHERE p.flag=1 AND c.r=1 GROUP BY YEAR(o.d) ORDER BY y
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+
+# Re-init must not restore the previous execution's continuation row.
+PREPARE resume_stmt FROM 'SELECT YEAR(o.d) AS y,COUNT(*) AS n,SUM(l.v) AS volume FROM resume_c c JOIN resume_o o ON c.id=o.cid JOIN resume_l l ON l.oid=o.id JOIN resume_p p ON p.id=l.pid WHERE p.flag=1 AND c.r=1 GROUP BY YEAR(o.d) ORDER BY y';
+--let $assert_query = EXECUTE resume_stmt
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_query = EXECUTE resume_stmt
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+DEALLOCATE PREPARE resume_stmt;
+SET use_secondary_engine=OFF;
+DROP TABLE resume_p,resume_l,resume_o,resume_c;

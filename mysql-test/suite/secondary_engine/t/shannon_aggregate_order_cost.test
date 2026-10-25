@@ -1,0 +1,47 @@
+# Ordered aggregation must preserve index order when the cost model chooses
+# streaming over a large hash state. Contrast many groups with five groups on
+# the same data; compare full answers, including NULL and exact DECIMAL sums.
+--source include/elide_costs.inc
+
+--disable_warnings
+SET use_secondary_engine=OFF;
+CREATE TABLE agg_order_seq (i INT PRIMARY KEY);
+INSERT INTO agg_order_seq WITH RECURSIVE n AS
+ (SELECT 1 i UNION ALL SELECT i+1 FROM n WHERE i<1000) SELECT i FROM n;
+CREATE TABLE agg_order_cost (
+ g INT NOT NULL, slot INT NOT NULL, v DECIMAL(15,2), PRIMARY KEY(g,slot), KEY(slot,g)
+) SECONDARY_ENGINE=rapid;
+INSERT INTO agg_order_cost
+ SELECT (a.i-1)*100+b.i,c.i,IF(MOD(a.i,7)=0,NULL,(b.i-c.i)*1.25)
+ FROM agg_order_seq a JOIN agg_order_seq b ON b.i<=100
+ JOIN agg_order_seq c ON c.i<=5 AND c.i<=MOD(a.i+b.i,5)+1;
+ANALYZE TABLE agg_order_cost;
+ALTER TABLE agg_order_cost SECONDARY_LOAD;
+SET optimizer_switch='hypergraph_optimizer=on';
+SET use_secondary_engine=FORCED;
+--enable_warnings
+# The per-test 1 GiB pool fixes the available grant, not a cardinality cutoff.
+# Pin both physical choices so a correctness-only pass cannot hide a return to
+# the spilling hash plan for this large ordered group set.
+--replace_regex $elide_costs_and_rows
+EXPLAIN FORMAT=TREE SELECT g,SUM(v),COUNT(v) FROM agg_order_cost GROUP BY g;
+--replace_regex $elide_costs_and_rows
+EXPLAIN FORMAT=TREE SELECT slot,SUM(v),COUNT(v) FROM agg_order_cost GROUP BY slot;
+--let $assert_query = SELECT g,SUM(v),COUNT(v) FROM agg_order_cost GROUP BY g
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_query = SELECT slot,SUM(v),COUNT(v) FROM agg_order_cost GROUP BY slot
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_query = SELECT g,SUM(v),COUNT(v) FROM agg_order_cost GROUP BY g ORDER BY g DESC LIMIT 100
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+SET use_secondary_engine=OFF;
+CREATE TABLE agg_order_small LIKE agg_order_cost;
+INSERT INTO agg_order_small SELECT * FROM agg_order_cost WHERE g<=100;
+ANALYZE TABLE agg_order_small;
+ALTER TABLE agg_order_small SECONDARY_LOAD;
+SET use_secondary_engine=FORCED;
+--let $assert_query = SELECT g,SUM(v),COUNT(v) FROM agg_order_small GROUP BY g ORDER BY g DESC LIMIT 10
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+SET use_secondary_engine=OFF;
+DROP TABLE agg_order_small,agg_order_cost,agg_order_seq;

@@ -167,6 +167,8 @@ class VectorizedAggregateIterator final : public RowIterator {
   static constexpr int kHashNeedSpill = 2;
   static constexpr size_t kHashSpillFanout = 16;
   static constexpr size_t kHashMaxSpillDepth = 8;
+  // Link plus bucket share retained per unordered-index node.
+  static constexpr size_t kHashIndexNodePointers = 3;
   static constexpr size_t kDefaultHashMemoryLimit = 64ULL * 1024ULL * 1024ULL;
 
   VectorizedAggregateIterator(THD *thd, unique_ptr_destroy_only<RowIterator> source, JOIN *join,
@@ -223,6 +225,10 @@ class VectorizedAggregateIterator final : public RowIterator {
   };
 
   const VectorizationStats &GetStats() const { return m_stats; }
+
+  // Fixed per-group storage for costing; key and representative bytes are
+  // added from the query projection. Runtime accounting remains authoritative.
+  static size_t HashGroupFixedBytes(size_t aggregate_count);
 
  private:
   // Core members (identical to original AggregateIterator)

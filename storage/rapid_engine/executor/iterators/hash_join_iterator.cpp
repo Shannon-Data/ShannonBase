@@ -184,6 +184,7 @@ bool VectorizedHashJoinIterator::Init() try {
   // subquery/PS reuse) must never replay rows pushed back by the prior run.
   m_lookahead_count = 0;
   m_lookahead_start = 0;
+  m_probe_resume_row = kInvalidHashSlot;
   decltype(m_lookahead_chunks)(&m_aux_memory).swap(m_lookahead_chunks);
   decltype(m_chunk_map)(&m_aux_memory).swap(m_chunk_map);
   m_bloom.reset();
@@ -1770,6 +1771,16 @@ bool VectorizedHashJoinIterator::ReadBuildBatch() {
 }
 
 int VectorizedHashJoinIterator::ReadProbeBatch() {
+  // A row-mode probe can be a nested loop paused partway through its inner
+  // scan. Its next Read() reuses the outer TABLE buffers. Probing this batch
+  // (or a parent consuming our output) may have replaced those buffers with
+  // an earlier matching row, especially when the batch ends in nonmatches.
+  // Restore the last INPUT row, not the last join output, before resuming it.
+  // The existing chunks retain that row even after m_curr_probe_size is reset.
+  if (m_probe_resume_row != kInvalidHashSlot) {
+    if (LoadRowFromColumnChunks(m_probe_columns, m_probe_resume_row, m_probe_input_tables)) return 1;
+    m_probe_resume_row = kInvalidHashSlot;
+  }
   m_probe_batch_filtered = false;
   m_curr_probe_size = 0;
   ResetProbeCursor();
@@ -1811,7 +1822,10 @@ int VectorizedHashJoinIterator::ReadProbeBatch() {
     m_curr_probe_size++;
   }
 
-  if (m_curr_probe_size > 0) ++m_stats.probe_batches;
+  if (m_curr_probe_size > 0) {
+    m_probe_resume_row = m_curr_probe_size - 1;
+    ++m_stats.probe_batches;
+  }
   return m_curr_probe_size > 0 ? 0 : -1;
 }
 

@@ -41,6 +41,7 @@
 #include "sql/join_optimizer/cost_model.h"
 #include "sql/join_optimizer/walk_access_paths.h"
 //#include "sql/range_optimizer/range_optimizer.h"  //KEY_PART,QUICK_RANGE
+#include "sql/opt_trace.h"
 #include "sql/range_optimizer/tree.h"  //SEL_ARG
 #include "sql/sql_class.h"
 #include "sql/sql_lex.h"                      //Query_expression
@@ -124,6 +125,11 @@ bool IsHashAggregateGroupField(const Field *field) {
   return field != nullptr && ShannonBase::Executor::IsHashGroupKeyFieldType(field->type());
 }
 
+// Sorting a dictionary-encoded group key wins only when the dictionary is
+// large in absolute terms and most rows would open a new hash group.
+constexpr double kDictionarySortMinDistinct = 4096.0;
+constexpr double kDictionarySortDistinctFraction = 0.5;
+
 bool PreferSortedAggregateForDictionary(const JOIN *join, const AccessPath *sorted_input) {
   // Keep explicit hash-path tests and forced spill on the hash aggregate.
   DBUG_EXECUTE_IF("rapid_hash_aggregate_row_input", { return false; });
@@ -148,7 +154,95 @@ bool PreferSortedAggregateForDictionary(const JOIN *join, const AccessPath *sort
   // Only favor sorting when the dictionary suggests that most rows would
   // create a new hash group. The estimate can be conservative for small
   // tables, in which case the existing hash path remains available.
-  return distinct >= 4096.0 && distinct >= rows * 0.5;
+  return distinct >= kDictionarySortMinDistinct && distinct >= rows * kDictionarySortDistinctFraction;
+}
+
+// WriteHashSpillRow framing: a record-type tag, then the key length and the
+// packed-row blob length, then the key bytes and the row image itself.
+constexpr size_t kSpillRecordTagBytes = sizeof(uint8_t);
+constexpr size_t kSpillLengthFieldBytes = 2 * sizeof(uint64_t);
+// Floor on the encoded group key: length prefix plus a one-byte NULL marker.
+constexpr size_t kSpillKeyFloorBytes = sizeof(uint64_t) + 1;
+
+// Compare an ordered full-index scan with hashing the same rows. Verify the
+// grouping key is the leading index field: use_order may be false when MySQL
+// offered the index only as a covering scan. In that case we must explicitly
+// request index order before using streaming aggregation.
+bool PreferOrderedAggregate(THD *thd, const JOIN *join, const AccessPath *input) {
+  DBUG_EXECUTE_IF("rapid_hash_aggregate_row_input", { return false; });
+  DBUG_EXECUTE_IF("rapid_hash_aggregate_tiny_budget", { return false; });
+  DBUG_EXECUTE_IF("rapid_hash_aggregate_hash_path", { return false; });
+  if (!join || !input || input->type != AccessPath::INDEX_SCAN) return false;
+  const auto &scan = input->index_scan();
+  TABLE *table = scan.table;
+  const unsigned long need = HA_READ_ORDER | (scan.reverse ? HA_READ_PREV : HA_READ_NEXT);
+  if (!table || !table->file || table->part_info || (table->file->index_flags(scan.idx, 0, true) & need) != need)
+    return false;
+  const double rows = input->num_output_rows();
+  if (!std::isfinite(rows) || rows <= 0) return false;
+  ORDER *group = join->group_list.order;
+  if (!group && join->query_block) group = join->query_block->group_list.first;
+  // A single-column NDV is directly observed. Do not extrapolate independent
+  // multi-column NDVs into a large memory estimate without correlation stats.
+  Item *key = nullptr;
+  if (group) {
+    if (group->next || !group->item || !*group->item) return false;
+    key = *group->item;
+  } else {
+    for (const Cached_item &cached : join->group_fields) {
+      if (key) return false;
+      key = cached.get_item();
+    }
+  }
+  if (!key) return false;
+  key = key->real_item();
+  if (key->type() != Item::FIELD_ITEM) return false;
+  Field *field = down_cast<Item_field *>(key)->field;
+  if (!field || field->table != table) return false;
+  const KEY &key_info = table->key_info[scan.idx];
+  if (key_info.actual_key_parts == 0 || key_info.key_part[0].field != field ||
+      (key_info.key_part[0].key_part_flag & HA_PART_KEY_SEG) != 0)
+    return false;
+  auto *rpd_table = Utils::rpd_lookup_func()(table);
+  if (!rpd_table || field->field_index() >= rpd_table->meta().fields.size()) return false;
+  auto *stats = rpd_table->meta().fields[field->field_index()].statistics.get();
+  if (!stats || stats->get_basic_stats().distinct_count == 0) return false;
+  const double groups = std::min(rows, static_cast<double>(stats->get_basic_stats().distinct_count));
+  size_t aggregates = 0;
+  if (join->sum_funcs)
+    for (Item_sum **sum = join->sum_funcs; *sum; ++sum) ++aggregates;
+  double row_bytes = table->s->null_bytes;
+  for (uint i = 0; i < table->s->fields; ++i)
+    if (!table->read_set || bitmap_is_set(table->read_set, i)) row_bytes += table->field[i]->pack_length();
+  const double group_bytes =
+      row_bytes + field->pack_length() + Executor::VectorizedAggregateIterator::HashGroupFixedBytes(aggregates);
+  const double budget = ShannonBase::Utils::Util::hash_aggregate_memory_budget(
+                            thd, Executor::VectorizedAggregateIterator::kDefaultHashMemoryLimit) /
+                        2.0;
+  // Input aggregation work is common. Hash additionally allocates group state;
+  // an ordered scan instead walks the ART. When hash state exceeds the grant,
+  // price one write/read of rows not represented by resident groups. More
+  // repartition passes can only make hashing dearer.
+  // WriteHashSpillRow stores a tag, key/blob lengths, encoded key and row.
+  const double spill_row_bytes = row_bytes + kSpillRecordTagBytes + kSpillLengthFieldBytes +
+                                 std::max<size_t>(field->pack_length(), kSpillKeyFloorBytes);
+  const auto work = AggregateOrderEstimator::estimate(rows, groups, spill_row_bytes, group_bytes, budget);
+  // io_factor() prices compressed IMCS memory reads (0.125 by default), not
+  // spill files. These records are uncompressed and written/read on disk.
+  const double spill_byte_cost =
+      RapidCostConstants::kSpillWriteReadPasses / RapidCostConstants::kIoBlockBytes * MySQLCostConstants::IO_BLOCK_READ;
+  const double art_row_cost = RapidCostConstants::kVectorCpuPerRow * RapidCostConstants::kArtBatchFetchFactor;
+  const bool ordered = work.prefer_ordered(RapidCostConstants::kHashBuildPerRow, art_row_cost, spill_byte_cost);
+  Opt_trace_object trace(&thd->opt_trace, "rapid_aggregate_order");
+  trace.add("input_rows", rows)
+      .add("groups", groups)
+      .add("group_bytes", group_bytes)
+      .add("hash_budget_bytes", budget)
+      .add("spill_bytes", work.spill_bytes)
+      .add("hash_extra_cost", work.groups * RapidCostConstants::kHashBuildPerRow + work.spill_bytes * spill_byte_cost)
+      .add("art_order_extra_cost", work.index_rows * art_row_cost)
+      .add("choose_ordered_art_scan", ordered);
+  return ordered;
 }
 
 bool IsHashAggregateValueField(const Field *field) {
@@ -279,6 +373,40 @@ bool IsGroupingSort(const AccessPath *path, const JOIN *join) {
 // This matters when the NLJ outer side is sorted on the join key of the other
 // table (e.g. t2.grp) while GROUP BY references t1.grp and t1.grp = t2.grp:
 // the join output is then ordered by the group key as well.
+// The core may have selected scan + grouping sort before Rapid prices hash
+// state. Offer a legal ordered index here too; otherwise merely stripping the
+// sort makes hash aggregation mandatory regardless of group cardinality.
+AccessPath *ChooseOrderedAggregateInput(THD *thd, const JOIN *join, AccessPath *input, bool grouping_sort) {
+  if (!input) return nullptr;
+  if (!grouping_sort && input->type == AccessPath::INDEX_SCAN)
+    return PreferOrderedAggregate(thd, join, input) ? input : nullptr;
+  ORDER *order = grouping_sort ? input->sort().order : nullptr;
+  if (grouping_sort && (!order || order->next)) return nullptr;
+  AccessPath *scan = grouping_sort ? input->sort().child : input;
+  TABLE *table = nullptr;
+  if (scan->type == AccessPath::TABLE_SCAN) table = scan->table_scan().table;
+  if (scan->type == AccessPath::INDEX_SCAN) table = scan->index_scan().table;
+  if (!table || table->part_info) return nullptr;
+  for (uint key = 0; key < table->s->keys; ++key) {
+    if (!table->keys_in_use_for_query.is_set(key) || !table->keys_in_use_for_group_by.is_set(key)) continue;
+    const KEY &key_info = table->key_info[key];
+    if (key_info.actual_key_parts == 0) continue;
+    const bool descending_key = (key_info.key_part[0].key_part_flag & HA_REVERSE_SORT) != 0;
+    const bool reverse = (order != nullptr && order->direction == ORDER_DESC) != descending_key;
+    auto *candidate = NewIndexScanAccessPath(thd, table, key, true, reverse, scan->count_examined_rows);
+    candidate->set_num_output_rows(scan->num_output_rows());
+    candidate->num_output_rows_before_filter = scan->num_output_rows_before_filter;
+    candidate->parameter_tables = scan->parameter_tables;
+    candidate->set_cost(scan->cost() + std::max(0.0, scan->num_output_rows()) * RapidCostConstants::kVectorCpuPerRow *
+                                           RapidCostConstants::kArtBatchFetchFactor);
+    candidate->set_cost_before_filter(candidate->cost());
+    candidate->set_init_cost(0.0);
+    candidate->set_init_once_cost(0.0);
+    if (PreferOrderedAggregate(thd, join, candidate)) return candidate;
+  }
+  return nullptr;
+}
+
 bool IsGroupingSortOfJoin(const AccessPath *path, const JOIN *join, const JoinPredicate *join_predicate) {
   if (path == nullptr || path->type != AccessPath::SORT || !HasGrouping(join)) return false;
   const auto &sort = path->sort();
@@ -1264,8 +1392,18 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
       auto &tta = path->temptable_aggregate();
       if (!tta.subquery_path) return true;
 
+      // Hypergraph does not bind the SELECT list to the native temporary
+      // table, so it can also stream groups from a costed ART scan. Keep the
+      // legacy temporary-table binding contract unchanged.
+      AccessPath *ordered_input = !legacy_optimizer && has_grouping && CanUseHashAggregate(join)
+                                      ? ChooseOrderedAggregateInput(thd, join, tta.subquery_path, false)
+                                      : nullptr;
+      const bool prefer_ordered_scan = ordered_input != nullptr;
       TranslateState child_state;
-      if (translate_access_path(&child_state, thd, tta.subquery_path, join)) return true;
+      if (translate_access_path(&child_state, thd, ordered_input ? ordered_input : tta.subquery_path, join))
+        return true;
+      if (prefer_ordered_scan && child_state.plan_node && child_state.plan_node->type() == PlanNode::Type::SCAN)
+        static_cast<ScanTable *>(child_state.plan_node.get())->has_required_order = true;
 
       // Native temporary-table bindings are an indivisible physical unit.
       // Limit fallback to this aggregate island instead of the entire query.
@@ -1277,8 +1415,8 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
       const bool use_sorted_hash_join = child_state.plan_node != nullptr &&
                                         child_state.plan_node->type() == PlanNode::Type::HASH_JOIN &&
                                         !HasUnorderedHashOutput(child_state.plan_node.get());
-      const bool use_hash_aggregate = CanUseHashAggregate(join) && !use_sorted_hash_join;
-      if (has_grouping && !use_hash_aggregate && !use_sorted_hash_join) {
+      const bool use_hash_aggregate = CanUseHashAggregate(join) && !use_sorted_hash_join && !prefer_ordered_scan;
+      if (has_grouping && !use_hash_aggregate && !use_sorted_hash_join && !prefer_ordered_scan) {
         make_native_plan(state, path);
         return false;
       }
@@ -1380,15 +1518,22 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
       ORDER *hash_output_order = nullptr;
       const bool has_grouping_sort = IsGroupingSort(aggregate_child, join);
 
+      AccessPath *ordered_input = has_grouping && CanUseHashAggregate(join)
+                                      ? ChooseOrderedAggregateInput(thd, join, aggregate_child, has_grouping_sort)
+                                      : nullptr;
+      const bool prefer_ordered_scan = ordered_input != nullptr;
       const bool prefer_sorted_dictionary =
-          has_grouping_sort && PreferSortedAggregateForDictionary(join, aggregate_child);
-      if (has_grouping && CanUseHashAggregate(join) && has_grouping_sort && !prefer_sorted_dictionary) {
+          !prefer_ordered_scan && has_grouping_sort && PreferSortedAggregateForDictionary(join, aggregate_child);
+      if (prefer_ordered_scan) {
+        aggregate_child = ordered_input;
+      } else if (has_grouping && CanUseHashAggregate(join) && has_grouping_sort && !prefer_sorted_dictionary) {
         hash_output_order = aggregate_child->sort().order;
         aggregate_child = aggregate_child->sort().child;
       }
-
       TranslateState child_state;
       if (translate_access_path(&child_state, thd, aggregate_child, join)) return true;
+      if (prefer_ordered_scan && child_state.plan_node && child_state.plan_node->type() == PlanNode::Type::SCAN)
+        static_cast<ScanTable *>(child_state.plan_node.get())->has_required_order = true;
 
       if (child_state.plan_node && child_state.plan_node->type() == PlanNode::Type::MYSQL_NATIVE) {
         make_native_plan(state, path);
@@ -1398,7 +1543,8 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
       const bool use_sorted_hash_join = child_state.plan_node != nullptr &&
                                         child_state.plan_node->type() == PlanNode::Type::HASH_JOIN &&
                                         !HasUnorderedHashOutput(child_state.plan_node.get());
-      const bool use_hash_aggregate = CanUseHashAggregate(join) && !use_sorted_hash_join && !prefer_sorted_dictionary;
+      const bool use_hash_aggregate =
+          CanUseHashAggregate(join) && !use_sorted_hash_join && !prefer_sorted_dictionary && !prefer_ordered_scan;
       // A grouping sort that already sits below the aggregate can feed a
       // streaming aggregate directly, whether or not a join sits under it.
       // Restricting this to join pipelines forced every single-table GROUP BY
@@ -1422,7 +1568,7 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
                                            child_state.plan_node->type() == PlanNode::Type::NESTED_LOOP_JOIN &&
                                            !HasUnorderedHashOutput(child_state.plan_node.get());
       if (has_grouping && !use_hash_aggregate && !use_sorted_hash_join && !use_grouping_sort &&
-          !use_ordered_nested_loop) {
+          !use_ordered_nested_loop && !prefer_ordered_scan) {
         make_native_plan(state, path);
         return false;
       }
@@ -1456,6 +1602,40 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
           Item *item = cached.get_item();
           if (item == nullptr) continue;
           node->group_by.push_back(item);
+        }
+      }
+
+      // Hash output must retain a consumed index ordering just as it retains
+      // a removed grouping Sort. Otherwise LIMIT above GROUP BY can return an
+      // arbitrary subset, even though the scan itself still runs backwards.
+      if (use_hash_aggregate && node->hash_output_order == nullptr && aggregate_child->type == AccessPath::INDEX_SCAN &&
+          aggregate_child->index_scan().use_order) {
+        const auto &scan = aggregate_child->index_scan();
+        const KEY &key_info = scan.table->key_info[scan.idx];
+        ORDER **tail = &node->hash_output_order;
+        size_t covered = 0;
+        for (uint k = 0; k < key_info.actual_key_parts && covered < node->group_by.size(); ++k) {
+          Item *matching = nullptr;
+          for (Item *item : node->group_by) {
+            Item *real = item->real_item();
+            if (real->type() == Item::FIELD_ITEM &&
+                down_cast<Item_field *>(real)->field == key_info.key_part[k].field) {
+              matching = real;
+              break;
+            }
+          }
+          if (!matching) break;
+          auto *order = new (thd->mem_root) ORDER();
+          order->item_initial = matching;
+          const bool descending = scan.reverse != ((key_info.key_part[k].key_part_flag & HA_REVERSE_SORT) != 0);
+          order->direction = descending ? ORDER_DESC : ORDER_ASC;
+          *tail = order;
+          tail = &order->next;
+          ++covered;
+        }
+        if (covered != node->group_by.size()) {
+          make_native_plan(state, path);
+          return false;
         }
       }
 

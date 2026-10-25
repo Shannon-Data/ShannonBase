@@ -434,6 +434,9 @@ class VectorizedHashJoinIterator final : public RowIterator, public BatchReadabl
   // fanout; m_join_key_buffer remains stable until the current probe row is
   // fully consumed.
   size_t m_probe_cursor_row{0};
+  // The row-mode child's continuation state lives in TABLE::record buffers.
+  // Output materialization can overwrite them before the next batch refill.
+  size_t m_probe_resume_row{kInvalidHashSlot};
   size_t m_probe_cursor_slot{kInvalidHashSlot};
   uint64_t m_probe_cursor_hash{0};
   bool m_probe_cursor_key_ready{false};

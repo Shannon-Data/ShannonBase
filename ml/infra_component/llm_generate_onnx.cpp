@@ -1590,6 +1590,7 @@ void TextGenerator::NamesInitialized() {
 TextGenerator::Result TextGenerator::Generate(const std::string &userPrompt, int maxNewTokens) {
   Result result;
   if (!Initialized() || !m_gen_option.validate()) return result;
+  m_error_string.clear();
   NamesInitialized();
   auto &inputNames = m_inputNames;
   auto &outputNames = m_outputNames;
@@ -1623,6 +1624,9 @@ TextGenerator::Result TextGenerator::Generate(const std::string &userPrompt, int
     m_stopTokenSequences.push_back(std::move(seq));
   };
 
+  /* Rebuilt every call: it used to be appended to forever on a reused
+     instance, growing the list and slowing the per-token std::find. */
+  m_stopTokenIds.clear();
   if (m_eosTokenId >= 0) {
     m_stopTokenIds.push_back(m_eosTokenId);
     m_stopTokenSequences.push_back({m_eosTokenId});
@@ -1830,6 +1834,8 @@ TextGenerator::Result TextGenerator::Generate(const std::string &userPrompt, int
       m_session->Run(Ort::RunOptions{nullptr}, binding);
     } catch (const Ort::Exception &e) {
       DBUG_PRINT("error", ("ORT Run failed at step %d: %s", step, e.what()));
+      m_error_string = std::string("[ORT Run] step ") + std::to_string(step) + ": " + e.what();
+      result.finish_reason = "error";
       break;
     }
 
@@ -1863,7 +1869,11 @@ TextGenerator::Result TextGenerator::Generate(const std::string &userPrompt, int
         }
       }
     }
-    if (logitsTensorIdx == outputValues.size()) break;
+    if (logitsTensorIdx == outputValues.size()) {
+      m_error_string = "[ORT Run] model produced no logits output";
+      result.finish_reason = "error";
+      break;
+    }
 
     const Ort::Value &logitsTensor = outputValues[logitsTensorIdx];
     auto logitsInfo = logitsTensor.GetTensorTypeAndShapeInfo();
@@ -1926,7 +1936,8 @@ TextGenerator::Result TextGenerator::Generate(const std::string &userPrompt, int
 
   /*
     Falling out of the loop rather than breaking out of it means the token
-    ceiling was reached, which is the one outcome a caller must not mistake
+    ceiling was reached (failures set "error" before breaking, so they no
+    longer land here), which is the one outcome a caller must not mistake
     for a finished answer: the text simply stops, often mid-sentence, and
     nothing in it says so. The local generator knows this for certain --
     unlike a remote provider, where it has to be taken on trust from
