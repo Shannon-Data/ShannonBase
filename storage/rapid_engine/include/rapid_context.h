@@ -45,6 +45,9 @@ class JOIN;
 class THD;
 
 namespace ShannonBase {
+namespace Optimizer {
+class PlanningStatistics;
+}
 class Transaction;
 
 /**
@@ -176,6 +179,7 @@ class Rapid_execution_context : public Rapid_context {
   };
 
   Rapid_execution_context() {}
+  std::shared_ptr<Optimizer::PlanningStatistics> m_planning_statistics;
   ResMgmt::WorkScope m_resource_scope;
   std::shared_ptr<void> m_committed_binlog_pin;
   bool m_committed_binlog_view{false};

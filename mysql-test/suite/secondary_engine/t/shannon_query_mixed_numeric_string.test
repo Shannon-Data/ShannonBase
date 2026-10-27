@@ -1,6 +1,9 @@
 # Issue The assertion must fail even under --record on the broken engine.
 # Keep the actual SELECT shape: wrapping in COUNT/GROUP_CONCAT can hide the bug.
---source suite/secondary_engine/include/ga_wrong_results_setup.inc
+SET use_secondary_engine=OFF;
+CREATE TABLE ga_s(id INT PRIMARY KEY, s VARCHAR(20)) SECONDARY_ENGINE=rapid;
+INSERT INTO ga_s VALUES(1,'1'),(2,'01'),(3,'1.0'),(4,'2');
+ALTER TABLE ga_s SECONDARY_LOAD;
 --source include/elide_costs.inc
 --let $ga_mode=3
 while ($ga_mode) {
@@ -50,4 +53,6 @@ INSERT INTO ga_s VALUES(5,'1e0'),(6,NULL),(7,' 1 ');
 if ($_armi_innodb != $ga_expected) {
   --die Unexpected primary result for propagated dictionary values
 }
---source suite/secondary_engine/include/ga_wrong_results_cleanup.inc
+SET use_secondary_engine=OFF;
+ALTER TABLE ga_s SECONDARY_UNLOAD;
+DROP TABLE ga_s;

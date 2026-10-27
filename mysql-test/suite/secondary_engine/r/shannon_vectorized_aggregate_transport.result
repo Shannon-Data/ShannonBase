@@ -31,9 +31,9 @@ SET SESSION optimizer_switch='hypergraph_optimizer=off';
 EXPLAIN FORMAT=TREE SELECT grp,COUNT(*),COUNT(amount),SUM(amount)
 FROM t GROUP BY grp ORDER BY grp;
 EXPLAIN
--> Sort: t.grp
+-> Sort: t.grp  (...)
     -> Table scan on <temporary>
-        -> Aggregate using temporary table
+        -> Aggregate using temporary table  (...)
             -> Vectorized table scan on t in secondary engine Rapid  (...)
 
 Warnings:

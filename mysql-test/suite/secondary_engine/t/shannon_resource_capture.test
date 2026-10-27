@@ -1,4 +1,6 @@
 # Copyright (c) 2026, Shannon Data AI and/or its affiliates.
 SET GLOBAL rapid_change_propagation_mode=CAPTURE;
---source suite/secondary_engine/include/shannon_resource_admission.inc
+--let $shannon_resource_case = admission
+--let $shannon_admission_mode = SOFT
+--source suite/secondary_engine/include/shannon_resource.inc
 SET GLOBAL rapid_change_propagation_mode=CAPTURE;

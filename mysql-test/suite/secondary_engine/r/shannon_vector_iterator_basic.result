@@ -233,9 +233,9 @@ COUNT(*)
 # EXPLAIN:
 EXPLAIN FORMAT=TREE SELECT grp, COUNT(*) FROM t1 GROUP BY grp ORDER BY grp;
 EXPLAIN
--> Sort: t1.grp
+-> Sort: t1.grp  (rows=10)
     -> Table scan on <temporary>
-        -> Aggregate using temporary table
+        -> Aggregate using temporary table  (rows=10)
             -> Vectorized table scan on t1 in secondary engine Rapid  (rows=100)
 
 Warnings:

@@ -1,6 +1,7 @@
 # Periodic STALE is independent of provider invalidation and both markers.
 # It protects only after the metadata checkpoint is durable.
---source suite/secondary_engine/include/storage_layer_baseline.inc
+--let $shannon_storage_layer_case = baseline
+--source suite/secondary_engine/include/shannon_storage_layer.inc
 --let $state_file = $datadir/rapid_snapshots/sh_storage_recovery/t/table_state.checkpoint
 --let $wait_condition = SELECT LENGTH(LOAD_FILE('$state_file'))=44 AND ORD(SUBSTRING(LOAD_FILE('$state_file'),39,1))=0
 --source include/wait_condition.inc
@@ -30,4 +31,5 @@ if ($markers_absent != 1) {
 }
 SET GLOBAL debug=@saved_debug;
 --let $storage_expected = 1:11,2:20,3:30
---source suite/secondary_engine/include/storage_layer_manual_load.inc
+--let $shannon_storage_layer_case = manual_load
+--source suite/secondary_engine/include/shannon_storage_layer.inc

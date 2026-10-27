@@ -37,6 +37,7 @@
 #include "sql/sql_class.h"
 
 #include "storage/rapid_engine/cost/cost.h"
+#include "storage/rapid_engine/cost/planning_statistics.h"
 
 #include "storage/rapid_engine/handler/ha_shannon_rapid.h"
 #include "storage/rapid_engine/imcs/imcs.h"
@@ -512,6 +513,8 @@ bool PredicatePushDown::contains_aggregate_reference(Item *item) {
 
 double PredicatePushDown::estimate_selectivity(Item *predicate, const TABLE *table) {
   if (!predicate) return 1.0;
+  double snapshot_selectivity{0.0};
+  if (PlanningStatistics::Predicate(current_thd, predicate, &snapshot_selectivity)) return snapshot_selectivity;
 
   if (table != nullptr) return ShannonBase::Optimizer::SelectivityEstimator::estimate_selectivity(table, predicate);
 
@@ -988,12 +991,17 @@ Plan AggregationPushDown::try_push_below_join(Plan agg_node) {
     if (node->estimated_rows > 0 && node->estimated_rows != HA_POS_ERROR) return node->estimated_rows;
     return node->original_path ? node->original_path->num_output_rows() : -1.0;
   };
-  const auto placement = RpdCostEstimator::AggregatePlacementCost::estimate(
-      rows(join->children[push_side].get()), rows(join.get()), rows(agg), push_side == 1);
+  double groups = rows(agg);
+  double ndv_groups;
+  const bool groups_from_imcs = PlanningStatistics::Groups(current_thd, agg->group_by, rows(join.get()), &ndv_groups);
+  if (groups_from_imcs) groups = ndv_groups;
+  const auto placement = RpdCostEstimator::AggregatePlacementCost::estimate(rows(join->children[push_side].get()),
+                                                                            rows(join.get()), groups, push_side == 1);
   bool push = placement.push_aggregation();
   // A/B baseline after all semantic guards; never bypass correctness checks.
   DBUG_EXECUTE_IF("rapid_aggregate_placement_legacy", { push = true; });
   trace.add("estimates_valid", placement.valid)
+      .add("groups_from_imcs", groups_from_imcs)
       .add("join_first_cost", placement.join_first)
       .add("aggregate_first_cost", placement.aggregate_first)
       .add("push_aggregation", push);

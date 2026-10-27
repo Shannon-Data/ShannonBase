@@ -1,6 +1,6 @@
 # Assert that Rapid returns what InnoDB returns.
 #
-# Every reading is taken three ways and all three must agree:
+# Digest/parity readings run three ways and all three must agree:
 #   1. InnoDB                      -- the ground truth
 #   2. Rapid, legacy optimizer     -- USE_SECONDARY_ENGINE=FORCED, hypergraph off
 #   3. Rapid, hypergraph optimizer -- USE_SECONDARY_ENGINE=FORCED, hypergraph on
@@ -11,7 +11,7 @@
 # place. A predicate that converts incorrectly is therefore wrong under one and
 # right under the other, and checking only one reports the engine as correct.
 #
-# All three run here, from session variables, rather than leaving the third to
+# Digest/parity modes run all three here, rather than leaving the third to
 # a second suite pass with mtr's --hypergraph: no CI workflow passes that flag,
 # so that leg would never run.
 #
@@ -20,7 +20,7 @@
 # running with --record adopts a divergence as the expected answer and the test
 # passes over it forever. Two wrong-rows defects reached the tree that way.
 #
-# Two ways to call it:
+# Digest/parity usage:
 #
 #   Digest mode -- check one scalar query.
 #     --let $assert_digest = SELECT GROUP_CONCAT(pk ORDER BY pk) FROM t WHERE ...
@@ -53,7 +53,8 @@
 #   --let $assert_ordered = 1
 #   --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 # Leave $assert_ordered unset for an unordered multiset comparison. The caller
-# must use a deterministic query and run this at every Rapid arm being tested.
+# must use a deterministic query, enable Rapid (FORCED for guaranteed coverage),
+# and run this at every optimizer arm being tested. OFF skips full-result checks.
 # $assert_queries_off/$assert_results_off=1 preserve disabled logging.
 # CTAS mode compares precomputed tables with EXCEPT ALL in both directions:
 #   --let $assert_reference_table = innodb_capture
@@ -153,8 +154,59 @@ while ($_armi_left) {
 }
 }
 if ($assert_query != '') {
-  --source suite/secondary_engine/include/assert_rapid_result_matches_innodb.inc
+  --disable_query_log
+  --disable_warnings
+  --let $_arri_engine = `SELECT @@SESSION.use_secondary_engine`
+  --let $_arri_hg = `SELECT IF(@@SESSION.optimizer_switch LIKE '%hypergraph_optimizer=on%','on','off')`
+
+  if ($_arri_engine != 'OFF') {
+    --enable_result_log
+    SET use_secondary_engine=OFF;
+    SET optimizer_switch='hypergraph_optimizer=off';
+    if ($assert_ordered != 1) {
+      --sorted_result
+    }
+    --output $MYSQLTEST_VARDIR/log/rapid_assert_innodb.out
+    --eval $assert_query
+
+    --eval SET optimizer_switch='hypergraph_optimizer=$_arri_hg'
+    --eval SET use_secondary_engine=$_arri_engine
+    if ($assert_ordered != 1) {
+      --sorted_result
+    }
+    --output $MYSQLTEST_VARDIR/log/rapid_assert_current.out
+    --eval $assert_query
+
+    --diff_files $MYSQLTEST_VARDIR/log/rapid_assert_innodb.out $MYSQLTEST_VARDIR/log/rapid_assert_current.out
+    --remove_file $MYSQLTEST_VARDIR/log/rapid_assert_innodb.out
+    --remove_file $MYSQLTEST_VARDIR/log/rapid_assert_current.out
+  }
+
+  if ($assert_warnings_off == '') {
+    --enable_warnings
+  }
+  if ($assert_results_off == 1) {
+    --disable_result_log
+  }
+  if ($assert_queries_off != 1) {
+    --enable_query_log
+  }
+  --let $assert_query =
+  --let $assert_ordered =
+  --let $assert_results_off =
+  --let $assert_queries_off =
 }
 if ($assert_reference_table != '') {
-  --source suite/secondary_engine/include/assert_rapid_materialized_matches_innodb.inc
+  --disable_query_log
+  --let $_armi_capture_engine = `SELECT @@SESSION.use_secondary_engine`
+  SET use_secondary_engine=OFF;
+  --let $_armi_capture_diff = `SELECT COUNT(*) FROM ((SELECT * FROM $assert_reference_table EXCEPT ALL SELECT * FROM $assert_actual_table) UNION ALL (SELECT * FROM $assert_actual_table EXCEPT ALL SELECT * FROM $assert_reference_table)) AS parity_difference`
+  --eval SET use_secondary_engine=$_armi_capture_engine
+  if ($_armi_capture_diff != 0) {
+    --echo # ASSERTION FAILED: $assert_actual_table differs from InnoDB capture $assert_reference_table
+    --die Rapid materialized result differs from InnoDB
+  }
+  --let $assert_reference_table =
+  --let $assert_actual_table =
+  --enable_query_log
 }

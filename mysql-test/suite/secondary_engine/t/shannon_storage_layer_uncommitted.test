@@ -1,4 +1,5 @@
---source suite/secondary_engine/include/storage_layer_baseline.inc
+--let $shannon_storage_layer_case = baseline
+--source suite/secondary_engine/include/shannon_storage_layer.inc
 # A long transaction has already executed AP before the source crashes.
 SET use_secondary_engine=FORCED;
 BEGIN;
@@ -20,4 +21,5 @@ if ($other_sum != 60) {
 --connection default
 --let $storage_route = storage_restores
 --let $storage_expected = 1:10,2:20,3:30
---source suite/secondary_engine/include/storage_layer_verify.inc
+--let $shannon_storage_layer_case = verify
+--source suite/secondary_engine/include/shannon_storage_layer.inc

@@ -24,8 +24,10 @@
 SET use_secondary_engine=OFF;
 SET GLOBAL rapid_resource_isolation=AUTO;
 SET GLOBAL rapid_change_propagation_mode=CAPTURE;
---source suite/secondary_engine/include/shannon_resource_apply_pool.inc
+--let $shannon_resource_case = apply_pool
+--source suite/secondary_engine/include/shannon_resource.inc
 SET GLOBAL rapid_change_propagation_mode=COMMITTED_BINLOG;
---source suite/secondary_engine/include/shannon_resource_apply_pool.inc
+--let $shannon_resource_case = apply_pool
+--source suite/secondary_engine/include/shannon_resource.inc
 SET GLOBAL rapid_change_propagation_mode=CAPTURE;
 SET GLOBAL rapid_resource_isolation=OFF;

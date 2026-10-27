@@ -1537,8 +1537,9 @@ static bool ModifyAccessPathCost(THD *thd, const JoinHypergraph &hypergraph, Acc
     case AccessPath::HASH_JOIN:
       rejected = ShannonBase::Optimizer::ModifyHashJoinCost(thd, hypergraph, path, rapid_ctx);
       break;
-    case AccessPath::NESTED_LOOP_JOIN:
     case AccessPath::NESTED_LOOP_SEMIJOIN_WITH_DUPLICATE_REMOVAL:
+      return false;  // A distinct union member: keep the server's specialized cost.
+    case AccessPath::NESTED_LOOP_JOIN:
       rejected = ShannonBase::Optimizer::ModifyNestedLoopJoinCost(thd, hypergraph, path, rapid_ctx);
       break;
     case AccessPath::AGGREGATE:
@@ -1570,8 +1571,8 @@ static bool ModifyAccessPathCost(THD *thd, const JoinHypergraph &hypergraph, Acc
   // lowering the one-time cost the core optimizer already charged would leave
   // that difference negative, so clamp it here for every callback rather than
   // relying on each one to remember.
-  // Keep the one-time init cost within [0, total cost].
-  path->set_init_once_cost(std::max(0.0, std::min(path->init_once_cost(), path->cost())));
+  // Reusable startup must also fit within startup, not just total cost.
+  path->set_init_once_cost(std::max(0.0, std::min(path->init_once_cost(), path->init_cost())));
 
   if (!IsEmpty(path->filter_predicates) && (path->num_output_rows_before_filter == kUnknownRowCount ||
                                             path->num_output_rows_before_filter < path->num_output_rows()))

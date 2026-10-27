@@ -568,7 +568,7 @@ COUNT(*)
 # EXPLAIN:
 EXPLAIN FORMAT=TREE SELECT b.grp, SUM(a.val) FROM t_big a JOIN t_med b ON a.grp = b.grp GROUP BY b.grp ORDER BY b.grp;
 EXPLAIN
--> Group vectorized aggregate: sum(a.val)  (rows=7)
+-> Group vectorized aggregate: sum(a.val)  (rows=10)
     -> Vectorized inner hash join (a.grp = b.grp)  (rows=1000)
         -> Vectorized table scan on b in secondary engine Rapid  (rows=50)
         -> Hash
@@ -594,7 +594,7 @@ grp	SUM(a.val)
 # EXPLAIN:
 EXPLAIN FORMAT=TREE SELECT b.grp, SUM(a.val) FROM t_big a JOIN t_med b ON a.grp = b.grp GROUP BY b.grp;
 EXPLAIN
--> Group vectorized aggregate: sum(a.val)  (rows=7)
+-> Group vectorized aggregate: sum(a.val)  (rows=10)
     -> Vectorized inner hash join (a.grp = b.grp)  (rows=1000)
         -> Vectorized table scan on b in secondary engine Rapid  (rows=50)
         -> Hash

@@ -28,7 +28,7 @@
 #include <random>
 #include "storage/rapid_engine/optimizer/runtime_bloom_filter.h"
 
-using ShannonBase::Utils::RuntimeBloomFilter;
+using ShannonBase::Optimizer::Utils::RuntimeBloomFilter;
 
 TEST(RapidBloomFilter, DisabledAndBudgetFailureNeverReject) {
   RuntimeBloomFilter filter(std::pmr::new_delete_resource());
@@ -77,7 +77,7 @@ TEST(RapidBloomFilter, AllocationFailureIsOptional) {
 }
 
 TEST(RapidBloomPolicy, EffectiveResourcesAndQueuedWorkReduceAllowance) {
-  using ShannonBase::Utils::RuntimeBloomPolicy;
+  using ShannonBase::Optimizer::Utils::RuntimeBloomPolicy;
   constexpr size_t mib = 1024 * 1024;
   const auto idle = RuntimeBloomPolicy::choose(64*mib, 16*mib, 512*mib, 32*mib, 64*mib, 1, false);
   const auto busy = RuntimeBloomPolicy::choose(64*mib, 16*mib, 512*mib, 32*mib, 64*mib, 8, true);
@@ -94,7 +94,7 @@ TEST(RapidBloomPolicy, EffectiveResourcesAndQueuedWorkReduceAllowance) {
 }
 
 TEST(RapidBloomPolicy, ScanPlacementRecoversWithHysteresis) {
-  using ShannonBase::Utils::RuntimeBloomPolicy;
+  using ShannonBase::Optimizer::Utils::RuntimeBloomPolicy;
   const auto choose = RuntimeBloomPolicy::scan_pushdown_after_sample;
   EXPECT_TRUE(choose(true, 0, 0));
   EXPECT_FALSE(choose(false, 0, 0));

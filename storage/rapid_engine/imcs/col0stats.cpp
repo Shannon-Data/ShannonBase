@@ -393,6 +393,19 @@ ColumnStatistics::BasicStatsSnapshot ColumnStatistics::snapshot_basic() const {
   return s;
 }
 
+ColumnStatistics::PlanningSnapshot ColumnStatistics::snapshot_for_costing() const {
+  std::shared_lock lock(m_stats_mutex);
+  PlanningSnapshot result;
+  result.counters = snapshot_basic();
+  result.ndv = std::min(m_basic_stats.distinct_count.load(std::memory_order_acquire),
+                        result.counters.row_count - result.counters.null_count);
+  result.version = m_basic_stats.version.load(std::memory_order_acquire);
+  result.minimum = m_basic_stats.min_value.load(std::memory_order_relaxed);
+  result.maximum = m_basic_stats.max_value.load(std::memory_order_relaxed);
+  if (m_histogram) result.histogram = std::make_shared<EquiHeightHistogram>(*m_histogram);
+  return result;
+}
+
 uint64_t ColumnStatistics::non_null_count() const {
   const BasicStatsSnapshot s = snapshot_basic();
   assert(s.null_count <= s.row_count);

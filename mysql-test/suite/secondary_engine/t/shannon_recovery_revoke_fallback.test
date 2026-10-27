@@ -1,5 +1,6 @@
 # Copyright (c) 2026, Shannon Data AI and/or its affiliates.
---source suite/secondary_engine/include/storage_layer_baseline.inc
+--let $shannon_storage_layer_case = baseline
+--source suite/secondary_engine/include/shannon_storage_layer.inc
 CALL mtr.add_suppression("Rapid could not durably revoke fast recovery");
 CALL mtr.add_suppression("Rapid COPY_INFO could not enqueue row change");
 CALL mtr.add_suppression("Rapid row notification failed");
@@ -15,4 +16,5 @@ SET GLOBAL debug=@saved_debug;
 --let $storage_restart_debug = --loose-rapid_schema_embedding=OFF
 --let $storage_route = primary_reloads
 --let $storage_expected = 1:11,2:20,3:30
---source suite/secondary_engine/include/storage_layer_manual_load.inc
+--let $shannon_storage_layer_case = manual_load
+--source suite/secondary_engine/include/shannon_storage_layer.inc

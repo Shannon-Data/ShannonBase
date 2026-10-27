@@ -38,10 +38,57 @@ insert into u2 values (1,100),(2,200),(3,300),(4,400);
 alter table u1 secondary_load;
 alter table u2 secondary_load;
 
---let $shannon_reads = suite/secondary_engine/include/shannon_dml_upsert_reads.inc
 
 --echo ##### stage 0: after the initial load
---source suite/secondary_engine/include/shannon_3way.inc
+--let $dml_upsert_phase = 1
+--let $dml_upsert_remaining = 8
+while ($dml_upsert_remaining) {
+--let $dml_upsert_scenario = 3
+while ($dml_upsert_scenario) {
+  if ($dml_upsert_scenario == 3) {
+    --echo # ----- InnoDB baseline -----
+    set session use_secondary_engine = off;
+    --disable_warnings
+    set session optimizer_switch='hypergraph_optimizer=off';
+    --enable_warnings
+  }
+  if ($dml_upsert_scenario == 2) {
+    --echo # ----- Rapid (legacy optimizer) -----
+    set session use_secondary_engine = forced;
+  }
+  if ($dml_upsert_scenario == 1) {
+    --echo # ----- Rapid (hypergraph optimizer) -----
+    --disable_warnings
+    set session optimizer_switch='hypergraph_optimizer=on';
+    --enable_warnings
+  }
+# Read block for shannon_dml_upsert_corner.test: sourced once per scenario by
+# Every statement is fully ordered so the three scenarios can
+# be compared byte for byte.
+select id, k, v from u1 order by id;
+--let $assert_query = select id, k, v from u1 order by id
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+select count(*) as n, count(k) as nk, count(v) as nv, sum(k) as sk from u1;
+--let $assert_query = select count(*) as n, count(k) as nk, count(v) as nv, sum(k) as sk from u1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+select k, count(*) as c from u1 group by k order by k;
+--let $assert_query = select k, count(*) as c from u1 group by k order by k
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+select u1.id, u1.k, u2.w from u1 join u2 on u1.id = u2.id order by u1.id;
+--let $assert_query = select u1.id, u1.k, u2.w from u1 join u2 on u1.id = u2.id order by u1.id
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+select id, w from u2 order by id;
+--let $assert_query = select id, w from u2 order by id
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--dec $dml_upsert_scenario
+}
+set session use_secondary_engine = off;
+set session optimizer_switch = default;
+if ($dml_upsert_phase == 1) {
 --let $assert_digest = SELECT GROUP_CONCAT(CONCAT(id,':',COALESCE(k,'NULL'),':',COALESCE(v,'NULL')) ORDER BY id) FROM u1
 --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 --let $assert_digest = SELECT GROUP_CONCAT(CONCAT(id,':',w) ORDER BY id) FROM u2
@@ -59,7 +106,8 @@ set session use_secondary_engine = off;
 alter table u1 secondary_unload;
 alter table u1 secondary_load;
 --SLEEP 1
---source suite/secondary_engine/include/shannon_3way.inc
+}
+if ($dml_upsert_phase == 2) {
 --let $assert_digest = SELECT GROUP_CONCAT(CONCAT(id,':',COALESCE(k,'NULL'),':',COALESCE(v,'NULL')) ORDER BY id) FROM u1
 --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 --let $assert_digest = SELECT GROUP_CONCAT(CONCAT(id,':',w) ORDER BY id) FROM u2
@@ -75,7 +123,8 @@ set session use_secondary_engine = off;
 alter table u1 secondary_unload;
 alter table u1 secondary_load;
 --SLEEP 1
---source suite/secondary_engine/include/shannon_3way.inc
+}
+if ($dml_upsert_phase == 3) {
 --let $assert_digest = SELECT GROUP_CONCAT(CONCAT(id,':',COALESCE(k,'NULL'),':',COALESCE(v,'NULL')) ORDER BY id) FROM u1
 --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 --let $assert_digest = SELECT GROUP_CONCAT(CONCAT(id,':',w) ORDER BY id) FROM u2
@@ -91,7 +140,8 @@ set session use_secondary_engine = off;
 alter table u1 secondary_unload;
 alter table u1 secondary_load;
 --SLEEP 1
---source suite/secondary_engine/include/shannon_3way.inc
+}
+if ($dml_upsert_phase == 4) {
 --let $assert_digest = SELECT GROUP_CONCAT(CONCAT(id,':',COALESCE(k,'NULL'),':',COALESCE(v,'NULL')) ORDER BY id) FROM u1
 --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 --let $assert_digest = SELECT GROUP_CONCAT(CONCAT(id,':',w) ORDER BY id) FROM u2
@@ -100,7 +150,8 @@ alter table u1 secondary_load;
 --echo ##### stage 4: multi-table UPDATE -- one statement changes u1 and u2
 update u1 join u2 on u1.id = u2.id set u1.k = u1.k + u2.w, u2.w = u2.w + 1;
 --SLEEP 1
---source suite/secondary_engine/include/shannon_3way.inc
+}
+if ($dml_upsert_phase == 5) {
 --let $assert_digest = SELECT GROUP_CONCAT(CONCAT(id,':',COALESCE(k,'NULL'),':',COALESCE(v,'NULL')) ORDER BY id) FROM u1
 --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 --let $assert_digest = SELECT GROUP_CONCAT(CONCAT(id,':',w) ORDER BY id) FROM u2
@@ -109,7 +160,8 @@ update u1 join u2 on u1.id = u2.id set u1.k = u1.k + u2.w, u2.w = u2.w + 1;
 --echo ##### stage 5: multi-table DELETE -- id 4 disappears from both tables
 delete u1, u2 from u1 join u2 on u1.id = u2.id where u1.id = 4;
 --SLEEP 1
---source suite/secondary_engine/include/shannon_3way.inc
+}
+if ($dml_upsert_phase == 6) {
 --let $assert_digest = SELECT GROUP_CONCAT(CONCAT(id,':',COALESCE(k,'NULL'),':',COALESCE(v,'NULL')) ORDER BY id) FROM u1
 --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 --let $assert_digest = SELECT GROUP_CONCAT(CONCAT(id,':',w) ORDER BY id) FROM u2
@@ -118,7 +170,8 @@ delete u1, u2 from u1 join u2 on u1.id = u2.id where u1.id = 4;
 --echo ##### stage 6: DELETE .. ORDER BY .. LIMIT -- drops the highest id only
 delete from u1 order by id desc limit 1;
 --SLEEP 1
---source suite/secondary_engine/include/shannon_3way.inc
+}
+if ($dml_upsert_phase == 7) {
 --let $assert_digest = SELECT GROUP_CONCAT(CONCAT(id,':',COALESCE(k,'NULL'),':',COALESCE(v,'NULL')) ORDER BY id) FROM u1
 --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 --let $assert_digest = SELECT GROUP_CONCAT(CONCAT(id,':',w) ORDER BY id) FROM u2
@@ -127,7 +180,10 @@ delete from u1 order by id desc limit 1;
 --echo ##### stage 7: UPDATE of the primary key -- the row's identity changes
 update u1 set id = 100 where id = 1;
 --SLEEP 1
---source suite/secondary_engine/include/shannon_3way.inc
+}
+--inc $dml_upsert_phase
+--dec $dml_upsert_remaining
+}
 --let $assert_digest = SELECT GROUP_CONCAT(CONCAT(id,':',COALESCE(k,'NULL'),':',COALESCE(v,'NULL')) ORDER BY id) FROM u1
 --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 --let $assert_digest = SELECT GROUP_CONCAT(CONCAT(id,':',w) ORDER BY id) FROM u2

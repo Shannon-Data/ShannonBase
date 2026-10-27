@@ -24,8 +24,11 @@
    The fundmental code for imcs optimizer.
 */
 #include "storage/rapid_engine/optimizer/query_plan.h"
+
+#include <limits>
 #include "sql/dd/cache/dictionary_client.h"    // Dictionary_client
 #include "storage/innobase/include/dict0dd.h"  //dd_table_is_partitioned
+#include "storage/rapid_engine/cost/planning_statistics.h"
 #include "storage/rapid_engine/executor/iterators/materialize_iterator.h"
 #include "storage/rapid_engine/executor/iterators/nested_loop_iterator.h"
 #include "storage/rapid_engine/executor/iterators/sort_iterator.h"
@@ -584,23 +587,19 @@ bool LocalAgg::FitsHashMemoryBudget(THD *thd) const {
   // Only a grouping hash table scales with the group count.
   if (strategy != AggregateStrategy::HASH || is_global || group_by.empty()) return true;
 
-  // Group count from the IMCS NDV statistics. The optimizer's row estimate is not a
-  // usable substitute: a 4-group query estimates 251k rows.
-  double groups = 1.0;
-  double key_bytes = 0.0;
-  for (const Item *item : group_by) {
-    if (item->type() != Item::FIELD_ITEM) return true;
-    Field *field = down_cast<const Item_field *>(item)->field;
-    if (field == nullptr || field->table == nullptr) return true;
-    auto *rpd_table = Utils::rpd_lookup_func()(field->table);
-    if (rpd_table == nullptr || field->field_index() >= rpd_table->meta().fields.size()) return true;
-    const auto *stats = rpd_table->meta().fields[field->field_index()].statistics.get();
-    if (stats == nullptr) return true;
-    const uint64_t distinct = stats->get_basic_stats().distinct_count;
-    if (distinct == 0) return true;
-    groups *= static_cast<double>(distinct);
-    key_bytes += static_cast<double>(item->max_length) + 1.0;  // + null byte
+  double input_rows = std::numeric_limits<double>::max();
+  if (!children.empty() && children[0]) {
+    const auto *child = children[0].get();
+    const double rows = child->estimated_rows > 0 && child->estimated_rows != HA_POS_ERROR
+                            ? static_cast<double>(child->estimated_rows)
+                        : child->original_path ? child->original_path->num_output_rows()
+                                               : -1.0;
+    if (std::isfinite(rows) && rows >= 0) input_rows = rows;
   }
+  double groups;
+  if (!PlanningStatistics::Groups(thd, group_by, input_rows, &groups)) return true;
+  double key_bytes = 0.0;
+  for (const Item *item : group_by) key_bytes += static_cast<double>(item->max_length) + 1.0;
 
   const double group_bytes =
       key_bytes + static_cast<double>(Executor::VectorizedAggregateIterator::HashGroupFixedBytes(aggregates.size()));

@@ -31,10 +31,54 @@ create table d1 (id int primary key, k int null) secondary_engine=rapid;
 insert into d1 values (1,10),(2,20),(3,null),(4,40);
 alter table d1 secondary_load;
 
---let $shannon_reads = suite/secondary_engine/include/shannon_online_ddl_reads.inc
 
 --echo ##### stage 0: as loaded
---source suite/secondary_engine/include/shannon_3way.inc
+--let $online_ddl_phase = 1
+--let $online_ddl_remaining = 7
+while ($online_ddl_remaining) {
+--let $online_ddl_scenario = 3
+while ($online_ddl_scenario) {
+  if ($online_ddl_scenario == 3) {
+    --echo # ----- InnoDB baseline -----
+    set session use_secondary_engine = off;
+    --disable_warnings
+    set session optimizer_switch='hypergraph_optimizer=off';
+    --enable_warnings
+  }
+  if ($online_ddl_scenario == 2) {
+    --echo # ----- Rapid (legacy optimizer) -----
+    set session use_secondary_engine = forced;
+  }
+  if ($online_ddl_scenario == 1) {
+    --echo # ----- Rapid (hypergraph optimizer) -----
+    --disable_warnings
+    set session optimizer_switch='hypergraph_optimizer=on';
+    --enable_warnings
+  }
+# Read block for shannon_online_ddl_corner.test. Only columns that exist at
+# every stage are named explicitly; `select *` is deliberately included so a
+# stale column layout in the IMCS shows up.
+select * from d1 order by id;
+--let $assert_query = select * from d1 order by id
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+select id, k from d1 order by id;
+--let $assert_query = select id, k from d1 order by id
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+select k, count(*) as c, sum(k) as s from d1 group by k order by k;
+--let $assert_query = select k, count(*) as c, sum(k) as s from d1 group by k order by k
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+select id from d1 where k >= 20 order by id;
+--let $assert_query = select id from d1 where k >= 20 order by id
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--dec $online_ddl_scenario
+}
+set session use_secondary_engine = off;
+set session optimizer_switch = default;
+if ($online_ddl_phase == 1) {
 
 --echo ##### column DDL is refused while the secondary engine is still defined
 --echo # both while loaded ...
@@ -51,13 +95,15 @@ alter table d1 secondary_engine = NULL;
 alter table d1 add column extra int not null default 7;
 alter table d1 secondary_engine = rapid;
 alter table d1 secondary_load;
---source suite/secondary_engine/include/shannon_3way.inc
+}
+if ($online_ddl_phase == 2) {
 
 --echo ##### stage 2: the new column takes part in DML and is read back
 insert into d1 values (5,50,55);
 update d1 set extra = extra + 1 where id = 1;
 --SLEEP 1
---source suite/secondary_engine/include/shannon_3way.inc
+}
+if ($online_ddl_phase == 3) {
 
 --echo ##### stage 3: MODIFY -- widen k from int to bigint
 alter table d1 secondary_unload;
@@ -67,7 +113,8 @@ alter table d1 secondary_engine = rapid;
 alter table d1 secondary_load;
 insert into d1 values (6,4294967296,66);
 --SLEEP 1
---source suite/secondary_engine/include/shannon_3way.inc
+}
+if ($online_ddl_phase == 4) {
 
 --echo ##### stage 4: ADD INDEX on a loaded table, then DROP it
 alter table d1 secondary_unload;
@@ -75,14 +122,16 @@ alter table d1 secondary_engine = NULL;
 alter table d1 add index ix_k (k);
 alter table d1 secondary_engine = rapid;
 alter table d1 secondary_load;
---source suite/secondary_engine/include/shannon_3way.inc
+}
+if ($online_ddl_phase == 5) {
 
 alter table d1 secondary_unload;
 alter table d1 secondary_engine = NULL;
 alter table d1 drop index ix_k;
 alter table d1 secondary_engine = rapid;
 alter table d1 secondary_load;
---source suite/secondary_engine/include/shannon_3way.inc
+}
+if ($online_ddl_phase == 6) {
 
 --echo ##### stage 5: DROP COLUMN -- the IMCS must not keep the old layout
 alter table d1 secondary_unload;
@@ -90,7 +139,10 @@ alter table d1 secondary_engine = NULL;
 alter table d1 drop column extra;
 alter table d1 secondary_engine = rapid;
 alter table d1 secondary_load;
---source suite/secondary_engine/include/shannon_3way.inc
+}
+--inc $online_ddl_phase
+--dec $online_ddl_remaining
+}
 
 use test;
 drop database sh_ddlx;

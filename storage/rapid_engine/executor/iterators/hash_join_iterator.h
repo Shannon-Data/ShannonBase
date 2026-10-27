@@ -198,7 +198,7 @@ class VectorizedHashJoinIterator final : public RowIterator, public BatchReadabl
   bool BuildHashTable();
   void BuildRuntimeFilter();
   void PublishBloomStats();
-  Utils::RuntimeBloomPolicy RuntimeFilterPolicy() const;
+  Optimizer::Utils::RuntimeBloomPolicy RuntimeFilterPolicy() const;
   void ReassessRuntimeFilter();
   bool RejectRuntimeHash(uint64_t hash);
   bool CanPushRuntimeFilter() const;
@@ -437,7 +437,7 @@ class VectorizedHashJoinIterator final : public RowIterator, public BatchReadabl
   std::pmr::vector<size_t> m_hash_bucket_tails{&m_build_memory};
   std::pmr::vector<HashSlot> m_hash_slots{&m_build_memory};
   std::pmr::vector<uchar> m_hash_key_arena{&m_build_memory};
-  Utils::RuntimeBloomFilter m_bloom{&m_build_memory};
+  Optimizer::Utils::RuntimeBloomFilter m_bloom{&m_build_memory};
   bool m_bloom_active{false};
   bool m_probe_batch_filtered{false};
   bool m_bloom_pushdown_disabled{false};

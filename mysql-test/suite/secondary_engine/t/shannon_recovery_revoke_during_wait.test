@@ -1,5 +1,6 @@
 --source include/have_debug_sync.inc
---source suite/secondary_engine/include/storage_layer_baseline.inc
+--let $shannon_storage_layer_case = baseline
+--source suite/secondary_engine/include/shannon_storage_layer.inc
 CALL mtr.add_suppression("RecoveryManager: a source change reached sh_storage_recovery.t");
 CALL mtr.add_suppression("recovery eligibility is revoked or cannot be verified; automatic recovery stopped");
 --let $restart_parameters = restart: --rapid_reload_on_restart=ON --debug=d,rapid_pause_restart_recovery

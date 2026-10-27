@@ -1,0 +1,59 @@
+# Cost refinement runs on the Rapid plan after SQL optimization. The known
+# four-group NDV must survive translation and use the same per-query snapshot.
+--source include/no_ps_protocol.inc
+--disable_query_log
+--disable_result_log
+SET use_secondary_engine=OFF;
+CREATE TABLE post_cost_groups(id INT PRIMARY KEY,g INT NOT NULL,h INT NOT NULL,v INT)
+ SECONDARY_ENGINE=rapid;
+INSERT INTO post_cost_groups WITH RECURSIVE n AS
+ (SELECT 1 i UNION ALL SELECT i+1 FROM n WHERE i<1000)
+ SELECT i,MOD(i,4),7,i FROM n;
+ANALYZE TABLE post_cost_groups;
+ALTER TABLE post_cost_groups SECONDARY_LOAD;
+SET optimizer_switch='hypergraph_optimizer=on';
+SET secondary_engine_cost_threshold=0;
+SET use_secondary_engine=FORCED;
+SET optimizer_trace_max_mem_size=1048576;
+SET optimizer_trace='enabled=on';
+--enable_result_log
+--enable_query_log
+SELECT g,h,COUNT(*) c,SUM(v) s FROM post_cost_groups GROUP BY g,h ORDER BY g,h;
+--disable_query_log
+SET optimizer_trace='enabled=off';
+SET use_secondary_engine=OFF;
+--enable_query_log
+SELECT LOCATE('imcs_ndv_product',TRACE)>0 AS uses_imcs_ndv,
+ REGEXP_LIKE(TRACE,'"estimated_groups": 4([.]0+)?[[:space:],}]') AS estimates_four_groups
+ FROM information_schema.optimizer_trace;
+--disable_query_log
+DROP TABLE post_cost_groups;
+--enable_query_log
+
+# Cost changes can expose range paths that used to lose to scans. Fractional
+# TIMESTAMP bounds must retain their precision through the native fallback.
+--disable_query_log
+--disable_result_log
+SET use_secondary_engine=OFF;
+SET @saved_time_zone=@@time_zone;
+SET time_zone='+05:30';
+CREATE TABLE post_cost_timestamp(id INT PRIMARY KEY, ts TIMESTAMP(6) NULL, KEY k_ts(ts))
+ SECONDARY_ENGINE=rapid;
+INSERT INTO post_cost_timestamp VALUES
+ (1,'2024-01-01 00:00:00.000001'),(2,'2024-01-01 00:00:00.000002'),(3,NULL);
+ALTER TABLE post_cost_timestamp SECONDARY_LOAD;
+SET optimizer_switch='hypergraph_optimizer=on';
+SET use_secondary_engine=FORCED;
+--let $assert_queries_off = 1
+--let $assert_results_off = 1
+--let $assert_query = SELECT id FROM post_cost_timestamp FORCE INDEX(k_ts) WHERE ts='2024-01-01 00:00:00.000001'
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_queries_off = 1
+--let $assert_results_off = 1
+--let $assert_query = SELECT id FROM post_cost_timestamp FORCE INDEX(k_ts) WHERE ts>'2024-01-01 00:00:00.000001'
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+SET use_secondary_engine=OFF;
+DROP TABLE post_cost_timestamp;
+SET time_zone=@saved_time_zone;
+--enable_result_log
+--enable_query_log

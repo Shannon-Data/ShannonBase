@@ -1,0 +1,11 @@
+SELECT g,h,COUNT(*) c,SUM(v) s FROM post_cost_groups GROUP BY g,h ORDER BY g,h;
+g	h	c	s
+0	7	250	125500
+1	7	250	124750
+2	7	250	125000
+3	7	250	125250
+SELECT LOCATE('imcs_ndv_product',TRACE)>0 AS uses_imcs_ndv,
+REGEXP_LIKE(TRACE,'"estimated_groups": 4([.]0+)?[[:space:],}]') AS estimates_four_groups
+FROM information_schema.optimizer_trace;
+uses_imcs_ndv	estimates_four_groups
+1	1
