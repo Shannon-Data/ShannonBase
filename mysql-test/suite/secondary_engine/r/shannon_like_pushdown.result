@@ -1,0 +1,115 @@
+SET NAMES utf8mb4 COLLATE utf8mb4_0900_ai_ci;
+CREATE TABLE like_pushdown (
+id INT PRIMARY KEY, s VARCHAR(80), c CHAR(12), pattern VARCHAR(80)
+) SECONDARY_ENGINE=RAPID;
+INSERT INTO like_pushdown VALUES
+(1,'alpha','alpha','a%'), (2,'ALPINE','ALPINE','a%'),
+(3,'beta','beta','b%'), (4,'a_tail','a_tail','a!_%'),
+(5,'a%tail','a%tail','a!%%'), (6,'','', '%'),
+(7,NULL,NULL,'%'), (8,'éclair','éclair','é%'),
+(9,'alpha  ','alpha  ','a%'), (10,'猫咪','猫咪','_%');
+ALTER TABLE like_pushdown SECONDARY_LOAD;
+SET SESSION use_secondary_engine=FORCED;
+SET SESSION optimizer_switch='hypergraph_optimizer=on';
+Warnings:
+Warning	1287	The hypergraph optimizer is highly experimental and is meant for testing only. Do not enable it unless you are a MySQL developer.
+# Supported LIKE and NOT LIKE qualify inside the scan.
+EXPLAIN FORMAT=TREE SELECT id FROM like_pushdown WHERE s LIKE 'a%' ORDER BY id;
+EXPLAIN
+-> Sort: like_pushdown.id  (rows=1)
+    -> Vectorized table scan on like_pushdown in secondary engine Rapid [filter: like_pushdown.s LIKE a%]  (rows=1)
+
+Warnings:
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+EXPLAIN FORMAT=TREE SELECT id FROM like_pushdown WHERE s NOT LIKE 'a%' ORDER BY id;
+EXPLAIN
+-> Vectorized index scan on like_pushdown using PRIMARY in secondary engine Rapid [filter: like_pushdown.s NOT LIKE a%]  (rows=5)
+
+Warnings:
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+# AND can push LIKE independently; OR stays intact above the scan.
+EXPLAIN FORMAT=TREE SELECT id FROM like_pushdown WHERE s LIKE 'a%' AND LENGTH(s)>5 ORDER BY id;
+EXPLAIN
+-> Sort: like_pushdown.id  (rows=1)
+    -> Filter: (length(like_pushdown.s) > 5)  (rows=1)
+        -> Vectorized table scan on like_pushdown in secondary engine Rapid [filter: like_pushdown.s LIKE a%]  (rows=1)
+
+Warnings:
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+EXPLAIN FORMAT=TREE SELECT id FROM like_pushdown WHERE s LIKE 'a%' OR id=3 ORDER BY id;
+EXPLAIN
+-> Sort: like_pushdown.id  (rows=1)
+    -> Filter: ((like_pushdown.s like 'a%') or (like_pushdown.id = 3))  (rows=1)
+        -> Vectorized table scan on like_pushdown in secondary engine Rapid  (rows=10)
+
+Warnings:
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+# Escapes, collation conversion fallback and NULL preserve SQL semantics.
+EXPLAIN FORMAT=TREE SELECT id FROM like_pushdown WHERE s LIKE pattern ORDER BY id;
+EXPLAIN
+-> Sort: like_pushdown.id  (rows=1)
+    -> Filter: (like_pushdown.s like like_pushdown.pattern)  (rows=1)
+        -> Vectorized table scan on like_pushdown in secondary engine Rapid  (rows=10)
+
+Warnings:
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+EXPLAIN FORMAT=TREE SELECT id FROM like_pushdown WHERE s COLLATE utf8mb4_bin LIKE 'a%' ORDER BY id;
+EXPLAIN
+-> Filter: ((like_pushdown.s collate utf8mb4_bin) like 'a%')  (rows=1)
+    -> Vectorized index scan on like_pushdown using PRIMARY in secondary engine Rapid  (rows=10)
+
+Warnings:
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+SET @saved_like_sql_mode=@@SESSION.sql_mode;
+SET SESSION sql_mode='NO_BACKSLASH_ESCAPES';
+SET SESSION sql_mode='PAD_CHAR_TO_FULL_LENGTH';
+Warnings:
+Warning	3090	Changing sql mode 'PAD_CHAR_TO_FULL_LENGTH' is deprecated. It will be removed in a future release.
+EXPLAIN FORMAT=TREE SELECT id FROM like_pushdown WHERE c LIKE 'alpha' ORDER BY id;
+EXPLAIN
+-> Sort: like_pushdown.id  (rows=1)
+    -> Filter: (like_pushdown.c like 'alpha')  (rows=1)
+        -> Vectorized table scan on like_pushdown in secondary engine Rapid  (rows=10)
+
+Warnings:
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+SET SESSION sql_mode=@saved_like_sql_mode;
+# Prepared execution recompiles changed constant patterns.
+PREPARE lp FROM 'SELECT id FROM like_pushdown WHERE s LIKE ? ORDER BY id';
+SET @pattern='a%';
+EXECUTE lp USING @pattern;
+id
+1
+2
+4
+5
+9
+SET @pattern='b%';
+EXECUTE lp USING @pattern;
+id
+3
+DEALLOCATE PREPARE lp;
+# Dictionary growth after loading must include new matching IDs.
+INSERT INTO like_pushdown VALUES (11,'added','added','a%');
+SET SESSION optimizer_switch='hypergraph_optimizer=off';
+SET SESSION use_secondary_engine=OFF;
+DROP TABLE like_pushdown;
+# ENUM and SET use numeric storage and keep the MySQL filter.
+CREATE TABLE like_enum (id INT PRIMARY KEY, e ENUM('alpha','beta'), s SET('alpha','beta')) SECONDARY_ENGINE=RAPID;
+INSERT INTO like_enum VALUES (1,'alpha','alpha'),(2,'beta','beta'),(3,NULL,NULL);
+ALTER TABLE like_enum SECONDARY_LOAD;
+SET SESSION use_secondary_engine=FORCED;
+SET SESSION optimizer_switch='hypergraph_optimizer=on';
+Warnings:
+Warning	1287	The hypergraph optimizer is highly experimental and is meant for testing only. Do not enable it unless you are a MySQL developer.
+EXPLAIN FORMAT=TREE SELECT id FROM like_enum WHERE e LIKE 'a%' ORDER BY id;
+EXPLAIN
+-> Sort: like_enum.id  (rows=1)
+    -> Filter: (like_enum.e like 'a%')  (rows=1)
+        -> Vectorized table scan on like_enum in secondary engine Rapid  (rows=3)
+
+Warnings:
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+SET SESSION use_secondary_engine=OFF;
+SET SESSION optimizer_switch='hypergraph_optimizer=off';
+DROP TABLE like_enum;

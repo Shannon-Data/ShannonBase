@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cstring>
 #include <future>
+#include <limits>
 #include <thread>
 #include <vector>
 #include "storage/rapid_engine/utils/memory_pool.h"
@@ -312,6 +313,96 @@ TEST(RapidResourcesTest, LeaseMoveTransfersOwnershipExactlyOnce) {
   second.reset();
   EXPECT_EQ(0u, budget.reserved());
   EXPECT_EQ(100u, budget.reserve(&query, 100).bytes());
+}
+
+TEST(RapidResourcesTest, SpillFanoutTracksResidentDemandAndBoundsBadEstimates) {
+  EXPECT_EQ(2u, initial_spill_fanout(1500, 1000));
+  EXPECT_EQ(4u, initial_spill_fanout(1501, 1000));
+  EXPECT_EQ(8u, initial_spill_fanout(5000, 1000));
+  EXPECT_EQ(16u, initial_spill_fanout(1e30, 1000));
+  EXPECT_EQ(16u, initial_spill_fanout(1, 0));
+  EXPECT_EQ(16u, initial_spill_fanout(-1, 1000));
+  EXPECT_EQ(16u, initial_spill_fanout(std::numeric_limits<double>::quiet_NaN(), 1000));
+  size_t previous = 16;
+  for (size_t budget = 1; budget <= 16384; budget *= 2) {
+    const size_t fanout = initial_spill_fanout(8000, budget);
+    EXPECT_EQ(0u, fanout & (fanout - 1));
+    EXPECT_GE(fanout, 2u);
+    EXPECT_LE(fanout, previous);
+    previous = fanout;
+  }
+}
+
+TEST(RapidResourcesTest, ResizingBudgetPreservesLiveGrantsAndRejectsUnsafeShrink) {
+  MemoryBudget budget(100, 60);
+  int q1 = 0, q2 = 0;
+  auto first = budget.reserve(&q1, 60);
+  auto second = budget.reserve(&q2, 40);
+  EXPECT_FALSE(budget.set_limits(99, 100));
+  EXPECT_FALSE(budget.set_limits(200, 59));
+  EXPECT_EQ(0u, first.try_grow(1));  // rejected update changed neither limit
+  ASSERT_TRUE(budget.set_limits(200, 120));
+  EXPECT_EQ(60u, first.try_grow(80));
+  EXPECT_EQ(160u, budget.reserved());
+  EXPECT_EQ(120u, budget.reserved_for(&q1));
+  first.release_bytes(100);
+  ASSERT_TRUE(budget.set_limits(60, 40));
+  EXPECT_EQ(0u, second.try_grow(1));
+  first.reset();
+  second.reset();
+  EXPECT_EQ(0u, budget.reserved());
+  EXPECT_EQ(0u, budget.active_grants());
+}
+
+class ReclaimingVictim final : public Evictable {
+ public:
+  explicit ReclaimingVictim(MemoryBudget::Reservation *grant = nullptr) : grant(grant) {}
+  size_t Evict(size_t target) override {
+    ++calls;
+    requested = target;
+    if (!grant) return 0;
+    const size_t bytes = std::min(target, grant->bytes());
+    grant->release_bytes(bytes);
+    return bytes;
+  }
+  MemoryBudget::Reservation *grant;
+  size_t calls{0}, requested{0};
+};
+
+TEST_F(RapidSystemPoolTest, GrowthEvictsOnlyTheDeficitAndNeverTheRequester) {
+  int query = 0;
+  const size_t floor = system_memory_limits().operation;
+  auto requester_grant = reserve_query_memory(&query, QueryMemoryOperator::kHashJoin, floor);
+  auto victim_grant = reserve_query_memory(&query, QueryMemoryOperator::kHashAggregate, floor);
+  ReclaimingVictim requester(&requester_grant), victim(&victim_grant);
+  register_evictable(&query, QueryMemoryOperator::kHashJoin, &requester);
+  register_evictable(&query, QueryMemoryOperator::kHashAggregate, &victim);
+  EXPECT_EQ(2 * floor, grow_query_memory(requester_grant, QueryMemoryOperator::kHashJoin, 2 * floor, &requester));
+  EXPECT_EQ(0u, victim.calls);
+  // Query cap is four floors: one floor can be granted directly, and only
+  // the remaining floor should be requested from this query's victim.
+  EXPECT_EQ(4 * floor, grow_query_memory(requester_grant, QueryMemoryOperator::kHashJoin, 4 * floor, &requester));
+  EXPECT_EQ(1u, victim.calls);
+  EXPECT_EQ(floor, victim.requested);
+  EXPECT_EQ(0u, requester.calls);
+  EXPECT_EQ(0u, victim_grant.bytes());
+  unregister_evictable(&victim);
+  unregister_evictable(&requester);
+}
+
+TEST_F(RapidSystemPoolTest, DeferredEvictionDoesNotWaitOrEvictAnotherQuery) {
+  int q1 = 0, q2 = 0;
+  const size_t floor = system_memory_limits().operation;
+  auto grant = reserve_query_memory(&q1, QueryMemoryOperator::kHashJoin, floor);
+  EXPECT_EQ(4 * floor, grant.grow(4 * floor));
+  ReclaimingVictim deferred, unrelated;
+  register_evictable(&q1, QueryMemoryOperator::kHashAggregate, &deferred);
+  register_evictable(&q2, QueryMemoryOperator::kHashAggregate, &unrelated);
+  EXPECT_EQ(4 * floor, grow_query_memory(grant, QueryMemoryOperator::kHashJoin, 8 * floor));
+  EXPECT_EQ(1u, deferred.calls);
+  EXPECT_EQ(0u, unrelated.calls);
+  unregister_evictable(&unrelated);
+  unregister_evictable(&deferred);
 }
 
 TEST(RapidResourcesTest, ConcurrentOperatorsCannotDuplicateHeadroom) {

@@ -310,82 +310,6 @@ class PlanningMemoryScope {
   inline static thread_local PlanningMemoryScope *s_current{nullptr};
 };
 
-/** Atomic global/query reservations. A grant is owned until its reservation is destroyed. */
-class MemoryBudget {
- public:
-  class Reservation {
-   public:
-    Reservation() = default;
-    ~Reservation() { reset(); }
-    Reservation(const Reservation &) = delete;
-    Reservation &operator=(const Reservation &) = delete;
-    Reservation(Reservation &&other) noexcept { swap(other); }
-    Reservation &operator=(Reservation &&other) noexcept {
-      if (this != &other) {
-        reset();
-        swap(other);
-      }
-      return *this;
-    }
-    size_t bytes() const { return m_bytes; }
-    explicit operator bool() const { return m_bytes != 0; }
-    void reset() noexcept {
-      if (m_owner) m_owner->release(m_query, m_bytes);
-      m_owner = nullptr;
-      m_bytes = 0;
-      m_lifetime.reset();
-    }
-    void retain(std::shared_ptr<void> lifetime) { m_lifetime = std::move(lifetime); }
-
-   private:
-    friend class MemoryBudget;
-    Reservation(MemoryBudget *owner, const void *query, size_t bytes)
-        : m_owner(owner), m_query(query), m_bytes(bytes) {}
-    void swap(Reservation &other) noexcept {
-      std::swap(m_owner, other.m_owner);
-      std::swap(m_query, other.m_query);
-      std::swap(m_bytes, other.m_bytes);
-      std::swap(m_lifetime, other.m_lifetime);
-    }
-    MemoryBudget *m_owner{nullptr};
-    const void *m_query{nullptr};
-    size_t m_bytes{0};
-    std::shared_ptr<void> m_lifetime;
-  };
-
-  MemoryBudget(size_t global_limit, size_t query_limit) : m_global_limit(global_limit), m_query_limit(query_limit) {}
-  Reservation reserve(const void *query, size_t requested, size_t minimum = 1, size_t available_capacity = SIZE_MAX) {
-    std::lock_guard lock(m_mutex);
-    const auto found = m_queries.find(query);
-    const size_t query_used = found == m_queries.end() ? 0 : found->second;
-    const size_t available = available_capacity > m_reserved ? available_capacity - m_reserved : 0;
-    const size_t bytes = std::min({requested, m_global_limit - m_reserved, m_query_limit - query_used, available});
-    if (bytes == 0 || bytes < minimum) return {};
-    // Insert may throw; no counters have changed until it succeeds.
-    m_queries[query] = query_used + bytes;
-    m_reserved += bytes;
-    return Reservation(this, query, bytes);
-  }
-  size_t reserved() const {
-    std::lock_guard lock(m_mutex);
-    return m_reserved;
-  }
-
- private:
-  void release(const void *query, size_t bytes) noexcept {
-    std::lock_guard lock(m_mutex);
-    auto found = m_queries.find(query);
-    if (found == m_queries.end()) return;
-    found->second -= bytes;
-    m_reserved -= bytes;
-    if (found->second == 0) m_queries.erase(found);
-  }
-  const size_t m_global_limit, m_query_limit;
-  mutable std::mutex m_mutex;
-  size_t m_reserved{0};
-  std::unordered_map<const void *, size_t> m_queries;
-};
-
 enum class QueryMemoryOperator : uint8_t {
   kSort,
   kHashAggregate,
@@ -410,22 +334,216 @@ inline const char *query_memory_operator_name(QueryMemoryOperator op) {
   return "unknown";
 }
 
+/** An operator that can give memory back at a safe point.
+
+    The budget grows a reservation on demand and, when the pool cannot satisfy
+    the growth, asks the cheapest registered operator of the same query to free
+    bytes. An operator that is inside its own Read() must not mutate its state
+    from another frame, so it arms itself and frees at its next safe point
+    instead; it reports how many bytes it actually freed right now. */
+class Evictable {
+ public:
+  virtual ~Evictable() = default;
+  virtual size_t Evict(size_t target) = 0;
+};
+
+/** Atomic global/query reservations. A grant is owned until its reservation is destroyed. */
+class MemoryBudget {
+ public:
+  class Reservation {
+   public:
+    Reservation() = default;
+    ~Reservation() { reset(); }
+    Reservation(const Reservation &) = delete;
+    Reservation &operator=(const Reservation &) = delete;
+    Reservation(Reservation &&other) noexcept { swap(other); }
+    Reservation &operator=(Reservation &&other) noexcept {
+      if (this != &other) {
+        reset();
+        swap(other);
+      }
+      return *this;
+    }
+    size_t bytes() const { return m_bytes; }
+    const void *query() const { return m_query; }
+    explicit operator bool() const { return m_bytes != 0; }
+    // Ask for more room. Returns the bytes actually added, which may be less
+    // than requested (or zero) when the global or per-query pool is busy.
+    size_t try_grow(size_t extra);
+    // Grow the grant to `want_total` (never shrinks). `available_capacity` is
+    // what the pool can spare right now, so a lone operator can grow past the
+    // floor without a second operator having to predict it. Returns the grant
+    // after growth.
+    size_t grow(size_t want_total, size_t available_capacity = SIZE_MAX);
+    // Hand back room without dropping the whole grant.
+    void release_bytes(size_t bytes);
+    void reset() noexcept {
+      if (m_owner) m_owner->release(m_query, m_bytes, /*drop_grant=*/true);
+      m_owner = nullptr;
+      m_bytes = 0;
+      m_lifetime.reset();
+    }
+    void retain(std::shared_ptr<void> lifetime) { m_lifetime = std::move(lifetime); }
+
+   private:
+    friend class MemoryBudget;
+    Reservation(MemoryBudget *owner, const void *query, size_t bytes)
+        : m_owner(owner), m_query(query), m_bytes(bytes) {}
+    void swap(Reservation &other) noexcept {
+      std::swap(m_owner, other.m_owner);
+      std::swap(m_query, other.m_query);
+      std::swap(m_bytes, other.m_bytes);
+      std::swap(m_lifetime, other.m_lifetime);
+    }
+    MemoryBudget *m_owner{nullptr};
+    const void *m_query{nullptr};
+    size_t m_bytes{0};
+    std::shared_ptr<void> m_lifetime;
+  };
+
+  MemoryBudget(size_t global_limit, size_t query_limit) : m_global_limit(global_limit), m_query_limit(query_limit) {}
+  // Publish both limits atomically. A shrink cannot invalidate live grants;
+  // callers must release them first. Rejection leaves both limits unchanged.
+  bool set_limits(size_t global_limit, size_t query_limit) {
+    std::lock_guard lock(m_mutex);
+    if (global_limit < m_reserved) return false;
+    for (const auto &entry : m_queries)
+      if (entry.second > query_limit) return false;
+    m_global_limit = global_limit;
+    m_query_limit = query_limit;
+    return true;
+  }
+  Reservation reserve(const void *query, size_t requested, size_t minimum = 1, size_t available_capacity = SIZE_MAX) {
+    std::lock_guard lock(m_mutex);
+    const auto found = m_queries.find(query);
+    const size_t query_used = found == m_queries.end() ? 0 : found->second;
+    const size_t available = available_capacity > m_reserved ? available_capacity - m_reserved : 0;
+    const size_t bytes = std::min({requested, m_global_limit - m_reserved, m_query_limit - query_used, available});
+    if (bytes == 0 || bytes < minimum) return {};
+    // Insert may throw; no counters have changed until it succeeds.
+    m_queries[query] = query_used + bytes;
+    m_reserved += bytes;
+    ++m_grants;
+    return Reservation(this, query, bytes);
+  }
+  size_t reserved() const {
+    std::lock_guard lock(m_mutex);
+    return m_reserved;
+  }
+  size_t reserved_for(const void *query) const {
+    std::lock_guard lock(m_mutex);
+    const auto found = m_queries.find(query);
+    return found == m_queries.end() ? 0 : found->second;
+  }
+  // Live grants, i.e. operators currently holding a reservation. Reported for
+  // diagnostics; the adaptive ceiling splits free space over these.
+  size_t active_grants() const {
+    std::lock_guard lock(m_mutex);
+    return m_grants;
+  }
+  // --- Eviction arbitration -------------------------------------------------
+  // An operator that can give memory back at a safe point registers here. A
+  // grow that the pool cannot satisfy asks the cheapest victims first, which
+  // is the same shape as a buffer manager's eviction queue: the budget is not
+  // sliced up front, it is reclaimed on pressure.
+  void register_evictable(const void *query, QueryMemoryOperator op, Evictable *victim);
+  void unregister_evictable(Evictable *victim);
+  // Ask every other registered operator of `query` to free `needed` bytes.
+  // Returns the bytes the victims actually freed. Victims that cannot free
+  // memory at this point return 0 and arm themselves for their next safe
+  // allocation site instead of mutating state under a suspended frame.
+  size_t evict_for(const void *query, const Evictable *requester, size_t needed);
+
+ private:
+  friend class Reservation;
+  // Extends one reservation. Returns the bytes granted, 0 when the pool or the
+  // per-query limit is exhausted.
+  size_t grow(const void *query, size_t extra);
+
+  struct Victim {
+    const void *query;
+    QueryMemoryOperator op;
+    Evictable *victim;
+  };
+  // Cheapest-to-evict first: a hash aggregate can flush a partition without
+  // restarting its input, an ordered hash join has to re-partition its whole
+  // build, so it is the last choice.
+  static int eviction_rank(QueryMemoryOperator op) {
+    switch (op) {
+      case QueryMemoryOperator::kHashAggregate:
+        return 0;
+      case QueryMemoryOperator::kSort:
+        return 1;
+      case QueryMemoryOperator::kHashJoin:
+        return 2;
+      default:
+        return 3;
+    }
+  }
+
+  void release(const void *query, size_t bytes, bool drop_grant = false) noexcept {
+    std::lock_guard lock(m_mutex);
+    if (drop_grant && m_grants != 0) --m_grants;
+    auto found = m_queries.find(query);
+    if (found == m_queries.end()) return;
+    found->second -= bytes;
+    m_reserved -= bytes;
+    if (found->second == 0) m_queries.erase(found);
+  }
+  size_t m_global_limit, m_query_limit;
+  mutable std::mutex m_mutex;
+  size_t m_reserved{0};
+  size_t m_grants{0};
+  std::vector<Victim> m_victims;
+  std::unordered_map<const void *, size_t> m_queries;
+};
+
 // Query-side memory is budgeted only for the operators below. This is not a
 // whole-mysqld RSS cap: it is a bounded per-query reservation enforced by the
 // operation/query/query_total guards in the system pool.
 MemoryBudget::Reservation reserve_query_memory(const void *query, QueryMemoryOperator op, size_t requested);
 
+// Grows `grant` on demand, doubling from its current size, capped by what the
+// pool can spare right now (minus the scan/checkpoint reserve) and by the
+// per-query limit. When the pool is short, other operators of the same query
+// are asked to free memory first. Returns the grant after growth; the caller
+// decides whether the result is enough and spills otherwise.
+//
+// This is the execution-side budget. Plan choice keeps reading the calibrated
+// floor (`SystemMemoryLimits::operation`) through
+// Util::hash_join_memory_budget()/hash_aggregate_memory_budget(), so a plan is
+// chosen as if memory were tight and only execution adapts.
+size_t grow_query_memory(MemoryBudget::Reservation &grant, QueryMemoryOperator op, size_t want_total,
+                         const Evictable *requester = nullptr);
+// Process-wide (system pool) registry access, so an operator does not have to
+// reach into the pool state to take part in eviction arbitration.
+void register_evictable(const void *query, QueryMemoryOperator op, Evictable *victim);
+void unregister_evictable(Evictable *victim);
+
 // Internal policy, derived from the actual root pool capacity. These are not
 // user variables. Reserve part of sys_pool for scans/checkpoint alongside AP.
+// `operation` is the FLOOR of the per-operator budget, not the grant itself:
+// see operator_memory_limit().
 struct SystemMemoryLimits {
   size_t pool{0}, query_total{0}, query{0}, operation{0};
 };
 SystemMemoryLimits system_memory_limits(size_t root_capacity);
+// Execution-side ceiling for one operator: what the pool could spare right now,
+// capped at the per-query `query` limit and floored at `operation`. It is only
+// a ceiling for grow_query_memory(); the cost model deliberately does not read
+// it, so plan choice cannot drift with pool occupancy. Reported as
+// `operator_cap` in the pool status.
+size_t operator_memory_limit();
+// Choose the initial radix fanout (2..16) from estimated resident bytes and
+// the execution-time hash budget. Freeze it before writing any partitions.
+// Recursive overflow still uses the bounded 16-way fallback for skew.
+size_t initial_spill_fanout(double resident_bytes, size_t hash_budget);
 bool initialize_system_pool(const std::shared_ptr<Utils::MemoryPool> &root);
 void shutdown_system_pool();
 SystemMemoryLimits system_memory_limits();
 struct SystemPoolStats {
   size_t capacity{0}, used{0}, peak{0}, reserved{0}, failed_allocations{0};
+  size_t operator_cap{0};
 };
 SystemPoolStats system_pool_stats();
 class SystemPoolState;
@@ -497,6 +615,9 @@ class BoundedMemoryResource final : public std::pmr::memory_resource {
   size_t limit() const { return m_limit; }
   size_t used() const { return m_used; }
   size_t peak() const { return m_peak; }
+  // Raises the hard boundary after the operator's reservation grew. Never
+  // lowers it below what is already charged, so an in-flight buffer survives.
+  void set_limit(size_t limit) { m_limit = std::max(limit, m_used); }
 
  private:
   void acquire(size_t bytes) {
@@ -522,7 +643,7 @@ class BoundedMemoryResource final : public std::pmr::memory_resource {
     release(bytes);
   }
   bool do_is_equal(const std::pmr::memory_resource &other) const noexcept override { return this == &other; }
-  const size_t m_limit;
+  size_t m_limit;
   PoolMemoryResource m_pool_memory;
   std::pmr::memory_resource *m_upstream;
   size_t m_used{0}, m_peak{0};

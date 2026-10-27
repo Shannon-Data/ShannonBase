@@ -33,11 +33,55 @@
 #include "sql/field.h"
 #include "sql/strfunc.h"
 #include "sql_string.h"  // StringBuffer
+#include "storage/rapid_engine/compress/dictionary/dictionary.h"
 #include "storage/rapid_engine/imcs/storage0index.h"
 #include "storage/rapid_engine/utils/utils.h"  //bit_array_xxx
 
 namespace ShannonBase {
 namespace Imcs {
+
+Simple_Predicate::Simple_Predicate(uint32 col_id, PredicateOperator op_type, const PredicateValue &val,
+                                   enum_field_types type, const CHARSET_INFO *charset, int escape)
+    : Predicate(op_type, false),
+      column_id(col_id),
+      value(val),
+      column_type(type),
+      m_like_oper(LikeOper{charset, escape, type == MYSQL_TYPE_STRING && charset != &my_charset_bin}) {}
+
+bool Simple_Predicate::LikeOper::matches(std::string_view text, std::string_view pattern) const {
+  const char *text_begin = text.empty() ? "" : text.data();
+  if (trim_char_padding) text = std::string_view(text_begin, charset->cset->lengthsp(charset, text_begin, text.size()));
+  const char *pattern_begin = pattern.empty() ? "" : pattern.data();
+  return my_wildcmp(charset, text_begin, text_begin + text.size(), pattern_begin, pattern_begin + pattern.size(),
+                    escape, escape == '_' ? -1 : '_', escape == '%' ? -1 : '%') == 0;
+}
+
+std::shared_ptr<const std::vector<uint8_t>> Simple_Predicate::like_dictionary_mask(
+    const std::shared_ptr<Compress::Dictionary> &dictionary) const {
+  if (!m_like_oper || !dictionary || value.is_null()) return {};
+  constexpr size_t kMaxMaskedEntries = 1u << 16;
+  const size_t entries = dictionary->publish_next_id();
+  if (entries == 0 || entries > kMaxMaskedEntries) return {};
+  std::lock_guard lock(m_like_dictionary_mutex);
+  if (m_like_dictionary == dictionary && m_like_dictionary_mask && m_like_dictionary_mask->size() == entries)
+    return m_like_dictionary_mask;
+
+  auto mask = std::make_shared<std::vector<uint8_t>>(entries, 0);
+  for (size_t id = 0; id < entries; ++id) {
+    std::string decoded;
+    std::string_view text = dictionary->get_view(id);
+    if (text.data() == nullptr) {
+      decoded = dictionary->get(id);
+      text = decoded;
+    }
+    const bool matched = m_like_oper->matches(text, value.string_value);
+    (*mask)[id] = matched != (op == PredicateOperator::NOT_LIKE);
+  }
+  m_like_dictionary = dictionary;
+  m_like_dictionary_mask = std::move(mask);
+  return m_like_dictionary_mask;
+}
+
 namespace {
 
 void NormalizeEnumPredicateValue(const Field *field, PredicateValue *predicate_value) {
@@ -303,6 +347,7 @@ bool Simple_Predicate::evaluate_like_fast(const std::string &str, const std::str
 }
 
 bool Simple_Predicate::evaluate_like(const std::string &str, const std::string &pattern) const {
+  if (m_like_oper) return m_like_oper->matches(str, pattern);
   // The byte-wise fast path cannot fold case, and the precompiled LIKE regex
   // always folds it (it is compiled before the column is known).  Use whichever
   // matches the column's collation: a case-sensitive collation gets the fast
@@ -1661,6 +1706,12 @@ TruthValue Simple_Predicate::evaluate_impl(const uchar *input_value, size_t inpu
     }
   }
 
+  if (m_like_oper && has_input_length) {
+    const std::string_view text(reinterpret_cast<const char *>(input_value), input_length);
+    const bool matched = m_like_oper->matches(text, value.string_value);
+    return matched != (op == PredicateOperator::NOT_LIKE) ? TruthValue::TRUE_VALUE : TruthValue::FALSE_VALUE;
+  }
+
   // Extract column value
   PredicateValue col_value =
       extract_value(input_value, low_order.load(std::memory_order_acquire), input_length, has_input_length);
@@ -1744,6 +1795,12 @@ bool Simple_Predicate::equals(const Predicate &other) const {
 
   const auto &rhs = static_cast<const Simple_Predicate &>(other);
   if (column_id != rhs.column_id) return false;
+  if (m_like_oper.has_value() != rhs.m_like_oper.has_value()) return false;
+  if (m_like_oper &&
+      (m_like_oper->charset != rhs.m_like_oper->charset || m_like_oper->escape != rhs.m_like_oper->escape ||
+       m_like_oper->trim_char_padding != rhs.m_like_oper->trim_char_padding ||
+       value.string_value != rhs.value.string_value))
+    return false;
   if (!same_operand(value, rhs.value) || !same_operand(value2, rhs.value2)) return false;
   if (value_list.size() != rhs.value_list.size()) return false;
   for (size_t i = 0; i < value_list.size(); i++) {
@@ -1793,6 +1850,9 @@ std::string Simple_Predicate::to_string() const {
       return oss.str();
     case PredicateOperator::LIKE:
       oss << "LIKE ";
+      break;
+    case PredicateOperator::NOT_LIKE:
+      oss << "NOT LIKE ";
       break;
     default:
       oss << "? ";

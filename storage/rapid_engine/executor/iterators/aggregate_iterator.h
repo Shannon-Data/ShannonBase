@@ -155,7 +155,7 @@ bool IsHashGroupKeyFieldType(enum_field_types type);
  * 3. Fall back to traditional processing for complex cases
  * 4. Maintain all rollup and group change detection logic
  */
-class VectorizedAggregateIterator final : public RowIterator {
+class VectorizedAggregateIterator final : public RowIterator, public ResMgmt::Evictable {
   // Declared first so the reservation outlives all retained buffers.
   ResMgmt::MemoryBudget::Reservation m_memory_reservation;
   ResMgmt::BoundedMemoryResource m_aux_memory;
@@ -229,6 +229,13 @@ class VectorizedAggregateIterator final : public RowIterator {
   // Fixed per-group storage for costing; key and representative bytes are
   // added from the query projection. Runtime accounting remains authoritative.
   static size_t HashGroupFixedBytes(size_t aggregate_count);
+
+ private:
+  // True when every expression aggregate's base columns arrive in the batch, so the
+  // argument chunk can be built here instead of materialising whole record images.
+  bool CanEvaluateExpressionsFromBatch() const;
+  // Fills the argument chunk of each expression aggregate for one batch.
+  bool BuildExpressionChunksFromBatch(size_t rows);
 
  private:
   // Core members (identical to original AggregateIterator)
@@ -358,6 +365,10 @@ class VectorizedAggregateIterator final : public RowIterator {
   class HashMemoryResource final : public std::pmr::memory_resource {
    public:
     explicit HashMemoryResource(size_t limit_bytes) : m_limit_bytes(limit_bytes), m_upstream(&m_pool_memory) {}
+
+    // Raised after the operator's reservation grew; never below what the arena
+    // already holds.
+    void set_limit_bytes(size_t limit_bytes) { m_limit_bytes = std::max(limit_bytes, m_used_bytes); }
 
     size_t limit_bytes() const { return m_limit_bytes; }
     size_t used_bytes() const { return m_used_bytes; }
@@ -522,12 +533,23 @@ class VectorizedAggregateIterator final : public RowIterator {
   std::optional<HashStatsReportGuard> m_hash_stats_guard;
 
   bool m_hash_spilled{false};
+  double m_expected_hash_groups{0};
+  size_t m_initial_spill_fanout{kHashSpillFanout};
   uint64_t m_hash_spill_output_read{0};
   std::array<std::unique_ptr<HashSpillFile>, kHashSpillFanout> m_hash_spill_partitions;
   std::unique_ptr<HashSpillFile> m_hash_spill_output;
 
   std::pmr::vector<ColumnChunk> m_batch_col_chunks{&m_aux_memory};
+  // Synthetic expression columns belong to this operator, not its child.
+  size_t m_source_batch_columns{0};
+  std::pmr::vector<ColumnChunk> m_expression_chunk_scratch{&m_aux_memory};
   bool m_batch_chunks_initialized{false};
+  // Retain a streaming batch across group boundaries. Returning its entire
+  // unused tail to the child for every small group repeatedly copies it.
+  size_t m_streaming_batch_pos{0};
+  size_t m_streaming_batch_rows{0};
+  bool m_streaming_batch_eof{false};
+  std::pmr::vector<ColumnChunk> m_streaming_group_chunks{&m_aux_memory};
 
   std::pmr::unordered_map<Field *, size_t> m_field_to_batch_chunk_idx{&m_aux_memory};
   std::pmr::unordered_map<Field *, std::shared_ptr<Compress::Dictionary>> m_batch_dictionaries{&m_aux_memory};
@@ -576,7 +598,17 @@ class VectorizedAggregateIterator final : public RowIterator {
   int ConsumeHashRow(size_t packed_row_capacity);
   int ConsumeHashBatchRow(size_t row_idx, size_t packed_row_capacity);
   int HashMemoryLimitExceeded();
-  int BeginHashSpill(size_t packed_row_capacity);
+  int BeginHashSpill(size_t packed_row_capacity, bool spill_current_row = true);
+  // Grow the grant (doubling) between input rows before reaching the arena
+  // boundary, so growth never has to unwind a partially applied update.
+  void GrowHashBudget();
+  size_t Evict(size_t target) override;
+  bool m_in_hash_update{false};
+  bool m_evict_requested{false};
+  size_t m_evict_target{0};
+  bool m_hash_growth_exhausted{false};
+  void ReclaimHashBudget();
+  int HandleHashMemoryPressure(size_t packed_row_capacity);
   int SpillCurrentInputRow(size_t packed_row_capacity);
   int FinalizeHashSpill();
   int ProcessHashSpillPartition(std::unique_ptr<HashSpillFile> partition, size_t depth, HashSpillFile *unordered_output,
@@ -673,7 +705,6 @@ class VectorizedAggregateIterator final : public RowIterator {
   bool HasExpressionAggregate() const;
 
   bool EvaluateExpressionFields();
-  void LogPerformanceMetrics();
 
   bool AppendCurrentRowToChunks();
 };

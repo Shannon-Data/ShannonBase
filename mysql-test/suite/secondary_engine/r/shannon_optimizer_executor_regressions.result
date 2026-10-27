@@ -268,10 +268,9 @@ grp	group_rows
 EXPLAIN FORMAT=TREE SELECT grp, COUNT(*) AS c FROM t_grouped GROUP BY grp ORDER BY c;
 EXPLAIN
 -> Sort: c  (rows=36)
-    -> Stream results  (rows=36.1)
-        -> Group aggregate: count(0)  (rows=36.1)
-            -> Sort: t_grouped.grp  (rows=1300)
-                -> Table scan on t_grouped in secondary engine Rapid  (rows=1300)
+    -> Stream results  (rows=36)
+        -> Group vectorized aggregate: count(0)  (rows=36)
+            -> Vectorized table scan on t_grouped in secondary engine Rapid  (rows=1300)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one

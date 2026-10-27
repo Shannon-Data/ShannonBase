@@ -78,7 +78,8 @@ class PlanNode : public MemoryObject {
     MATERIALIZE_CTE,
     MATERIALIZE_DERIVED,
     WINDOW,
-    MYSQL_NATIVE
+    MYSQL_NATIVE,
+    STREAM
   };
 
   virtual ~PlanNode() = default;
@@ -98,6 +99,10 @@ class PlanNode : public MemoryObject {
   ha_rows estimated_rows{0};
   // can be vectorized or not.
   bool vectorized{true};
+  // Set by ToAccessPath(): rows reach the parent as ColumnChunks, not record images.
+  bool produces_batches{false};
+  // Set by a parent that needs record images, so the child must not install a batch iterator.
+  bool row_mode{false};
 
  protected:
   // Returns true if all provided child AccessPaths are vectorized.
@@ -272,6 +277,11 @@ class LocalAgg : public PlanNode {
 
   Type type() const override { return Type::LOCAL_AGGREGATE; }
   std::string ToString(int indent) const override;
+
+ private:
+  // True when the IMCS NDV statistics predict the groups fit the hash budget, or
+  // when the strategy needs no table / no statistics are available.
+  bool FitsHashMemoryBudget(THD *thd) const;
 };
 
 // TopN represents a top-N operation.
@@ -397,6 +407,21 @@ class MaterializeDerived : public PlanNode {
   Type type() const override { return Type::MATERIALIZE_DERIVED; }
 
   AccessPath *ToAccessPath(THD *thd) override;
+  std::string ToString(int indent) const override;
+};
+
+/**
+ * @brief The Stream node wraps a translated query block in MySQL's STREAM
+ * access path, so the block below it keeps Rapid's vectorized iterators.
+ */
+class Stream : public PlanNode {
+ public:
+  Stream() = default;
+  ~Stream() override = default;
+
+  AccessPath *ToAccessPath(THD *thd) override;
+
+  Type type() const override { return Type::STREAM; }
   std::string ToString(int indent) const override;
 };
 

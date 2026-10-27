@@ -40,6 +40,7 @@
 #include "include/my_base.h"
 
 #include "sql/dd/cache/dictionary_client.h"
+#include "sql/debug_sync.h"
 #include "sql/iterators/timing_iterator.h"  // NewIterator
 #include "sql/sql_class.h"
 #include "sql/sql_executor.h"
@@ -259,6 +260,7 @@ VectorizedAggregateIterator::VectorizedAggregateIterator(THD *thd, unique_ptr_de
       m_current_rollup_pos(-1),
       m_output_slice(-1) {
   m_hash_memory_limit = std::min(hash_memory_limit, m_memory_reservation.bytes() / 2);
+  m_expected_hash_groups = expected_rows;
 
   // Calculate optimal batch size based on expected data
   if (expected_rows > 0) {
@@ -267,6 +269,7 @@ VectorizedAggregateIterator::VectorizedAggregateIterator(THD *thd, unique_ptr_de
   }
 
   InitializeVectorization();
+  ResMgmt::register_evictable(thd, ResMgmt::QueryMemoryOperator::kHashAggregate, this);
 }
 
 VectorizedAggregateIterator::HashStatsReportGuard::~HashStatsReportGuard() {
@@ -278,7 +281,100 @@ VectorizedAggregateIterator::HashStatsReportGuard::~HashStatsReportGuard() {
       stats->dict_code_cache_misses, stats->hash_memory_peak_bytes);
 }
 
-VectorizedAggregateIterator::~VectorizedAggregateIterator() = default;
+VectorizedAggregateIterator::~VectorizedAggregateIterator() { ResMgmt::unregister_evictable(this); }
+
+void VectorizedAggregateIterator::GrowHashBudget() {
+  if (m_hash_spilled || m_hash_growth_exhausted || m_evict_requested || m_hash_arena == nullptr ||
+      m_hash_memory_limit == 0)
+    return;
+  const size_t used = m_hash_arena->memory.used_bytes();
+  // Grow at half, not three quarters: a single new group inserts its index node,
+  // key and state in one step, and a container doubling can ask for more than the
+  // remaining quarter. Growing early keeps growth off the bad_alloc path, where
+  // the update has already been partially applied and can only be rolled back.
+  if (used < m_hash_memory_limit / 2) return;
+  const size_t current = m_memory_reservation.bytes();
+  if (current == 0) {
+    m_hash_growth_exhausted = true;
+    return;
+  }
+  const size_t want = current > SIZE_MAX / 2 ? current : current * 2;
+  const size_t granted =
+      ResMgmt::grow_query_memory(m_memory_reservation, ResMgmt::QueryMemoryOperator::kHashAggregate, want, this);
+  if (granted <= current) {
+    m_hash_growth_exhausted = true;
+    return;
+  }
+  // The constructor splits the grant in half: hash arena, then everything else
+  // (row images, spill buffers). Keep that split as the grant grows.
+  m_hash_memory_limit = granted / 2;
+  m_aux_memory.set_limit(std::max<size_t>(granted - m_hash_memory_limit, m_aux_memory.used()));
+  if (m_hash_arena != nullptr) m_hash_arena->memory.set_limit_bytes(m_hash_memory_limit);
+  m_stats.hash_memory_limit_bytes = m_hash_memory_limit;
+}
+
+size_t VectorizedAggregateIterator::Evict(size_t target) {
+  // Groups are live from the first update until the merge pass finishes, and
+  // Flushing is only safe in the input loop. Record the requested reduction;
+  // the next row/batch boundary spills existing states and returns the grant.
+  if (m_strategy != AggregateStrategy::HASH) return 0;
+  m_evict_requested = true;
+  m_evict_target = std::max(m_evict_target, target);
+  if (m_hash_groups_built) {
+    // Output is already built: the only safe immediate reclamation is unused
+    // reservation. Lowering its limits does not move any live group or row.
+    const size_t before = m_memory_reservation.bytes();
+    ReclaimHashBudget();
+    return before - m_memory_reservation.bytes();
+  }
+  return 0;
+}
+
+void VectorizedAggregateIterator::ReclaimHashBudget() {
+  const size_t current = m_memory_reservation.bytes();
+  // Keep both a minimum rebuild arena and room beyond the currently live
+  // auxiliary buffers for spill records and file state.
+  constexpr size_t slack = 64 * SHANNON_KB;
+  const size_t aux = m_aux_memory.used();
+  const size_t hash = m_hash_arena != nullptr ? m_hash_arena->memory.used_bytes() : 0;
+  const size_t live = std::max(aux, hash);
+  const size_t minimum = live > (SIZE_MAX / 2 - slack) ? current : (live + slack) * 2;
+  const size_t retained = std::min(current, std::max({ResMgmt::system_memory_limits().operation, minimum, 2 * slack}));
+  const size_t released = std::min(m_evict_target, current - retained);
+  if (released != 0) {
+    const size_t next = current - released;
+    m_hash_memory_limit = std::min(m_hash_memory_limit, next / 2);
+    m_aux_memory.set_limit(next - m_hash_memory_limit);
+    if (m_hash_arena != nullptr) m_hash_arena->memory.set_limit_bytes(m_hash_memory_limit);
+    m_stats.hash_memory_limit_bytes = m_hash_memory_limit;
+    m_memory_reservation.release_bytes(released);
+    DBUG_SIGNAL_WAIT_FOR(thd(), "rapid_pause_hash_after_reclaim", "rapid_hash_after_reclaim_ready",
+                         "rapid_hash_after_reclaim_continue");
+  }
+  m_evict_requested = false;
+  m_evict_target = 0;
+}
+
+int VectorizedAggregateIterator::HandleHashMemoryPressure(size_t packed_row_capacity) {
+  DBUG_EXECUTE_IF("rapid_test_hash_reclaim", {
+    if (!m_hash_spilled && !m_evict_requested && m_hash_arena != nullptr && !m_hash_arena->groups.empty() &&
+        m_memory_reservation.bytes() > ResMgmt::system_memory_limits().operation)
+      Evict(SIZE_MAX);
+  });
+  if (!m_evict_requested) return 0;
+  if (m_hash_spilled) {
+    // Between input batches there is no live rebuild arena; a later pressure
+    // request can still recover unused grant after the initial spill.
+    if (m_hash_arena == nullptr) ReclaimHashBudget();
+    return 0;
+  }
+  if (m_hash_arena == nullptr) return 0;
+  DBUG_SIGNAL_WAIT_FOR(thd(), "rapid_pause_hash_before_reclaim", "rapid_hash_before_reclaim_ready",
+                       "rapid_hash_before_reclaim_continue");
+  if (!m_hash_arena->groups.empty()) return BeginHashSpill(packed_row_capacity, false);
+  ReclaimHashBudget();
+  return 0;
+}
 
 std::unique_ptr<VectorizedAggregateIterator::HashArena> VectorizedAggregateIterator::CreateHashArena() {
   auto charge = ResMgmt::BoundedMemoryResource::Reservation(&m_aux_memory, sizeof(HashArena));
@@ -291,6 +387,9 @@ void VectorizedAggregateIterator::SaveNextGroupRow() {
 }
 
 bool VectorizedAggregateIterator::Init() try {
+  m_evict_requested = false;
+  m_evict_target = 0;
+  m_hash_growth_exhausted = false;
   if (!m_memory_reservation) {
     my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid query memory reservation exhausted");
     return true;
@@ -342,6 +441,11 @@ bool VectorizedAggregateIterator::Init() try {
   m_vectorizer.reset();
   m_vectorizer.analysis_complete = false;
   m_batch_chunks_initialized = false;
+  m_expression_chunk_scratch.clear();
+  m_source_batch_columns = 0;
+  m_streaming_batch_pos = m_streaming_batch_rows = 0;
+  m_streaming_batch_eof = false;
+  m_streaming_group_chunks.clear();
   m_field_to_batch_chunk_idx.clear();
   m_batch_dictionaries.clear();
   m_group_key_fields.clear();
@@ -409,7 +513,8 @@ bool VectorizedAggregateIterator::Init() try {
     // child already materializes the current row in TABLE::record/Field.
     if (m_hash_input_mode == HashInputMode::BATCH) {
       SetupBatchChunks();
-      if (!CanMaterializeBatchRows() || !CanBuildHashGroupKeyFromBatch() || HasExpressionAggregate())
+      if (!CanMaterializeBatchRows() || !CanBuildHashGroupKeyFromBatch() ||
+          (HasExpressionAggregate() && !CanEvaluateExpressionsFromBatch()))
         m_hash_input_mode = HashInputMode::ROW;
     }
   }
@@ -509,9 +614,6 @@ int VectorizedAggregateIterator::Read() try {
         m_save_nullinfo = 0;
       }
       SetRollupLevel(INT_MAX);
-      if (m_stats.total_batches_processed > 0 && m_stats.total_batches_processed % 100 == 0) {
-        LogPerformanceMetrics();
-      }
       return -1;
     }
   }
@@ -573,7 +675,11 @@ int VectorizedAggregateIterator::ReadHashAggregate() {
       return 1;
     }
 
-    if (BuildHashGroups() != 0) return 1;
+    if (BuildHashGroups() != 0) {
+      if (!thd()->is_error())
+        my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid hash aggregate could not process its input");
+      return 1;
+    }
 
     if (!m_hash_spilled) {
       SortHashGroupsForOutput();
@@ -582,6 +688,16 @@ int VectorizedAggregateIterator::ReadHashAggregate() {
     }
     m_hash_groups_built = true;
   }
+
+  DBUG_EXECUTE_IF("rapid_test_hash_output_reclaim", {
+    if (!m_hash_spilled && m_memory_reservation.bytes() > ResMgmt::system_memory_limits().operation) {
+      DBUG_SET("-d,rapid_test_hash_output_reclaim");
+      const size_t released = Evict(SIZE_MAX);
+      assert(released > 0);
+      DBUG_SIGNAL_WAIT_FOR(thd(), "rapid_pause_hash_output_reclaim", "rapid_hash_output_reclaim_ready",
+                           "rapid_hash_output_reclaim_continue");
+    }
+  });
 
   if (m_hash_spilled) {
     if (m_hash_spill_output == nullptr || m_hash_spill_output_read >= m_hash_spill_output->records) {
@@ -899,15 +1015,21 @@ size_t VectorizedAggregateIterator::HashSpillPartitionForKey(std::string_view ke
   constexpr uint64_t kSeedBase = 0x9E3779B97F4A7C15ULL;
   const uint64_t seed = kSeedBase ^ (static_cast<uint64_t>(depth + 1) * 0xD6E8FEB86659FD93ULL);
   const uint64_t hash = XXH64(key.data(), key.size(), seed);
-  return static_cast<size_t>(hash) & (kHashSpillFanout - 1);
+  const size_t fanout = depth == 0 ? m_initial_spill_fanout : kHashSpillFanout;
+  return static_cast<size_t>(hash) & (fanout - 1);
 }
 
-int VectorizedAggregateIterator::BeginHashSpill(size_t packed_row_capacity) {
-  if (m_hash_spilled) return SpillCurrentInputRow(packed_row_capacity);
+int VectorizedAggregateIterator::BeginHashSpill(size_t packed_row_capacity, bool spill_current_row) {
+  if (m_hash_spilled) return spill_current_row ? SpillCurrentInputRow(packed_row_capacity) : 0;
   if (m_hash_arena == nullptr) return ReportHashSpillError("bounded arena disappeared before spill");
 
   if (m_hash_arena->groups.empty())
     return ReportHashSpillError("a single hash group cannot fit within the configured memory limit");
+
+  const double groups = static_cast<double>(m_hash_arena->groups.size());
+  const double estimated_bytes =
+      static_cast<double>(m_hash_arena->memory.used_bytes()) / groups * std::max(m_expected_hash_groups, groups * 2);
+  m_initial_spill_fanout = ResMgmt::initial_spill_fanout(estimated_bytes, m_hash_memory_limit);
 
   for (const HashGroupState &group : m_hash_arena->groups) {
     std::string_view key(group.key.data(), group.key.size());
@@ -927,7 +1049,8 @@ int VectorizedAggregateIterator::BeginHashSpill(size_t packed_row_capacity) {
 
   m_hash_spilled = true;
   m_hash_arena.reset();
-  return SpillCurrentInputRow(packed_row_capacity);
+  if (m_evict_requested) ReclaimHashBudget();
+  return spill_current_row ? SpillCurrentInputRow(packed_row_capacity) : 0;
 }
 
 int VectorizedAggregateIterator::SpillCurrentInputRow(size_t packed_row_capacity) {
@@ -1323,12 +1446,34 @@ int VectorizedAggregateIterator::BuildHashGroupsBatch() {
       thd()->send_kill_message();
       return 1;
     }
+    if (HandleHashMemoryPressure(packed_row_capacity) != 0) return 1;
+    GrowHashBudget();
     if (!EnsureBatchCapacity(m_vectorizer.opt_batch_size)) return 1;
     for (ColumnChunk &chunk : m_batch_col_chunks) chunk.clear();
 
     size_t rows = 0;
+    // Keep the source's exact schema while it fills the batch. Synthetic
+    // columns are moved aside and restored before expression evaluation.
+    m_expression_chunk_scratch.clear();
+    while (m_batch_col_chunks.size() > m_source_batch_columns) {
+      m_expression_chunk_scratch.emplace_back(std::move(m_batch_col_chunks.back()));
+      m_batch_col_chunks.pop_back();
+    }
     const int result = m_batch_source->ReadBatch(m_batch_col_chunks, m_vectorizer.opt_batch_size, rows);
-    if (result != 0 && result != HA_ERR_END_OF_FILE) return 1;
+    while (!m_expression_chunk_scratch.empty()) {
+      m_batch_col_chunks.emplace_back(std::move(m_expression_chunk_scratch.back()));
+      m_expression_chunk_scratch.pop_back();
+    }
+    if (result != 0 && result != HA_ERR_END_OF_FILE) {
+      if (!thd()->is_error())
+        my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid aggregate could not read its input batch");
+      return 1;
+    }
+    if (rows != 0 && HasExpressionAggregate() && BuildExpressionChunksFromBatch(rows)) {
+      if (!thd()->is_error())
+        my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid aggregate could not evaluate its input expressions");
+      return 1;
+    }
 
     for (size_t row = 0; row < rows; ++row) {
       if (m_hash_spilled) {
@@ -1340,7 +1485,9 @@ int VectorizedAggregateIterator::BuildHashGroupsBatch() {
         continue;
       }
 
+      m_in_hash_update = true;
       const int consume_result = ConsumeHashBatchRow(row, packed_row_capacity);
+      m_in_hash_update = false;
       if (consume_result == kHashNeedSpill) {
         // The failed direct update may not have materialized the whole row.
         // BeginHashSpill() serializes the current input row, so restore it once.
@@ -1375,6 +1522,8 @@ int VectorizedAggregateIterator::BuildHashGroupsRow() {
       thd()->send_kill_message();
       return 1;
     }
+    if (HandleHashMemoryPressure(packed_row_capacity) != 0) return 1;
+    GrowHashBudget();
     const int result = m_source->Read();
     if (result == -1) break;
     if (result != 0) return result;
@@ -1387,7 +1536,9 @@ int VectorizedAggregateIterator::BuildHashGroupsRow() {
     if (m_hash_spilled) {
       if (SpillCurrentInputRow(packed_row_capacity) != 0) return 1;
     } else {
+      m_in_hash_update = true;
       const int consume_result = ConsumeHashRow(packed_row_capacity);
+      m_in_hash_update = false;
       if (consume_result == kHashNeedSpill) {
         if (BeginHashSpill(packed_row_capacity) != 0) return 1;
       } else if (consume_result != 0) {
@@ -2033,7 +2184,9 @@ int VectorizedAggregateIterator::UpdateHashGroupFromBatch(HashGroupState *group,
           if (add_decimal(&state, decimal)) return 1;
         } break;
         case MYSQL_TYPE_NEWDECIMAL: {
-          if (RestoreBatchField(field, row_idx)) return 1;
+          // Expression fields are synthetic and have no entry in the table
+          // field map. Their aggregate chunk is already resolved above.
+          if (RestoreFieldFromChunk(field, chunk, row_idx)) return 1;
           my_decimal value;
           field->val_decimal(&value);
           if (add_decimal(&state, value)) return 1;
@@ -2156,12 +2309,17 @@ int VectorizedAggregateIterator::ProcessGroupVectorized() {
     bool next_group_row_in_table = false;
 
     if (use_batch) {
-      if (!EnsureBatchCapacity(m_vectorizer.opt_batch_size)) return kFatalError;
-      for (auto &c : m_batch_col_chunks) c.clear();
-
-      int err = m_batch_source->ReadBatch(m_batch_col_chunks, m_vectorizer.opt_batch_size, rows_read);
-      is_eof = (err == HA_ERR_END_OF_FILE);
-      if (err != 0 && !is_eof) return kFatalError;
+      if (m_streaming_batch_pos == m_streaming_batch_rows && !m_streaming_batch_eof) {
+        if (!EnsureBatchCapacity(m_vectorizer.opt_batch_size)) return kFatalError;
+        for (auto &c : m_batch_col_chunks) c.clear();
+        m_streaming_batch_pos = m_streaming_batch_rows = 0;
+        const int err =
+            m_batch_source->ReadBatch(m_batch_col_chunks, m_vectorizer.opt_batch_size, m_streaming_batch_rows);
+        m_streaming_batch_eof = (err == HA_ERR_END_OF_FILE);
+        if (err != 0 && !m_streaming_batch_eof) return kFatalError;
+      }
+      rows_read = m_streaming_batch_rows - m_streaming_batch_pos;
+      is_eof = m_streaming_batch_eof;
     } else {
       m_vectorizer.current_batch.clear();
 
@@ -2217,7 +2375,7 @@ int VectorizedAggregateIterator::ProcessGroupVectorized() {
     size_t boundary = rows_read;  // default: all rows → current group
     if (use_batch && do_group_by) {
       for (size_t r = 0; r < rows_read; ++r) {
-        if (RestoreGroupKeyField(r)) return kFatalError;
+        if (RestoreGroupKeyField(m_streaming_batch_pos + r)) return kFatalError;
         if (update_item_cache_if_changed(m_join->group_fields) >= 0) {
           boundary = r;
           break;
@@ -2227,7 +2385,33 @@ int VectorizedAggregateIterator::ProcessGroupVectorized() {
 
     if (boundary > 0) {
       const auto batch_started = std::chrono::steady_clock::now();
-      int ret = use_batch ? ProcessVectorizedAggregates(m_batch_col_chunks, boundary) : ProcessVectorizedAggregates();
+      int ret;
+      if (use_batch && m_streaming_batch_pos != 0) {
+        // Copy only this group's rows, once, into a reusable prefix for the
+        // reduction kernels. Keep the unread tail in the original batch.
+        if (m_streaming_group_chunks.empty()) {
+          m_streaming_group_chunks.reserve(m_batch_col_chunks.size());
+          for (const auto &chunk : m_batch_col_chunks)
+            m_streaming_group_chunks.emplace_back(chunk.valid() ? chunk.source_field() : nullptr,
+                                                  chunk.valid() ? boundary : 0, chunk.valid() ? chunk.width() : 0,
+                                                  &m_aux_memory);
+        }
+        for (size_t col = 0; col < m_batch_col_chunks.size(); ++col) {
+          const auto &source = m_batch_col_chunks[col];
+          if (!source.valid()) continue;
+          auto &target = m_streaming_group_chunks[col];
+          target.clear();
+          if (target.capacity() < boundary && !target.grow(std::max(boundary, target.capacity() * 2)))
+            return kFatalError;
+          for (size_t row = 0; row < boundary; ++row) {
+            if (!target.append_from(source, m_streaming_batch_pos + row)) return kFatalError;
+            if (!source.nullable_fast(m_streaming_batch_pos + row)) m_stats.bytes_copied += source.width();
+          }
+        }
+        ret = ProcessVectorizedAggregates(m_streaming_group_chunks, boundary);
+      } else {
+        ret = use_batch ? ProcessVectorizedAggregates(m_batch_col_chunks, boundary) : ProcessVectorizedAggregates();
+      }
       if (ret != 0) return kFatalError;
 
       m_stats.total_batches_processed++;
@@ -2244,13 +2428,10 @@ int VectorizedAggregateIterator::ProcessGroupVectorized() {
     const bool group_changed = use_batch ? (boundary < rows_read) : next_group_row_in_table;
     if (group_changed) {
       if (use_batch) {
-        if (m_batch_source->PushbackBatchTail(m_batch_col_chunks, boundary + 1, rows_read)) {
-          my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0),
-                   "Rapid aggregate could not buffer the rows following a GROUP BY boundary");
-          return kFatalError;
-        }
-        if (RestoreBoundaryRowToTableFields(boundary)) return kFatalError;
+        const size_t boundary_row = m_streaming_batch_pos + boundary;
+        if (RestoreBoundaryRowToTableFields(boundary_row)) return kFatalError;
         SaveNextGroupRow();
+        m_streaming_batch_pos = boundary_row + 1;
       }
       // else (!use_batch): already captured into m_first_row_next_grp right after
       // it was detected, before ProcessVectorizedAggregates() could reuse the
@@ -2263,6 +2444,7 @@ int VectorizedAggregateIterator::ProcessGroupVectorized() {
       return kSuccess;
     }
 
+    if (use_batch) m_streaming_batch_pos = m_streaming_batch_rows;
     if (is_eof) {
       m_seen_eof = true;
       SaveNextGroupRow();
@@ -2823,7 +3005,8 @@ void VectorizedAggregateIterator::SetupBatchChunks() {
     if (!item || item->type() != Item::FIELD_ITEM) continue;
     add_required_field(down_cast<Item_field *>(item)->field);
   }
-  for (const auto &info : m_vectorizer.aggregate_infos) add_required_field(info.source_field);
+  for (const auto &info : m_vectorizer.aggregate_infos)
+    if (info.value_expr == nullptr) add_required_field(info.source_field);
 
   if (m_tables.tables().size() == 1) {
     TABLE *table = m_tables.tables()[0].table;
@@ -2848,10 +3031,25 @@ void VectorizedAggregateIterator::SetupBatchChunks() {
     }
   }
 
+  m_source_batch_columns = m_batch_col_chunks.size();
+  const size_t expression_count =
+      std::count_if(m_vectorizer.aggregate_infos.begin(), m_vectorizer.aggregate_infos.end(),
+                    [](const auto &info) { return info.value_expr != nullptr && info.source_field != nullptr; });
+  if (expression_count != 0) m_expression_chunk_scratch.reserve(expression_count);
   for (auto &info : m_vectorizer.aggregate_infos) {
     if (!info.source_field) continue;
     auto it = m_field_to_batch_chunk_idx.find(info.source_field);
     info.batch_chunk_idx = (it != m_field_to_batch_chunk_idx.end()) ? it->second : static_cast<size_t>(-1);
+  }
+
+  // An expression aggregate reads its argument from a chunk this operator fills
+  // itself: the source has no column for it. Appending the chunk keeps every
+  // consumer (accumulate and spill restore) on the same path as a real column.
+  for (auto &info : m_vectorizer.aggregate_infos) {
+    if (info.value_expr == nullptr || info.source_field == nullptr || info.batch_chunk_idx != static_cast<size_t>(-1))
+      continue;
+    info.batch_chunk_idx = m_batch_col_chunks.size();
+    m_batch_col_chunks.emplace_back(info.source_field, m_vectorizer.opt_batch_size, &m_aux_memory);
   }
 
   // An encoded batch is meaningful only together with the dictionary that produced its IDs. Sources returning row
@@ -3243,6 +3441,86 @@ Field *VectorizedAggregateIterator::CreateExpressionField(Item *expr) const {
   return field;
 }
 
+bool VectorizedAggregateIterator::CanEvaluateExpressionsFromBatch() const {
+  for (const auto &info : m_vectorizer.aggregate_infos) {
+    if (info.value_expr == nullptr) continue;
+    if (info.source_field == nullptr) return false;
+    // The accumulation path stores DECIMAL and INT arguments; anything else keeps the
+    // row semantics it was written for.
+    const Item_result result_type = info.value_expr->result_type();
+    if (result_type != DECIMAL_RESULT && result_type != INT_RESULT) return false;
+
+    bool supported{true};
+    WalkItem(info.value_expr, enum_walk::PREFIX, [&](Item *item) {
+      if (!supported || item->type() != Item::FIELD_ITEM) return !supported;
+      Field *field = down_cast<Item_field *>(item)->field;
+      auto it = field != nullptr ? m_field_to_batch_chunk_idx.find(field) : m_field_to_batch_chunk_idx.end();
+      if (it == m_field_to_batch_chunk_idx.end() || it->second >= m_batch_col_chunks.size() ||
+          !m_batch_col_chunks[it->second].valid() || Utils::Util::is_string(field->type()) ||
+          Utils::IsOffPageField(field) || m_batch_col_chunks[it->second].width() != field->pack_length())
+        supported = false;
+      return !supported;
+    });
+    if (!supported) return false;
+  }
+  return true;
+}
+
+bool VectorizedAggregateIterator::BuildExpressionChunksFromBatch(size_t rows) {
+  for (const auto &info : m_vectorizer.aggregate_infos) {
+    if (info.value_expr == nullptr || info.source_field == nullptr) continue;
+    if (info.batch_chunk_idx == static_cast<size_t>(-1) || info.batch_chunk_idx >= m_batch_col_chunks.size())
+      return true;
+    ColumnChunk &target = m_batch_col_chunks[info.batch_chunk_idx];
+    if (!target.valid()) return true;
+
+    // Only the columns the expression actually reads are materialised, and only once
+    // per aggregate instead of once per aggregate and row.
+    std::vector<Field *> base_fields;
+    WalkItem(info.value_expr, enum_walk::PREFIX, [&](Item *item) {
+      if (item->type() == Item::FIELD_ITEM) {
+        Field *field = down_cast<Item_field *>(item)->field;
+        if (std::find(base_fields.begin(), base_fields.end(), field) == base_fields.end()) base_fields.push_back(field);
+      }
+      return false;
+    });
+
+    Field *out = info.source_field;
+    Item *expr = info.value_expr;
+    for (size_t row = 0; row < rows; ++row) {
+      for (Field *field : base_fields) {
+        auto it = m_field_to_batch_chunk_idx.find(field);
+        if (it == m_field_to_batch_chunk_idx.end() || it->second >= m_batch_col_chunks.size()) return true;
+        if (RestoreFieldFromChunk(field, m_batch_col_chunks[it->second], row)) return true;
+      }
+
+      bool is_null = false;
+      my_decimal buffer;
+      if (expr->result_type() == DECIMAL_RESULT) {
+        my_decimal *value = expr->val_decimal(&buffer);
+        is_null = expr->null_value || value == nullptr;
+        if (!is_null) {
+          out->set_notnull();
+          if (out->store_decimal(value) > 1) return true;
+        }
+      } else {
+        const longlong value = expr->val_int();
+        is_null = expr->null_value;
+        if (!is_null) {
+          my_decimal converted;
+          int2my_decimal(E_DEC_FATAL_ERROR, value, expr->unsigned_flag, &converted);
+          out->set_notnull();
+          if (out->store_decimal(&converted) > 1) return true;
+        }
+      }
+      if (is_null) out->set_null();
+      if (current_thd->is_error()) return true;
+      if (!target.add(is_null ? nullptr : out->data_ptr(), is_null ? 0 : out->pack_length(), is_null)) return true;
+    }
+  }
+  return false;
+}
+
 bool VectorizedAggregateIterator::HasExpressionAggregate() const {
   for (const auto &info : m_vectorizer.aggregate_infos) {
     if (info.value_expr != nullptr) return true;
@@ -3344,29 +3622,6 @@ void VectorizedAggregateIterator::UpdateBatchSizeFromPerformance(double processi
     if (candidate <= m_vectorizer.opt_batch_size || EnsureBatchCapacity(candidate))
       m_vectorizer.opt_batch_size = candidate;
   }
-}
-
-void VectorizedAggregateIterator::LogPerformanceMetrics() {
-  sql_print_information(
-      "VectorizedAggregateIterator Performance: "
-      "Batches=%zu, VectorizedRows=%zu, Fallbacks=%zu, "
-      "AvgBatchTime=%.2fms, TotalVectorizedTime=%.2fms, "
-      "HashMemLimit=%zu, HashMemPeak=%zu, HashMemLimitHits=%zu, "
-      "RowsIn=%zu, RowsOut=%zu, AvgBatchRows=%.2f, RowMaterializations=%zu, BytesCopied=%zu, "
-      "SimdRows=%zu, ScalarFallbackRows=%zu, HashProbes=%zu, HashCollisions=%zu, "
-      "HashBatchInputRows=%zu, HashRowInputRows=%zu, HashBatchDirectRows=%zu, "
-      "HashRowMaterializations=%zu, HashNewGroupMaterializations=%zu, SpillRows=%zu, "
-      "SpillGroups=%zu, SpillPartitions=%zu, SpillRepartitions=%zu, SpillBytes=%zu, "
-      "DictCodeCacheHits=%zu, DictCodeCacheMisses=%zu",
-      m_stats.total_batches_processed, m_stats.total_rows_vectorized, m_stats.traditional_fallbacks,
-      m_stats.avg_batch_processing_time_ms, m_stats.total_vectorized_time_ms, m_stats.hash_memory_limit_bytes,
-      m_stats.hash_memory_peak_bytes, m_stats.hash_memory_limit_hits, m_stats.rows_in, m_stats.rows_out,
-      m_stats.avg_batch_rows(), m_stats.row_materializations, m_stats.bytes_copied, m_stats.simd_rows,
-      m_stats.scalar_fallback_rows, m_stats.hash_probes, m_stats.hash_collisions, m_stats.hash_batch_input_rows,
-      m_stats.hash_row_input_rows, m_stats.hash_batch_direct_rows, m_stats.hash_row_materializations,
-      m_stats.hash_new_group_materializations, m_stats.hash_spill_rows, m_stats.hash_spill_groups,
-      m_stats.hash_spill_partitions, m_stats.hash_spill_repartitions, m_stats.hash_spill_bytes_written,
-      m_stats.dict_code_cache_hits, m_stats.dict_code_cache_misses);
 }
 
 void VectorizedAggregateIterator::SetNullRowFlag(bool is_null_row) { m_source->SetNullRowFlag(is_null_row); }

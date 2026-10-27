@@ -1,0 +1,25 @@
+SET use_secondary_engine=OFF;
+CREATE TABLE bloom_budget_b(id INT PRIMARY KEY,k INT,v INT) SECONDARY_ENGINE=rapid;
+CREATE TABLE bloom_budget_p(id INT PRIMARY KEY,k INT,v INT) SECONDARY_ENGINE=rapid;
+INSERT INTO bloom_budget_b WITH RECURSIVE n AS (SELECT 1 i UNION ALL SELECT i+1 FROM n WHERE i<256)
+SELECT i,i DIV 2,i FROM n;
+SET cte_max_recursion_depth=10000;
+INSERT INTO bloom_budget_p WITH RECURSIVE n AS (SELECT 1 i UNION ALL SELECT i+1 FROM n WHERE i<8192)
+SELECT i,i,i FROM n;
+ALTER TABLE bloom_budget_b SECONDARY_LOAD;
+ALTER TABLE bloom_budget_p SECONDARY_LOAD;
+SET optimizer_switch='hypergraph_optimizer=on';
+SET secondary_engine_cost_threshold=0;
+SET use_secondary_engine=FORCED;
+SET debug='+d,rapid_test_bloom_evict';
+PREPARE bloom_budget_stmt FROM 'SELECT COUNT(*),SUM(p.v) FROM bloom_budget_p p JOIN bloom_budget_b b ON p.k=b.k';
+EXECUTE bloom_budget_stmt;
+COUNT(*)	SUM(p.v)
+255	16384
+EXECUTE bloom_budget_stmt;
+COUNT(*)	SUM(p.v)
+255	16384
+DEALLOCATE PREPARE bloom_budget_stmt;
+SET debug='-d,rapid_test_bloom_evict';
+SET use_secondary_engine=OFF;
+DROP TABLE bloom_budget_b,bloom_budget_p;

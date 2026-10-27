@@ -1,0 +1,11 @@
+# Exercise a short first radix followed by the ordinary 16-way recursion.
+# Reuse the result-parity coverage for inner/outer/semi/anti joins, duplicate
+# keys, preserved probe order, skew and exact/NULL aggregate states.
+--source include/have_debug.inc
+SET SESSION debug = '+d,rapid_spill_fanout_2';
+--source suite/secondary_engine/t/shannon_hash_join_spill.test
+# Reset so the aggregate half re-enables hypergraph itself: the experimental
+# warning is emitted only on the first enable in a session.
+SET SESSION optimizer_switch = 'hypergraph_optimizer=off';
+--source suite/secondary_engine/t/shannon_hash_aggregate_spill.test
+SET SESSION debug = '-d,rapid_spill_fanout_2';

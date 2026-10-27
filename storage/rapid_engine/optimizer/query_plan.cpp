@@ -37,8 +37,10 @@
 #include "sql/sql_executor.h"
 #include "sql/sql_lex.h"  // query_expression
 #include "sql/sql_optimizer.h"
-#include "storage/rapid_engine/imcs/table.h"                        // RpdTable
-#include "storage/rapid_engine/optimizer/writable_access_path.inc"  // Rapid Params
+#include "storage/rapid_engine/executor/iterators/aggregate_iterator.h"  // HashGroupFixedBytes
+#include "storage/rapid_engine/imcs/table.h"                             // RpdTable
+#include "storage/rapid_engine/optimizer/writable_access_path.inc"       // Rapid Params
+#include "storage/rapid_engine/utils/utils.h"                            // hash_aggregate_memory_budget
 
 namespace ShannonBase {
 namespace Optimizer {
@@ -164,7 +166,7 @@ AccessPath *ScanTable::ToAccessPath(THD *thd) {
     path->type = AccessPath::TABLE_SCAN;
     path->table_scan().table = this->source_table;
   }
-  path->vectorized = this->vectorized;
+  path->vectorized = this->vectorized && !this->row_mode;
 
   const dd::cache::Dictionary_client::Auto_releaser releaser(thd->dd_client());
   const dd::Table *table_def = nullptr;
@@ -205,6 +207,8 @@ AccessPath *ScanTable::ToAccessPath(THD *thd) {
   }
   path->secondary_engine_data = rapid_scan_params;
   PropagateCostAndRows(this, path);
+  // A vectorized scan feeds ColumnChunks to whoever reads it.
+  this->produces_batches = path->vectorized;
   return path;
 }
 
@@ -217,14 +221,19 @@ std::string ScanTable::ToString(int indent) const {
 AccessPath *Filter::ToAccessPath(THD *thd) {
   auto *path = new (thd->mem_root) AccessPath();
   path->type = AccessPath::FILTER;
+  if (this->row_mode && !children.empty() && children[0]) children[0]->row_mode = true;
   path->filter().child = (!children.empty() && children[0]) ? children[0]->ToAccessPath(thd) : nullptr;
   path->filter().condition = this->condition;
   path->filter().materialize_subqueries =
       this->original_path ? this->original_path->filter().materialize_subqueries : false;
 
-  path->vectorized = AllChildrenVectorized({path->filter().child});
+  path->vectorized = !this->row_mode && AllChildrenVectorized({path->filter().child});
   path->secondary_engine_data = nullptr;
   PropagateCostAndRows(this, path);
+  // A residual filter forwards its child's transport unless a subquery forces row re-entry.
+  const bool child_batches = !children.empty() && children[0] != nullptr && children[0]->produces_batches;
+  this->produces_batches =
+      path->vectorized && child_batches && (this->condition == nullptr || !this->condition->has_subquery());
   return path;
 }
 
@@ -337,10 +346,24 @@ AccessPath *HashJoin::ToAccessPath(THD *thd) {
     allow_spill_to_disk is the planner asking for a join that is *prepared* to
     spill, not a prediction that this one will.
   */
-  path->vectorized = !path->hash_join().allow_spill_to_disk && !path->hash_join().store_rowids &&
-                     path->hash_join().join_predicate != nullptr && path->hash_join().join_predicate->expr != nullptr;
+  const bool materialized_input =
+      (path->hash_join().outer != nullptr && path->hash_join().outer->type == AccessPath::MATERIALIZE) ||
+      (path->hash_join().inner != nullptr && path->hash_join().inner->type == AccessPath::MATERIALIZE);
+  /*
+    A materialized derived table (e.g. the deduplicated derived table MySQL
+    builds for NOT EXISTS) is a MySQL temp table, read through
+    MaterializeIterator. Rapid reads its build side only after initializing the
+    probe, and the first row read from an on-disk (InnoDB) temp table then
+    crashes inside InnoDB. MySQL's own iterator reads the build before the
+    probe, so leave this join to it.
+  */
+  path->vectorized = !this->row_mode && !materialized_input && !path->hash_join().allow_spill_to_disk &&
+                     !path->hash_join().store_rowids && path->hash_join().join_predicate != nullptr &&
+                     path->hash_join().join_predicate->expr != nullptr;
   path->secondary_engine_data = nullptr;
   PropagateCostAndRows(this, path);
+  // The join materializes chunks even over row-at-a-time inputs; Init() re-checks.
+  this->produces_batches = path->vectorized;
   return path;
 }
 
@@ -351,6 +374,41 @@ std::string HashJoin::ToString(int indent) const {
 }
 
 AccessPath *LocalAgg::ToAccessPath(THD *thd) {
+  // Predict batch transport before recursively building the child AccessPath.
+  const auto can_batches = [](const auto &self, const PlanNode *node) -> bool {
+    if (node == nullptr || !node->vectorized) return false;
+    switch (node->type()) {
+      case PlanNode::Type::SCAN:
+      case PlanNode::Type::HASH_JOIN:
+        return true;
+      case PlanNode::Type::FILTER: {
+        const auto *filter = static_cast<const Filter *>(node);
+        return node->children.size() == 1 && self(self, node->children[0].get()) &&
+               (filter->condition == nullptr || !filter->condition->has_subquery());
+      }
+      default:
+        return false;
+    }
+  };
+  // A legacy temp-table aggregate always stays vectorized: MySQL's counterpart groups
+  // from metadata this conversion rewrites, so handed the Rapid child it returns the
+  // ungrouped input rows.
+  const bool temptable = temptable_src != nullptr;
+  // A dropped grouping sort leaves no order for MySQL's aggregate to stream over: it
+  // would start a new group on every row, so those plans can never hand back either.
+  const bool native_fallback_safe = hash_output_order == nullptr;
+  // Decide the transport before building the child: a native aggregate needs record
+  // images, so the child must not install a batch iterator for it.
+  const bool plan_batches = !children.empty() && children[0] != nullptr && can_batches(can_batches, children[0].get());
+  // A hash aggregate that cannot keep its groups resident writes and re-reads every
+  // row it spills, which costs more than MySQL's sorted-stream aggregate. Hand those
+  // back: the child then builds in row mode, so no conversion is paid either side.
+  const bool fits_budget = FitsHashMemoryBudget(thd);
+  // Only the edge feeding this aggregate changes transport; a row-mode child
+  // propagates the request further itself (see Filter::ToAccessPath).
+  const bool vectorize = temptable || !native_fallback_safe || (plan_batches && fits_budget);
+  if (!vectorize && !children.empty() && children[0] != nullptr) children[0]->row_mode = true;
+
   // Build the child before committing JOIN grouping metadata. If child
   // conversion fails, native fallback must see the untouched original JOIN.
   AccessPath *child_path = (!children.empty() && children[0]) ? children[0]->ToAccessPath(thd) : nullptr;
@@ -359,7 +417,11 @@ AccessPath *LocalAgg::ToAccessPath(THD *thd) {
     return original_path;
   }
 
-  if (PrepareAggregateFields(thd, this)) {
+  // MySQL's cached grouping expressions describe the physical input slice.
+  // In legacy plans GROUP BY may already refer to the output temporary table;
+  // rebuilding the native iterator's cache from those Items merges all rows
+  // into one group. Only Rapid's aggregate needs translated grouping metadata.
+  if (vectorize && PrepareAggregateFields(thd, this)) {
     my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid could not bind the aggregate GROUP BY expressions");
     return original_path;
   }
@@ -380,7 +442,10 @@ AccessPath *LocalAgg::ToAccessPath(THD *thd) {
     tpath->temptable_aggregate().table = tta.table;
     tpath->temptable_aggregate().table_path = tta.table_path;
     tpath->temptable_aggregate().ref_slice = tta.ref_slice;
-    tpath->vectorized = true;
+    // `vectorize` is always true here because of the `temptable` term above.
+    // TODO: relax it once the temp-table aggregate fills the temp table from chunks
+    // itself; then the row-image check can apply to this shape too.
+    tpath->vectorized = vectorize;
     tpath->secondary_engine_data = params;
     PropagateCostAndRows(this, tpath);
     return tpath;
@@ -391,17 +456,46 @@ AccessPath *LocalAgg::ToAccessPath(THD *thd) {
   path->aggregate().child = child_path;
   path->aggregate().olap = this->olap;
 
-  path->vectorized = true;
+  path->vectorized = vectorize;
   path->secondary_engine_data = params;
   PropagateCostAndRows(this, path);
   return path;
+}
+
+bool LocalAgg::FitsHashMemoryBudget(THD *thd) const {
+  // Only a grouping hash table scales with the group count.
+  if (strategy != AggregateStrategy::HASH || is_global || group_by.empty()) return true;
+
+  // Group count from the IMCS NDV statistics. The optimizer's row estimate is not a
+  // usable substitute: a 4-group query estimates 251k rows.
+  double groups = 1.0;
+  double key_bytes = 0.0;
+  for (const Item *item : group_by) {
+    if (item->type() != Item::FIELD_ITEM) return true;
+    Field *field = down_cast<const Item_field *>(item)->field;
+    if (field == nullptr || field->table == nullptr) return true;
+    auto *rpd_table = Utils::rpd_lookup_func()(field->table);
+    if (rpd_table == nullptr || field->field_index() >= rpd_table->meta().fields.size()) return true;
+    const auto *stats = rpd_table->meta().fields[field->field_index()].statistics.get();
+    if (stats == nullptr) return true;
+    const uint64_t distinct = stats->get_basic_stats().distinct_count;
+    if (distinct == 0) return true;
+    groups *= static_cast<double>(distinct);
+    key_bytes += static_cast<double>(item->max_length) + 1.0;  // + null byte
+  }
+
+  const double group_bytes =
+      key_bytes + static_cast<double>(Executor::VectorizedAggregateIterator::HashGroupFixedBytes(aggregates.size()));
+  const double budget = static_cast<double>(ShannonBase::Utils::Util::hash_aggregate_memory_budget(
+                            thd, Executor::VectorizedAggregateIterator::kDefaultHashMemoryLimit)) /
+                        2.0;
+  return groups * group_bytes <= budget;
 }
 
 std::string LocalAgg::ToString(int indent) const {
   std::string pad(indent, ' ');
   return pad + (strategy == AggregateStrategy::HASH ? "→ Hash Aggregate" : "→ Streaming Aggregate");
 }
-
 AccessPath *TopN::ToAccessPath(THD *thd) {
   auto *sort_path = new (thd->mem_root) AccessPath();
   sort_path->type = AccessPath::SORT;
@@ -649,6 +743,34 @@ std::string MySQLNative::ToString(int indent) const {
   if (original_path == nullptr) return pad + "→ MySQL (unbound)";
   return pad + "→ MySQL (" + std::to_string((int)original_path->type) + ")";
 }
+
+AccessPath *Stream::ToAccessPath(THD *thd) {
+  if (original_path == nullptr || original_path->type != AccessPath::STREAM) return original_path;
+
+  AccessPath *child = (children.size() == 1 && children[0] != nullptr) ? children[0]->ToAccessPath(thd) : nullptr;
+  if (child == nullptr || !child->vectorized) {
+    // Nothing below translated into a Rapid plan, so the rebuild would only
+    // re-shape MySQL's own subtree. Keep the original island, all native.
+    WalkAccessPaths(original_path, /*join=*/nullptr, WalkAccessPathPolicy::ENTIRE_TREE,
+                    [](AccessPath *path, const JOIN *) {
+                      path->vectorized = false;
+                      return false;
+                    });
+    return original_path;
+  }
+
+  const auto &source = original_path->stream();
+  AccessPath *path =
+      NewStreamingAccessPath(thd, child, source.join, source.temp_table_param, source.table, source.ref_slice);
+  path->stream().provide_rowid = source.provide_rowid;
+  path->has_group_skip_scan = child->has_group_skip_scan;
+  // The streaming wrapper is a MySQL row iterator; only the block below it runs
+  // vectorized, so the flag stays off here and the child keeps its own.
+  PropagateCostAndRows(this, path);
+  return path;
+}
+
+std::string Stream::ToString(int indent) const { return std::string(indent, ' ') + "→ Stream"; }
 
 void WalkPlan(PlanNode *node, std::function<void(PlanNode *)> cb) {
   if (!node) return;

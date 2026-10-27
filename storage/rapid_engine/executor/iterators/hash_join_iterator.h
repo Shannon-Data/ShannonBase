@@ -94,7 +94,7 @@ inline HashJoinGrowth PlanHashJoinGrowth(size_t used, size_t limit, size_t slot_
 }
 
 // this vectorized version of HashJoinIterator. The More Hash Iterator, refere to HashJoinIterator.
-class VectorizedHashJoinIterator final : public RowIterator, public BatchReadable {
+class VectorizedHashJoinIterator final : public RowIterator, public BatchReadable, public ResMgmt::Evictable {
   // Declared first so the reservation outlives all retained buffers.
   ResMgmt::MemoryBudget::Reservation m_memory_reservation;
   // A sub-budget of the operator grant, not another claim on global headroom.
@@ -121,6 +121,13 @@ class VectorizedHashJoinIterator final : public RowIterator, public BatchReadabl
   int Read() override;
   void SetNullRowFlag(bool is_null_row) override;
   void UnlockRow() override;
+
+  // Memory arbitration: an operator that outgrows its floor asks the pool for
+  // more before switching to the external join (grow_query_memory), and other
+  // operators of the query can ask this one to free bytes. Reclaiming inside
+  // the build is not safe from another frame, so Evict() only arms the flag and
+  // the build loop spills at its next capacity check.
+  size_t Evict(size_t target) override;
   void EndPSIBatchModeIfStarted() override;
 
   struct PerformanceStats {
@@ -241,6 +248,15 @@ class VectorizedHashJoinIterator final : public RowIterator, public BatchReadabl
   // caller can spill instead.
   bool SignalBuildOverflow();
   bool m_build_capacity_exceeded{false};
+  // Grows the operator grant (doubling) and re-derives the build/aux budgets,
+  // so a lone join is not pinned to join_buffer_size-derived floor. Returns
+  // true when the grant actually grew.
+  bool TryGrowBuildBudget();
+  // Called between build batches: grows proactively while the build still fits.
+  void MaybeGrowBuildBudget();
+  bool m_in_build_loop{false};
+  bool m_evict_requested{false};
+  bool m_build_growth_exhausted{false};
 
   // Ordered external spill (grace hash + ordinal merge)
   // Reached when the build side outgrows join_buff_size on the preserves_probe_order path -- previously a hard error
@@ -273,6 +289,8 @@ class VectorizedHashJoinIterator final : public RowIterator, public BatchReadabl
   };
 
   static constexpr size_t kSpillFanout = 16;
+  size_t m_initial_spill_fanout{kSpillFanout};
+  unsigned m_initial_spill_bits{4};
   static constexpr size_t kMaxSpillDepth = 6;
   static constexpr uint64_t kSpillHashSeed = 0x9E3779B97F4A7C15ULL;
 
@@ -295,7 +313,7 @@ class VectorizedHashJoinIterator final : public RowIterator, public BatchReadabl
   void GrowHashTableIfNeeded();
   bool IndexBuildRow(size_t row_idx, bool *overflowed, uint64_t *out_hash);
 
-  static size_t SpillPartitionIndex(uint64_t hash, size_t depth);
+  size_t SpillPartitionIndex(uint64_t hash, size_t depth) const;
   bool SpillBuildRange(size_t first_row, size_t row_count);
   bool BeginBuildSpill(size_t buffered_rows);
   bool PartitionProbeInput();
@@ -323,6 +341,10 @@ class VectorizedHashJoinIterator final : public RowIterator, public BatchReadabl
   int ProcessPartitionPairBlockwise(SpillFile *build_file, SpillFile *probe_file);
   int RepartitionAndProcess(SpillFile *build_file, SpillFile *probe_file, size_t depth);
   int ProcessSpilledPartitions();
+  // Runs the whole on-disk phase (probe partitioning, per-partition joins and
+  // the ordered merge) and publishes the spill profile. Shared by Read() and
+  // ReadBatch(), which both enter it from BUILDING_HASH_TABLE.
+  int RunSpilledJoin();
   bool RefillMergeHead(MergeHead *head);
   // `null_complemented`, when non-null, receives whether the emitted row is an  OUTER/ANTI null-complement, which a
   // batch consumer needs in order to append NULLs for the build columns instead of reading the zero-filled image.

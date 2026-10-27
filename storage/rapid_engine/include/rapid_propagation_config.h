@@ -21,8 +21,8 @@
 
    Copyright (c) 2026, Shannon Data AI and/or its affiliates.
 */
-#ifndef SHANNON_PROPAGATION_CONFIG_H
-#define SHANNON_PROPAGATION_CONFIG_H
+#ifndef __SHANNON_PROPAGATION_CONFIG_H__
+#define __SHANNON_PROPAGATION_CONFIG_H__
 #include <atomic>
 #include <shared_mutex>
 #include "my_inttypes.h"

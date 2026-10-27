@@ -1,0 +1,115 @@
+--source include/elide_costs.inc
+SET NAMES utf8mb4 COLLATE utf8mb4_0900_ai_ci;
+CREATE TABLE like_pushdown (
+ id INT PRIMARY KEY, s VARCHAR(80), c CHAR(12), pattern VARCHAR(80)
+) SECONDARY_ENGINE=RAPID;
+INSERT INTO like_pushdown VALUES
+ (1,'alpha','alpha','a%'), (2,'ALPINE','ALPINE','a%'),
+ (3,'beta','beta','b%'), (4,'a_tail','a_tail','a!_%'),
+ (5,'a%tail','a%tail','a!%%'), (6,'','', '%'),
+ (7,NULL,NULL,'%'), (8,'éclair','éclair','é%'),
+ (9,'alpha  ','alpha  ','a%'), (10,'猫咪','猫咪','_%');
+ALTER TABLE like_pushdown SECONDARY_LOAD;
+SET SESSION use_secondary_engine=FORCED;
+SET SESSION optimizer_switch='hypergraph_optimizer=on';
+--echo # Supported LIKE and NOT LIKE qualify inside the scan.
+--replace_regex $elide_costs
+EXPLAIN FORMAT=TREE SELECT id FROM like_pushdown WHERE s LIKE 'a%' ORDER BY id;
+--replace_regex $elide_costs
+EXPLAIN FORMAT=TREE SELECT id FROM like_pushdown WHERE s NOT LIKE 'a%' ORDER BY id;
+--echo # AND can push LIKE independently; OR stays intact above the scan.
+--replace_regex $elide_costs
+EXPLAIN FORMAT=TREE SELECT id FROM like_pushdown WHERE s LIKE 'a%' AND LENGTH(s)>5 ORDER BY id;
+--replace_regex $elide_costs
+EXPLAIN FORMAT=TREE SELECT id FROM like_pushdown WHERE s LIKE 'a%' OR id=3 ORDER BY id;
+--let $assert_digest = SELECT CONCAT(COUNT(*),':',IFNULL(GROUP_CONCAT(id ORDER BY id),'-')) FROM like_pushdown WHERE s LIKE 'a%'
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_digest = SELECT CONCAT(COUNT(*),':',IFNULL(GROUP_CONCAT(id ORDER BY id),'-')) FROM like_pushdown WHERE s NOT LIKE 'a%'
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_digest = SELECT CONCAT(COUNT(*),':',IFNULL(GROUP_CONCAT(id ORDER BY id),'-')) FROM like_pushdown WHERE s LIKE 'a!_%' ESCAPE '!'
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_digest = SELECT CONCAT(COUNT(*),':',IFNULL(GROUP_CONCAT(id ORDER BY id),'-')) FROM like_pushdown WHERE s NOT LIKE 'a!%%' ESCAPE '!'
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_digest = SELECT CONCAT(COUNT(*),':',IFNULL(GROUP_CONCAT(id ORDER BY id),'-')) FROM like_pushdown WHERE s LIKE ''
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_digest = SELECT CONCAT(COUNT(*),':',IFNULL(GROUP_CONCAT(id ORDER BY id),'-')) FROM like_pushdown WHERE s LIKE '%'
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_digest = SELECT CONCAT(COUNT(*),':',IFNULL(GROUP_CONCAT(id ORDER BY id),'-')) FROM like_pushdown WHERE s NOT LIKE '%'
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_digest = SELECT CONCAT(COUNT(*),':',IFNULL(GROUP_CONCAT(id ORDER BY id),'-')) FROM like_pushdown WHERE s LIKE 'é%'
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_digest = SELECT CONCAT(COUNT(*),':',IFNULL(GROUP_CONCAT(id ORDER BY id),'-')) FROM like_pushdown WHERE s LIKE '_咪'
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_digest = SELECT CONCAT(COUNT(*),':',IFNULL(GROUP_CONCAT(id ORDER BY id),'-')) FROM like_pushdown WHERE s LIKE 'a%' AND LENGTH(s)>5
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_digest = SELECT CONCAT(COUNT(*),':',IFNULL(GROUP_CONCAT(id ORDER BY id),'-')) FROM like_pushdown WHERE s LIKE 'a%' OR id=3
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_digest = SELECT CONCAT(COUNT(*),':',IFNULL(GROUP_CONCAT(id ORDER BY id),'-')) FROM like_pushdown WHERE s LIKE pattern
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_digest = SELECT CONCAT(COUNT(*),':',IFNULL(GROUP_CONCAT(id ORDER BY id),'-')) FROM like_pushdown WHERE c LIKE 'alpha'
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_digest = SELECT CONCAT(COUNT(*),':',IFNULL(GROUP_CONCAT(id ORDER BY id),'-')) FROM like_pushdown WHERE c LIKE 'alpha  '
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_digest = SELECT CONCAT(COUNT(*),':',IFNULL(GROUP_CONCAT(id ORDER BY id),'-')) FROM like_pushdown WHERE s LIKE 'a_%' ESCAPE '_'
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_digest = SELECT CONCAT(COUNT(*),':',IFNULL(GROUP_CONCAT(id ORDER BY id),'-')) FROM like_pushdown WHERE s LIKE 'a%%' ESCAPE '%'
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_digest = SELECT CONCAT(COUNT(*),':',IFNULL(GROUP_CONCAT(id ORDER BY id),'-')) FROM like_pushdown WHERE s LIKE NULL
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--echo # Escapes, collation conversion fallback and NULL preserve SQL semantics.
+--let $assert_digest = SELECT CONCAT(COUNT(*),':',IFNULL(GROUP_CONCAT(id ORDER BY id),'-')) FROM like_pushdown WHERE s LIKE 'a猫_%' ESCAPE '猫'
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_digest = SELECT CONCAT(COUNT(*),':',IFNULL(GROUP_CONCAT(id ORDER BY id),'-')) FROM like_pushdown WHERE s LIKE 'a!_%' ESCAPE ''
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_digest = SELECT CONCAT(COUNT(*),':',IFNULL(GROUP_CONCAT(id ORDER BY id),'-')) FROM like_pushdown WHERE s COLLATE utf8mb4_bin LIKE 'a%'
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_digest = SELECT CONCAT(COUNT(*),':',IFNULL(GROUP_CONCAT(id ORDER BY id),'-')) FROM like_pushdown WHERE s NOT LIKE NULL
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_digest = SELECT CONCAT(COUNT(*),':',IFNULL(GROUP_CONCAT(id ORDER BY id),'-')) FROM like_pushdown WHERE NOT (s NOT LIKE 'a%')
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--replace_regex $elide_costs
+EXPLAIN FORMAT=TREE SELECT id FROM like_pushdown WHERE s LIKE pattern ORDER BY id;
+--replace_regex $elide_costs
+EXPLAIN FORMAT=TREE SELECT id FROM like_pushdown WHERE s COLLATE utf8mb4_bin LIKE 'a%' ORDER BY id;
+SET @saved_like_sql_mode=@@SESSION.sql_mode;
+SET SESSION sql_mode='NO_BACKSLASH_ESCAPES';
+--let $assert_digest = SELECT CONCAT(COUNT(*),':',IFNULL(GROUP_CONCAT(id ORDER BY id),'-')) FROM like_pushdown WHERE s LIKE 'a_%'
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+SET SESSION sql_mode='PAD_CHAR_TO_FULL_LENGTH';
+--replace_regex $elide_costs
+EXPLAIN FORMAT=TREE SELECT id FROM like_pushdown WHERE c LIKE 'alpha' ORDER BY id;
+--let $assert_digest = SELECT CONCAT(COUNT(*),':',IFNULL(GROUP_CONCAT(id ORDER BY id),'-')) FROM like_pushdown WHERE c LIKE 'alpha'
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+SET SESSION sql_mode=@saved_like_sql_mode;
+--echo # Prepared execution recompiles changed constant patterns.
+PREPARE lp FROM 'SELECT id FROM like_pushdown WHERE s LIKE ? ORDER BY id';
+SET @pattern='a%';
+EXECUTE lp USING @pattern;
+SET @pattern='b%';
+EXECUTE lp USING @pattern;
+DEALLOCATE PREPARE lp;
+--echo # Dictionary growth after loading must include new matching IDs.
+INSERT INTO like_pushdown VALUES (11,'added','added','a%');
+--let $assert_digest = SELECT CONCAT(COUNT(*),':',IFNULL(GROUP_CONCAT(id ORDER BY id),'-')) FROM like_pushdown WHERE s LIKE 'a%'
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+SET SESSION optimizer_switch='hypergraph_optimizer=off';
+--let $assert_digest = SELECT CONCAT(COUNT(*),':',IFNULL(GROUP_CONCAT(id ORDER BY id),'-')) FROM like_pushdown WHERE s NOT LIKE 'a%'
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+SET SESSION use_secondary_engine=OFF;
+DROP TABLE like_pushdown;
+
+--echo # ENUM and SET use numeric storage and keep the MySQL filter.
+CREATE TABLE like_enum (id INT PRIMARY KEY, e ENUM('alpha','beta'), s SET('alpha','beta')) SECONDARY_ENGINE=RAPID;
+INSERT INTO like_enum VALUES (1,'alpha','alpha'),(2,'beta','beta'),(3,NULL,NULL);
+ALTER TABLE like_enum SECONDARY_LOAD;
+SET SESSION use_secondary_engine=FORCED;
+SET SESSION optimizer_switch='hypergraph_optimizer=on';
+--replace_regex $elide_costs
+EXPLAIN FORMAT=TREE SELECT id FROM like_enum WHERE e LIKE 'a%' ORDER BY id;
+--let $assert_digest = SELECT CONCAT(COUNT(*),':',IFNULL(GROUP_CONCAT(id ORDER BY id),'-')) FROM like_enum WHERE e LIKE 'a%'
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_digest = SELECT CONCAT(COUNT(*),':',IFNULL(GROUP_CONCAT(id ORDER BY id),'-')) FROM like_enum WHERE s NOT LIKE 'a%'
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+SET SESSION use_secondary_engine=OFF;
+SET SESSION optimizer_switch='hypergraph_optimizer=off';
+DROP TABLE like_enum;

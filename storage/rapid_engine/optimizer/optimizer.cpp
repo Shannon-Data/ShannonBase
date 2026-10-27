@@ -628,7 +628,7 @@ bool HasUnorderedHashOutput(const PlanNode *node) {
 // AccessPath::num_output_rows() uses kUnknownRowCount (-1.0) as a sentinel for "not yet
 // estimated". PlanNode::estimated_rows is unsigned (ha_rows); a naive static_cast<ha_rows> of
 // that negative sentinel wraps to a value near UINT64_MAX instead of clamping to 0.
-ha_rows SafeRowEstimate(double rows) { return rows > 0.0 ? static_cast<ha_rows>(rows) : 0; }
+inline ha_rows SafeRowEstimate(double rows) { return rows > 0.0 ? static_cast<ha_rows>(rows) : 0; }
 
 JoinType ToJoinType(RelationalExpression::Type type) {
   switch (type) {
@@ -1873,18 +1873,39 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
       return false;
     } break;
     case AccessPath::STREAM: {
-      // LATERAL correlated subquery under the hypergraph optimizer.
-      // Recursively translate the inner subquery so that Plan-IR passes
-      // (ProjectionPruning, PredicatePushDown, etc.) can see the
-      // correlated predicate (e.g. t_med.grp = a.grp) and mark the
-      // outer correlation column as referenced.
+      // LATERAL correlated subquery, or a query block MySQL streams into its
+      // parent. Translate the inner block so Plan-IR passes (ProjectionPruning,
+      // PredicatePushDown, ...) can see the correlated predicate (e.g.
+      // t_med.grp = a.grp) and mark the outer correlation column as referenced.
       const auto &stream = path->stream();
       TranslateState child_state;
       if (translate_access_path(&child_state, thd, stream.child, stream.join)) return true;
 
-      // Wrap the translated child in MySQLNative (so ToAccessPath returns
-      // the original STREAM AccessPath), but store the child in `children`
-      // so WalkPlan can descend into the inner subquery.
+      // A correlated block must re-run per outer row, and its predicates read
+      // the outer record, which a Rapid scan cannot evaluate. Only independent
+      // blocks are rebuilt.
+      const bool correlated =
+          stream.join != nullptr && stream.join->query_block != nullptr && stream.join->query_block->is_dependent();
+
+      // Once the inner block translated, rebuild it: wrapping it in MySQLNative
+      // returned the original STREAM path and ToAccessPath() then cleared
+      // `vectorized` over the whole subtree, so an entire query block fell back
+      // to row-at-a-time access just because one STREAM sat on top of it.
+      if (!correlated && child_state.plan_node != nullptr &&
+          child_state.plan_node->type() != PlanNode::Type::MYSQL_NATIVE) {
+        auto node = std::make_unique<Stream>();
+        node->original_path = path;
+        node->cost = path->cost();
+        node->estimated_rows = SafeRowEstimate(path->num_output_rows());
+        node->children.push_back(std::move(child_state.plan_node));
+
+        state->plan_node = std::move(node);
+        state->state_map = child_state.state_map;
+        return false;
+      }
+
+      // An untranslatable inner block stays native: keep the child reachable for
+      // WalkPlan, and let ToAccessPath() return MySQL's original island.
       auto native = std::make_unique<MySQLNative>();
       native->original_path = path;
       native->estimated_rows = SafeRowEstimate(path->num_output_rows());
@@ -2356,6 +2377,13 @@ std::unique_ptr<Imcs::Predicate> Optimizer::convert_func_item_to_predicate(const
       return convert_isnotnull_to_predicate(thd, func);
     case Item_func::LIKE_FUNC:
       return convert_like_to_predicate(thd, static_cast<const Item_func_like *>(func), false);
+    case Item_func::NOT_FUNC: {
+      if (func->argument_count() != 1) return nullptr;
+      const Item *inner = func->arguments()[0]->real_item();
+      if (inner->type() != Item::FUNC_ITEM || down_cast<const Item_func *>(inner)->functype() != Item_func::LIKE_FUNC)
+        return nullptr;
+      return convert_like_to_predicate(thd, down_cast<const Item_func_like *>(inner), true);
+    }
     case Item_func::COND_AND_FUNC:
     case Item_func::COND_OR_FUNC:
       // These should have been handled by convert_cond_item_to_predicate
@@ -2579,24 +2607,39 @@ std::unique_ptr<Imcs::Predicate> Optimizer::convert_isnotnull_to_predicate(const
  */
 std::unique_ptr<Imcs::Predicate> Optimizer::convert_like_to_predicate(const THD *thd, const Item_func_like *like_func,
                                                                       bool is_negated) {
-  if (like_func->argument_count() < 2) return nullptr;
+  if (like_func->argument_count() < 2 || !like_func->escape_is_evaluated()) return nullptr;
 
-  Item *field_arg = like_func->arguments()[0];
+  Item *field_arg = like_func->arguments()[0]->real_item();
   Item *pattern_arg = like_func->arguments()[1];
 
-  if (field_arg->type() != Item::FIELD_ITEM) return nullptr;
+  if (field_arg->type() != Item::FIELD_ITEM || !pattern_arg->const_item() || !pattern_arg->may_evaluate_const(thd))
+    return nullptr;
 
   Item_field *field_item = static_cast<Item_field *>(field_arg);
   if (!field_item->field) return nullptr;
 
   Field *field = field_item->field;
+  if (!field->table || !ShannonBase::Utils::Util::is_string(field->type()) || ShannonBase::Utils::IsOffPageField(field))
+    return nullptr;
+  if (field->real_type() == MYSQL_TYPE_ENUM || field->real_type() == MYSQL_TYPE_SET) return nullptr;
+  const CHARSET_INFO *charset = like_func->compare_collation();
+  if (!charset || field->charset() != charset || pattern_arg->collation.collation != charset) return nullptr;
+  if (field->type() == MYSQL_TYPE_STRING && (thd->variables.sql_mode & MODE_PAD_CHAR_TO_FULL_LENGTH)) return nullptr;
+  auto *rpd_table = Utils::rpd_lookup_func()(field->table);
+  if (!rpd_table || field->field_index() >= rpd_table->meta().fields.size() ||
+      !rpd_table->meta().fields[field->field_index()].dictionary)
+    return nullptr;
   uint32 col_idx = field->field_index();
   enum_field_types field_type = field->type();
 
-  // Extract pattern. A NULL pattern matches nothing, so it is not a lost bound.
-  Imcs::PredicateValue pattern = extract_value_from_item(thd, pattern_arg, field_type, field);
+  // Compile only the SQL pattern here. Dictionary IDs/masks are execution
+  // state and are rebound by the predicate for the current dictionary.
+  String buffer;
+  String *pattern = pattern_arg->val_str(&buffer);
+  if (!pattern || pattern_arg->null_value || thd->is_error()) return nullptr;
   Imcs::PredicateOperator op = is_negated ? Imcs::PredicateOperator::NOT_LIKE : Imcs::PredicateOperator::LIKE;
-  return make_predicate(field, col_idx, op, pattern, field_type);
+  return make_predicate(field, col_idx, op, Imcs::PredicateValue(std::string(pattern->ptr(), pattern->length())),
+                        field_type, charset, like_func->escape());
 }
 
 std::unique_ptr<Imcs::Predicate> Optimizer::convert_range_to_predicate(const QUICK_RANGE *qr, const TABLE *table,
