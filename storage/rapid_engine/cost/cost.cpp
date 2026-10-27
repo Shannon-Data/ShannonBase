@@ -39,6 +39,7 @@
 #include "sql/sql_optimizer.h"                    //JOIN
 #include "sql/table.h"                            //TABLE
 
+#include "storage/rapid_engine/cost/operator_cost.h"
 #include "storage/rapid_engine/handler/ha_shannon_rapid.h"
 #include "storage/rapid_engine/imcs/col0stats.h"
 #include "storage/rapid_engine/imcs/imcs.h"
@@ -52,6 +53,19 @@
 
 namespace ShannonBase {
 namespace Optimizer {
+namespace {
+std::optional<OperatorCost> PathCost(const AccessPath *path) {
+  return path ? OperatorCost::from(path->cost(), path->init_cost(), path->init_once_cost()) : std::nullopt;
+}
+
+void SetPathCost(AccessPath *path, const OperatorCost &cost) {
+  assert(cost.valid());
+  path->set_cost(cost.total());
+  path->set_cost_before_filter(cost.total());
+  path->set_init_cost(cost.startup);
+  path->set_init_once_cost(cost.reusable);
+}
+}  // namespace
 std::unordered_map<CostEstimator::Type, CostEstimator *> CostModelServer::instances_;
 std::mutex CostModelServer::instance_mutex_;
 /**
@@ -573,6 +587,13 @@ size_t projected_column_count(const AccessPath *path, const Imcs::RpdTable *rpd_
         break;
       case AccessPath::REF:
         table = p->ref().table;
+        break;
+      case AccessPath::EQ_REF:
+        table = p->eq_ref().table;
+        break;
+      case AccessPath::INDEX_RANGE_SCAN:
+        if (p->index_range_scan().used_key_part && p->index_range_scan().used_key_part[0].field)
+          table = p->index_range_scan().used_key_part[0].field->table;
         break;
       case AccessPath::FILTER:
         p = p->filter().child;
@@ -1195,6 +1216,7 @@ double PredicateAnalyzer::analyze_function(const Item_func *func, bool *can_prun
   // binary, and a single argument_count() test would send BETWEEN to the
   // default guess and leave its case below unreachable.
   const bool is_between = (func->functype() == Item_func::BETWEEN);
+  auto comparison = func->functype();
   Item_field *field_item = nullptr;
   Item *value_item = nullptr;
 
@@ -1217,10 +1239,27 @@ double PredicateAnalyzer::analyze_function(const Item_func *func, bool *can_prun
     } else if (right->type() == Item::FIELD_ITEM && left->const_item()) {
       field_item = static_cast<Item_field *>(right);
       value_item = left;
+      switch (comparison) {
+        case Item_func::LT_FUNC:
+          comparison = Item_func::GT_FUNC;
+          break;
+        case Item_func::LE_FUNC:
+          comparison = Item_func::GE_FUNC;
+          break;
+        case Item_func::GT_FUNC:
+          comparison = Item_func::LT_FUNC;
+          break;
+        case Item_func::GE_FUNC:
+          comparison = Item_func::LE_FUNC;
+          break;
+        default:
+          break;
+      }
     }
   }
 
-  if (!field_item) return RapidCostConstants::kUnknownPredicateSelectivity;
+  if (!field_item || !field_item->field || field_item->field->table != m_table)
+    return RapidCostConstants::kUnknownPredicateSelectivity;
 
   // Get field index
   uint field_idx = field_item->field->field_index();
@@ -1235,6 +1274,23 @@ double PredicateAnalyzer::analyze_function(const Item_func *func, bool *can_prun
     return estimate_without_stats(func);
   }
 
+  // Non-numeric constants cannot be passed to numeric histograms as zero.
+  // Equality can still use the uniform NDV estimate without decoding a bound.
+  bool numeric_bounds = !value_item || value_item->result_type() == INT_RESULT ||
+                        value_item->result_type() == REAL_RESULT || value_item->result_type() == DECIMAL_RESULT;
+  if (is_between) {
+    for (uint i = 1; i < 3; ++i) {
+      const auto type = mutable_func->arguments()[i]->result_type();
+      numeric_bounds &= type == INT_RESULT || type == REAL_RESULT || type == DECIMAL_RESULT;
+    }
+  }
+  if (!numeric_bounds) {
+    const auto ndv = stats->get_basic_stats().distinct_count.load(std::memory_order_acquire);
+    if (comparison == Item_func::EQ_FUNC && ndv > 0)
+      return (1.0 - stats->get_basic_stats().null_fraction.load(std::memory_order_acquire)) / ndv;
+    return estimate_without_stats(func);
+  }
+
   // Extract value (BETWEEN reads its two bounds in the case below)
   double value = value_item ? extract_numeric_value(value_item) : 0.0;
   const double col_min = stats->get_basic_stats().min_value.load(std::memory_order_acquire);
@@ -1242,7 +1298,7 @@ double PredicateAnalyzer::analyze_function(const Item_func *func, bool *can_prun
 
   // Estimate selectivity based on operator and statistics
   double selectivity = RapidCostConstants::kUnknownPredicateSelectivity;
-  switch (func->functype()) {
+  switch (comparison) {
     case Item_func::EQ_FUNC:
       selectivity = stats->estimate_equality_selectivity(value);
       *can_prune = true;
@@ -1679,7 +1735,8 @@ bool ModifyIndexScanCost(THD *thd, const JoinHypergraph &graph [[maybe_unused]],
     if (key_info && key_info->actual_key_parts > 0) {
       // from the first key col gets NDV
       uint col_idx = key_info->key_part[0].fieldnr - 1;
-      auto *col_stats = table_meta->fields[col_idx].statistics.get();
+      auto *col_stats =
+          table_meta && col_idx < table_meta->fields.size() ? table_meta->fields[col_idx].statistics.get() : nullptr;
       if (col_stats) {
         const auto &basic = col_stats->get_basic_stats();
         if (basic.distinct_count > 0) {
@@ -1716,7 +1773,6 @@ bool ModifyIndexScanCost(THD *thd, const JoinHypergraph &graph [[maybe_unused]],
       imcu_skip_ratio *= RapidCostConstants::kIndexScanImcuSkipDamping;
 
       const size_t effective_imcus = static_cast<size_t>(total_imcus * (1.0 - imcu_skip_ratio));
-      const size_t projected_cols = table_meta ? std::max<size_t>(1, table_meta->fields.size()) : 1;
       const double imcu_read_cost = effective_imcus * RapidCostConstants::kImcuReadCost;
       const double decomp_cost = estimated_rows * projected_cols * RapidCostConstants::kVectorDecompCostPerCell;
       const double null_check_cost = estimated_rows * RapidCostConstants::kNullBitmapCheckCost;
@@ -1839,13 +1895,13 @@ HashSpillEstimate EstimateHashSpill(THD *thd, AccessPath *build, AccessPath *pro
                : build_rows * (build_width + RapidCostConstants::kHashEntryOverheadBytes);
   if (retained <= build_budget) return {};
   // Ordered spill writes and reads both inputs and the materialized output.
-  // Price sequential I/O blocks with the calibrated I/O factor. Recursive
+  // Temporary files are uncompressed disk I/O, not compressed IMCS reads. Recursive
   // repartitioning and skew can add passes beyond this baseline estimate.
   const double bytes =
       build_rows * build_width + probe_rows * probe_width +
       std::max(0.0, output_rows) * (build_width + probe_width + RapidCostConstants::kSpillOutputRowExtraBytes);
   const double io_cost = RapidCostConstants::kSpillWriteReadPasses * bytes / RapidCostConstants::kIoBlockBytes *
-                         ShannonBase::shannon_rpd_cost_est_instances->io_factor();
+                         MySQLCostConstants::IO_BLOCK_READ;
   return {true, io_cost};
 }
 }  // namespace
@@ -1862,37 +1918,18 @@ bool ModifyHashJoinCost(THD *thd, const JoinHypergraph &graph, AccessPath *path,
       inner_rows >= static_cast<double>(HA_POS_ERROR) || outer_rows >= static_cast<double>(HA_POS_ERROR))
     return false;
 
-  // MySQL builds the hash table on the inner input and probes with the outer,
-  // so price those roles rather than assuming the smaller side builds -- but
-  // only where the optimizer is free to enumerate the other orientation. An
-  // outer, semi- or antijoin has its build side fixed by the join's semantics,
-  // so charging extra for a large forced build side steers nothing towards a
-  // better hash join; it only makes the hash join look dearer than the nested
-  // loop over the same inputs. TPC-H Q21's antijoin -- 4k probe rows against
-  // the 110k-row materialized NOT EXISTS side -- flipped that way and became a
-  // nested loop rescanning those 110k rows per outer row (13s -> >180s).
+  // The server owns logical cardinality. Cost the actual build/probe roles
+  // and its output estimate; many-to-many output is not bounded by either input.
+  const double output_rows = path->num_output_rows();
+  if (!std::isfinite(output_rows) || output_rows < 0) return false;
   const RelationalExpression *hj_expr = hj.join_predicate ? hj.join_predicate->expr : nullptr;
   const bool build_side_is_a_choice = hj_expr != nullptr && (hj_expr->type == RelationalExpression::INNER_JOIN ||
                                                              hj_expr->type == RelationalExpression::MULTI_INNER_JOIN);
-  double join_cost = build_side_is_a_choice ? ShannonBase::shannon_rpd_cost_est_instances->estimate_hash_join_cost(
-                                                  static_cast<ha_rows>(inner_rows), static_cast<ha_rows>(outer_rows))
-                                            : ShannonBase::shannon_rpd_cost_est_instances->estimate_join_cost(
-                                                  static_cast<ha_rows>(outer_rows), static_cast<ha_rows>(inner_rows));
-
-  double join_sel = SelectivityEstimator::kDefaultJoinSelectivity;
-  if (hj_expr != nullptr) {
-    std::vector<Item *> join_conds;
-    const RelationalExpression *expr = hj_expr;
-
-    for (Item *cond : expr->join_conditions) {
-      if (cond) join_conds.push_back(cond);
-    }
-
-    if (!join_conds.empty()) join_sel = SelectivityEstimator::estimate_join_selectivity(join_conds);
-  }
-
-  double output_rows = outer_rows * inner_rows * join_sel;
-  output_rows = std::min(output_rows, std::max(outer_rows, inner_rows));
+  const auto *estimator = ShannonBase::shannon_rpd_cost_est_instances;
+  const double build_cpu = inner_rows * estimator->memory_factor() * RpdCostEstimator::HASH_BUILD_FACTOR;
+  const double probe_cpu = outer_rows * estimator->cpu_factor() * RpdCostEstimator::HASH_PROBE_FACTOR;
+  double join_cost =
+      build_cpu + probe_cpu + output_rows * estimator->cpu_factor() * RapidCostConstants::kHashJoinOutputPerRow;
   bool numeric = true;
   const double build_width = ProjectedJoinWidth(hj.inner, &numeric);
   ProjectedJoinWidth(hj.outer, &numeric);
@@ -1905,7 +1942,7 @@ bool ModifyHashJoinCost(THD *thd, const JoinHypergraph &graph, AccessPath *path,
   bool use_columnar_width = build_side_is_a_choice && numeric && !hj.store_rowids;
   DBUG_EXECUTE_IF("rapid_legacy_join_width_cost", { use_columnar_width = false; });
   const double key_width = use_columnar_width ? JoinKeyWidth(hj_expr) : -1;
-  double build_work_cost = 0;
+  double build_work_cost = build_cpu;
   if (use_columnar_width) {
     const auto work =
         RpdCostEstimator::ColumnarJoinCostEstimator::estimate(inner_rows, outer_rows, build_width, key_width);
@@ -1917,7 +1954,7 @@ bool ModifyHashJoinCost(THD *thd, const JoinHypergraph &graph, AccessPath *path,
     const double hash_byte_cost =
         RapidCostConstants::kHashKeyPerByte * ShannonBase::shannon_rpd_cost_est_instances->cpu_factor();
     join_cost += copy_cost + work.key_bytes * hash_byte_cost;
-    build_work_cost = copy_cost + inner_rows * key_width * hash_byte_cost;
+    build_work_cost += copy_cost + inner_rows * key_width * hash_byte_cost;
   }
   const auto spill = EstimateHashSpill(thd, hj.inner, hj.outer, output_rows, key_width);
   double total_cost = outer_cost + inner_cost + join_cost + spill.io_cost;
@@ -1972,34 +2009,9 @@ bool WideningLookupPays(THD *thd, const AccessPath *lookup, double outer_rows) {
   return widened <= probed;
 }
 
-static bool InnerIsBufferedOnce(const AccessPath *p) {
-  for (;;) {
-    if (p == nullptr) return false;
-    switch (p->type) {
-      case AccessPath::FILTER:
-        p = p->filter().child;
-        continue;
-      case AccessPath::SORT:
-        p = p->sort().child;
-        continue;
-      case AccessPath::LIMIT_OFFSET:
-        p = p->limit_offset().child;
-        continue;
-      case AccessPath::MATERIALIZE:
-      case AccessPath::MATERIALIZED_TABLE_FUNCTION:
-        return true;
-      case AccessPath::TABLE_SCAN: {
-        const TABLE *t = p->table_scan().table;
-        return t != nullptr && t->pos_in_table_list == nullptr;  // internal temp table
-      }
-      default:
-        return false;
-    }
-  }
-}
-
 bool ModifyNestedLoopJoinCost(THD *thd, const JoinHypergraph &graph, AccessPath *path,
                               ShannonBase::Rapid_execution_context *rapid_ctx) {
+  if (path->type != AccessPath::NESTED_LOOP_JOIN) return false;
   auto &nlj = path->nested_loop_join();
 
   double outer_rows = nlj.outer->num_output_rows();
@@ -2022,34 +2034,20 @@ bool ModifyNestedLoopJoinCost(THD *thd, const JoinHypergraph &graph, AccessPath 
   // into an inner index lookup referring to a table not joined here. Such an inner cannot be built once.
   const bool inner_parameterized = (nlj.inner->parameter_tables != 0) || (path->parameter_tables != 0);
 
-  const RelationalExpression *nlj_expr = nlj.join_predicate ? nlj.join_predicate->expr : nullptr;
-  const bool nlj_is_cartesian =
-      nlj_expr == nullptr || (nlj_expr->equijoin_conditions.empty() && nlj_expr->join_conditions.empty());
-  if (nlj_is_cartesian) {
-    const bool inner_buffered_once = !is_lateral && !inner_parameterized && InnerIsBufferedOnce(nlj.inner);
-    const double inner_rescan_cost = inner_buffered_once ? std::max(0.0, nlj.inner->rescan_cost()) : inner_cost;
-    const double cartesian_cost = outer_cost + inner_cost + inner_rescan_cost * std::max(0.0, outer_rows - 1.0);
-    const double cartesian_init = nlj.outer->init_cost() + nlj.inner->init_cost();
-    path->set_cost(cartesian_cost);
-    path->set_cost_before_filter(cartesian_cost);
-    path->set_init_cost(cartesian_init);
-    // Keep init_once_cost <= init_cost (asserted by FindBestQueryPlanInner). A
-    // fallback nested loop has no once-only work of its own beyond its children.
-    path->set_init_once_cost(std::min(cartesian_init, nlj.outer->init_once_cost() + nlj.inner->init_once_cost()));
-    return false;
-  }
-
-  // Child costs already include any vectorized execution benefit. Re-driving
-  // that child does not earn another discount, particularly for FILTER(REF)
-  // and EQ_REF, which use scalar index reads and TABLE row reconstruction.
-  double nlj_cost = outer_cost + outer_rows * inner_cost;
-  if (convertible && !inner_is_lookup)
-    nlj_cost = std::max(nlj_cost, outer_cost + inner_cost + VectorizedHashJoinCost(inner_rows, outer_rows));
+  const auto outer_profile = PathCost(nlj.outer);
+  auto inner_profile = PathCost(nlj.inner);
+  if (!outer_profile || !inner_profile) return false;
+  if (is_lateral || inner_parameterized) inner_profile->reusable = 0;
+  const auto native = NestedLoopCost(*outer_profile, *inner_profile, outer_rows);
+  if (!native) return false;
 
   const auto spill = (convertible && !inner_is_lookup && !is_lateral && !inner_parameterized)
                          ? EstimateHashSpill(thd, nlj.inner, nlj.outer, path->num_output_rows())
                          : HashSpillEstimate{};
-  nlj_cost += spill.io_cost;
+  double nlj_cost = native->total();
+  if (convertible && !inner_is_lookup && !is_lateral && !inner_parameterized)
+    nlj_cost =
+        std::max(nlj_cost, outer_cost + inner_cost + VectorizedHashJoinCost(inner_rows, outer_rows) + spill.io_cost);
 
   path->set_cost(nlj_cost);
   path->set_cost_before_filter(nlj_cost);
@@ -2062,7 +2060,7 @@ bool ModifyNestedLoopJoinCost(THD *thd, const JoinHypergraph &graph, AccessPath 
                               ? nlj_cost
                               : std::min(nlj_cost, nlj.outer->init_cost() + nlj.inner->init_cost());
   path->set_init_cost(nlj_init);
-  path->set_init_once_cost(std::min(nlj_init, nlj.outer->init_once_cost() + nlj.inner->init_once_cost()));
+  path->set_init_once_cost(std::min(nlj_init, native->reusable));
   return false;
 }
 
@@ -2091,22 +2089,13 @@ bool ModifySortCost(THD *thd, const JoinHypergraph &graph, AccessPath *path,
   double child_rows = s.child->num_output_rows();
   double child_cost = s.child->cost();
 
-  ha_rows limit = s.limit;
-  bool is_topn = (limit != HA_POS_ERROR);
-
-  double sort_cost;
-  if (is_topn) {
-    // TOP-N：O(n * log(k))
-    double log_limit = std::log2(std::max(1.0, (double)limit));
-    sort_cost = child_rows * log_limit * RapidCostConstants::kVectorCpuPerRow;
-  } else {
-    // full sort：O(n * log(n))
-    double log_rows = std::log2(std::max(1.0, child_rows));
-    sort_cost = child_rows * log_rows * RapidCostConstants::kVectorCpuPerRow;
-  }
-
-  path->set_cost(child_cost + sort_cost);
-  path->set_init_cost(child_cost + sort_cost);
+  const auto child = PathCost(s.child);
+  if (!child) return false;
+  const double retained = s.limit == HA_POS_ERROR ? child_rows : static_cast<double>(s.limit);
+  const double sort_cost = SortCpuWork(child_rows, retained, RapidCostConstants::kVectorCpuPerRow);
+  if (sort_cost < 0) return false;
+  const auto cost = OperatorCost::from(child_cost + sort_cost, child_cost + sort_cost, child->reusable);
+  if (cost) SetPathCost(path, *cost);
   return false;
 }
 
@@ -2114,14 +2103,12 @@ bool ModifyLimitCost(THD *thd, const JoinHypergraph &graph, AccessPath *path,
                      ShannonBase::Rapid_execution_context *rapid_ctx) {
   auto &lo = path->limit_offset();
   double child_rows = lo.child->num_output_rows();
-  double child_cost = lo.child->cost();
 
-  double effective_rows =
-      (lo.limit == HA_POS_ERROR) ? child_rows : std::min(child_rows, (double)(lo.limit + lo.offset));
-  double ratio = (child_rows > 0) ? effective_rows / child_rows : 1.0;
-
-  path->set_cost(child_cost * ratio);
-  path->set_init_cost(0);
+  const auto child = PathCost(lo.child);
+  if (!child) return false;
+  const auto cost =
+      LimitCost(*child, child_rows, static_cast<double>(lo.limit), static_cast<double>(lo.offset), lo.count_all_rows);
+  if (cost) SetPathCost(path, *cost);
   return false;
 }
 
@@ -2145,11 +2132,9 @@ bool ModifyMaterializeCost(THD *thd, const JoinHypergraph &graph, AccessPath *pa
   // ModifyNestedLoopJoinCost that read rescan_cost() == cost - init_once_cost.
   // A parameterized (lateral) materialize is rebuilt per outer row, so none of
   // the build is recoverable across scans.
-  const double build_cost = child_cost + write_cost;
-  const bool rematerialize_per_scan = (path->parameter_tables != 0);
-  path->set_cost(build_cost + scan_cost);
-  path->set_init_cost(build_cost);
-  path->set_init_once_cost(rematerialize_per_scan ? 0.0 : build_cost);
+  const bool rematerialize_per_scan = mat.param->rematerialize || path->parameter_tables != 0;
+  const auto cost = MaterializeCost(child_cost, write_cost, scan_cost, rematerialize_per_scan);
+  if (cost) SetPathCost(path, *cost);
   return false;
 }
 

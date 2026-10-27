@@ -1,6 +1,12 @@
 # The assertion must fail even under --record on the broken engine.
 # Keep the actual SELECT shape: wrapping in COUNT/GROUP_CONCAT can hide the bug.
---source suite/secondary_engine/include/ga_wrong_results_setup.inc
+SET use_secondary_engine=OFF;
+CREATE TABLE ga_a(id INT PRIMARY KEY, v INT) SECONDARY_ENGINE=rapid;
+CREATE TABLE ga_b(id INT PRIMARY KEY, v INT) SECONDARY_ENGINE=rapid;
+INSERT INTO ga_a VALUES(1,NULL),(2,20),(3,30);
+INSERT INTO ga_b VALUES(1,100),(2,NULL);
+ALTER TABLE ga_a SECONDARY_LOAD;
+ALTER TABLE ga_b SECONDARY_LOAD;
 --source include/elide_costs.inc
 --let $ga_mode=3
 while ($ga_mode) {
@@ -43,4 +49,7 @@ while ($ga_mode) {
   --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
   --dec $ga_mode
 }
---source suite/secondary_engine/include/ga_wrong_results_cleanup.inc
+SET use_secondary_engine=OFF;
+ALTER TABLE ga_a SECONDARY_UNLOAD;
+ALTER TABLE ga_b SECONDARY_UNLOAD;
+DROP TABLE ga_a,ga_b;

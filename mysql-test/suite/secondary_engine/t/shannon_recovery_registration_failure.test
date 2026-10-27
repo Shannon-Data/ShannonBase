@@ -1,9 +1,11 @@
 # Failed publication after propagation attach must remove the consumer entry,
 # share and partial IMCS image. Repeating the job must preserve the failure.
---source suite/secondary_engine/include/storage_layer_baseline.inc
+--let $shannon_storage_layer_case = baseline
+--source suite/secondary_engine/include/shannon_storage_layer.inc
 --let $storage_restart_debug = --debug=d,rapid_recovery_publish_failure,rapid_recovery_repeat_job
 --let $storage_expected = 1:10,2:20,3:30
---source suite/secondary_engine/include/storage_layer_manual_load.inc
+--let $shannon_storage_layer_case = manual_load
+--source suite/secondary_engine/include/shannon_storage_layer.inc
 --let $grep_file = $MYSQLTEST_VARDIR/log/mysqld.1.err
 --let $grep_pattern = RecoveryFramework: repeated recovery returned the same result
 --let $wait_timeout = 60

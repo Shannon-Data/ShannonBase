@@ -221,7 +221,7 @@ EXPLAIN FORMAT=TREE
 SELECT SQL_BIG_RESULT grp, COUNT(*), SUM(big_val)
 FROM t_grouped GROUP BY grp ORDER BY grp;
 EXPLAIN
--> Group vectorized aggregate: count(0), sum(t_grouped.big_val)  (rows=36)
+-> Group vectorized aggregate: count(0), sum(t_grouped.big_val)  (rows=13)
     -> Vectorized table scan on t_grouped in secondary engine Rapid  (rows=1300)
 
 Warnings:
@@ -267,9 +267,9 @@ grp	group_rows
 10	100
 EXPLAIN FORMAT=TREE SELECT grp, COUNT(*) AS c FROM t_grouped GROUP BY grp ORDER BY c;
 EXPLAIN
--> Sort: c  (rows=36)
-    -> Stream results  (rows=36)
-        -> Group vectorized aggregate: count(0)  (rows=36)
+-> Sort: c  (rows=13)
+    -> Stream results  (rows=13)
+        -> Group vectorized aggregate: count(0)  (rows=13)
             -> Vectorized table scan on t_grouped in secondary engine Rapid  (rows=1300)
 
 Warnings:
@@ -344,7 +344,7 @@ EXPLAIN FORMAT=TREE
 SELECT SQL_BIG_RESULT grp, COUNT(*), SUM(big_val)
 FROM t_grouped GROUP BY grp ORDER BY grp;
 EXPLAIN
--> Group vectorized aggregate: count(0), sum(t_grouped.big_val)  (rows=36)
+-> Group vectorized aggregate: count(0), sum(t_grouped.big_val)  (rows=13)
     -> Vectorized table scan on t_grouped in secondary engine Rapid  (rows=1300)
 
 Warnings:
@@ -390,9 +390,9 @@ grp	group_rows
 10	100
 EXPLAIN FORMAT=TREE SELECT grp, COUNT(*) AS c FROM t_grouped GROUP BY grp ORDER BY c;
 EXPLAIN
--> Sort: c
+-> Sort: c  (rows=13)
     -> Table scan on <temporary>
-        -> Aggregate using temporary table
+        -> Aggregate using temporary table  (rows=13)
             -> Vectorized table scan on t_grouped in secondary engine Rapid  (rows=1300)
 
 Warnings:

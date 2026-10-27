@@ -245,6 +245,16 @@ class ColumnStatistics : public MemoryObject {
   };
   BasicStatsSnapshot snapshot_basic() const;
 
+  // Frozen planning inputs. Numeric histograms are copied under their reader
+  // lock; this is a planning snapshot, not a transactional visibility snapshot.
+  struct PlanningSnapshot {
+    BasicStatsSnapshot counters;
+    uint64_t ndv{0}, version{0};
+    double minimum{0}, maximum{0};
+    std::shared_ptr<const EquiHeightHistogram> histogram;
+  };
+  PlanningSnapshot snapshot_for_costing() const;
+
   void finalize();
 
   /**

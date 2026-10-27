@@ -1,4 +1,5 @@
---source suite/secondary_engine/include/storage_layer_baseline.inc
+--let $shannon_storage_layer_case = baseline
+--source suite/secondary_engine/include/shannon_storage_layer.inc
 --let $wait_condition = SELECT COUNT(*)=1 FROM performance_schema.rpd_tables r JOIN performance_schema.rpd_table_id i ON r.ID=i.ID WHERE i.SCHEMA_NAME='sh_storage_recovery' AND i.TABLE_NAME='t' AND r.SNAPSHOT_SCN>0 AND r.PERSISTED_SCN>=r.SNAPSHOT_SCN
 --source include/wait_condition.inc
 SELECT SNAPSHOT_SCN>0 AS snapshot_certified,PERSISTED_SCN>=SNAPSHOT_SCN AS storage_confirmed FROM performance_schema.rpd_tables r JOIN performance_schema.rpd_table_id i ON r.ID=i.ID WHERE i.SCHEMA_NAME='sh_storage_recovery' AND i.TABLE_NAME='t';

@@ -21,6 +21,28 @@
 namespace ShannonBase {
 namespace Imcs {
 
+TEST(ColumnStatisticsTest, CostingSnapshotSurvivesSubsequentFinalization) {
+  ColumnStatistics stats(0, "col", MYSQL_TYPE_LONG);
+  for (int i = 0; i < 200; ++i) stats.update(42.0);
+  stats.update_null();
+  stats.finalize();
+  const auto frozen = stats.snapshot_for_costing();
+  ASSERT_NE(nullptr, frozen.histogram);
+  EXPECT_EQ(201U, frozen.counters.row_count);
+  EXPECT_EQ(1U, frozen.counters.null_count);
+  EXPECT_EQ(1U, frozen.ndv);
+  EXPECT_DOUBLE_EQ(42, frozen.minimum);
+  EXPECT_DOUBLE_EQ(42, frozen.maximum);
+  for (int i = 0; i < 200; ++i) stats.update(100.0);
+  stats.finalize();
+  const auto next = stats.snapshot_for_costing();
+  EXPECT_GT(next.version, frozen.version);
+  EXPECT_EQ(401U, next.counters.row_count);
+  EXPECT_EQ(201U, frozen.counters.row_count);
+  EXPECT_DOUBLE_EQ(0, frozen.histogram->estimate_equality_selectivity(100));
+  EXPECT_DOUBLE_EQ(1, frozen.histogram->estimate_equality_selectivity(42));
+}
+
 TEST(ColumnStatisticsTest, ConstantRangeSelectivity) {
   ColumnStatistics stats(0, "col", MYSQL_TYPE_LONG);
   stats.update(42.0);

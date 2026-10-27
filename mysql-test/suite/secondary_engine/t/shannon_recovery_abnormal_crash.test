@@ -1,6 +1,7 @@
 # Exercise a real SIGABRT in a dedicated MTR server, with core dumps disabled.
 --source include/linux.inc
---source suite/secondary_engine/include/storage_layer_baseline.inc
+--let $shannon_storage_layer_case = baseline
+--source suite/secondary_engine/include/shannon_storage_layer.inc
 CALL mtr.add_suppression("Attempting backtrace. You can use the following information to find out");
 BEGIN;
 INSERT INTO t VALUES (4,40);

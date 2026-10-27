@@ -1,6 +1,7 @@
 # One revoked table must require manual load without blocking a healthy table's
 # native recovery and committed GTID/binlog replay.
---source suite/secondary_engine/include/storage_layer_baseline.inc
+--let $shannon_storage_layer_case = baseline
+--source suite/secondary_engine/include/shannon_storage_layer.inc
 CALL mtr.add_suppression("recovery eligibility is revoked or cannot be verified; automatic recovery stopped");
 CALL mtr.add_suppression("RecoveryManager: a source change reached sh_storage_recovery.t");
 CREATE TABLE healthy (id INT PRIMARY KEY, v INT) SECONDARY_ENGINE=rapid;

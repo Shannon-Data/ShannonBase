@@ -1,6 +1,7 @@
 # Model incomplete persistence after power loss. This does not cut device power
 # or emulate loss of the OS/controller write cache.
---source suite/secondary_engine/include/storage_layer_baseline.inc
+--let $shannon_storage_layer_case = baseline
+--source suite/secondary_engine/include/shannon_storage_layer.inc
 UPDATE t SET v=11 WHERE id=1;
 INSERT INTO t VALUES (4,40);
 --source include/kill_mysqld.inc

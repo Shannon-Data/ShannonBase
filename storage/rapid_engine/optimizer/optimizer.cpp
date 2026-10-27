@@ -24,7 +24,9 @@
    The fundmental code for imcs optimizer.
 */
 #include "storage/rapid_engine/optimizer/optimizer.h"
+#include "storage/rapid_engine/cost/planning_statistics.h"
 #include "storage/rapid_engine/executor/iterators/nested_loop_iterator.h"
+#include "storage/rapid_engine/optimizer/rules/cost_refinement.h"
 
 #include <algorithm>
 #include <iomanip>
@@ -208,11 +210,10 @@ bool PreferOrderedAggregate(THD *thd, const JOIN *join, const AccessPath *input)
   if (key_info.actual_key_parts == 0 || key_info.key_part[0].field != field ||
       (key_info.key_part[0].key_part_flag & HA_PART_KEY_SEG) != 0)
     return false;
-  auto *rpd_table = Utils::rpd_lookup_func()(table);
-  if (!rpd_table || field->field_index() >= rpd_table->meta().fields.size()) return false;
-  auto *stats = rpd_table->meta().fields[field->field_index()].statistics.get();
-  if (!stats || stats->get_basic_stats().distinct_count == 0) return false;
-  const double groups = std::min(rows, static_cast<double>(stats->get_basic_stats().distinct_count));
+  ColumnEstimate stats;
+  if (!PlanningStatistics::Column(thd, field, &stats)) return false;
+  const double groups = std::min(rows, stats.non_null_distinct_values + (stats.null_fraction > 0 ? 1.0 : 0.0));
+  if (groups <= 0) return false;
   size_t aggregates = 0;
   if (join->sum_funcs)
     for (Item_sum **sum = join->sum_funcs; *sum; ++sum) ++aggregates;
@@ -686,9 +687,11 @@ void Optimizer::AddDefaultRules() {
   // removed every Filter that the scan can evaluate itself. Sorts, joins and
   // aggregates remain barriers in the conservative implementation.
   m_optimize_rules.emplace_back(std::make_unique<TopNPushDown>());
-  // Runs last: relocates a LocalAgg below its HashJoin child only where HashJoin::join_type and
+  // Last structural rule: relocates a LocalAgg below its HashJoin child only where HashJoin::join_type and
   // HashJoin::child_multiplicity prove it changes nothing (see AggregationPushDown::apply).
   m_optimize_rules.emplace_back(std::make_unique<AggregationPushDown>());
+  // Re-estimate the final Rapid plan after all structural rewrites.
+  m_optimize_rules.emplace_back(std::make_unique<CostRefinement>());
   // JoinReOrder remains experimental: reconstruction does not yet preserve wrapper operators,
   // original AccessPath metadata, join types and STRAIGHT_JOIN constraints (see JoinReOrder::apply).
   m_registered.store(true, std::memory_order_relaxed);
@@ -881,10 +884,8 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
             for -- rows vanish, and where a Filter does sit above it cannot put
             back a row the scan already refused. So it is every range or none.
 
-            "None" means leaving prune_predicate unset, not steering the plan
-            elsewhere: make_native_plan() partway through this case leaves the
-            half-built scan behind, which printed one query's filter on another
-            query's index scan and applied it, emptying DATE/DATETIME ranges.
+            On incomplete conversion, keep the native range path and return
+            immediately; continuing would overwrite it with this partial scan.
 
             The type gate that belongs to zone-map pruning is deliberately not
             applied here. It compares through double for min/max, which is a
@@ -904,7 +905,11 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
             all_predicates.push_back(std::move(range_pred));
           }
 
-          if (ranges_fully_converted && !all_predicates.empty()) {
+          if (!ranges_fully_converted) {
+            make_native_plan(state, path);
+            return false;
+          }
+          if (!all_predicates.empty()) {
             scan->prune_predicate = (all_predicates.size() == 1)
                                         ? std::move(all_predicates[0])
                                         : Imcs::Predicate_Builder::create_or(std::move(all_predicates));
@@ -2758,10 +2763,9 @@ std::unique_ptr<Imcs::Predicate> Optimizer::convert_range_to_predicate(const QUI
         ptr++;
       }
       Imcs::PredicateValue val;
-      if (decode_key_value(ptr, field, val)) {
-        predicates.push_back(Imcs::Predicate_Builder::create_simple(
-            field->field_index(), Imcs::PredicateOperator::EQUAL, val, field->type(), field));
-      }
+      if (!decode_key_value(ptr, field, val)) return nullptr;
+      predicates.push_back(Imcs::Predicate_Builder::create_simple(field->field_index(), Imcs::PredicateOperator::EQUAL,
+                                                                  val, field->type(), field));
     } else {
       if (has_min) {
         const uchar *ptr = min_ptr;
@@ -2777,13 +2781,12 @@ std::unique_ptr<Imcs::Predicate> Optimizer::convert_range_to_predicate(const QUI
           ptr++;
         }
         Imcs::PredicateValue min_val;
-        if (decode_key_value(ptr, field, min_val)) {
-          // NEAR_MIN is only valid if this column is the "first range column"
-          Imcs::PredicateOperator op =
-              (qr->flag & NEAR_MIN) ? Imcs::PredicateOperator::GREATER_THAN : Imcs::PredicateOperator::GREATER_EQUAL;
-          predicates.push_back(
-              Imcs::Predicate_Builder::create_simple(field->field_index(), op, min_val, field->type(), field));
-        }
+        if (!decode_key_value(ptr, field, min_val)) return nullptr;
+        // NEAR_MIN is only valid if this column is the "first range column"
+        Imcs::PredicateOperator op =
+            (qr->flag & NEAR_MIN) ? Imcs::PredicateOperator::GREATER_THAN : Imcs::PredicateOperator::GREATER_EQUAL;
+        predicates.push_back(
+            Imcs::Predicate_Builder::create_simple(field->field_index(), op, min_val, field->type(), field));
       }
     skip_min:
       if (has_max) {
@@ -2793,12 +2796,11 @@ std::unique_ptr<Imcs::Predicate> Optimizer::convert_range_to_predicate(const QUI
           ptr++;
         }
         Imcs::PredicateValue max_val;
-        if (decode_key_value(ptr, field, max_val)) {
-          Imcs::PredicateOperator op =
-              (qr->flag & NEAR_MAX) ? Imcs::PredicateOperator::LESS_THAN : Imcs::PredicateOperator::LESS_EQUAL;
-          predicates.push_back(
-              Imcs::Predicate_Builder::create_simple(field->field_index(), op, max_val, field->type(), field));
-        }
+        if (!decode_key_value(ptr, field, max_val)) return nullptr;
+        Imcs::PredicateOperator op =
+            (qr->flag & NEAR_MAX) ? Imcs::PredicateOperator::LESS_THAN : Imcs::PredicateOperator::LESS_EQUAL;
+        predicates.push_back(
+            Imcs::Predicate_Builder::create_simple(field->field_index(), op, max_val, field->type(), field));
       }
     skip_max:
       break;
@@ -2816,6 +2818,9 @@ std::unique_ptr<Imcs::Predicate> Optimizer::convert_range_to_predicate(const QUI
 bool Optimizer::decode_key_value(const uchar *key_ptr, const Field *field, Imcs::PredicateValue &out_value) {
   Field *mutable_field = const_cast<Field *>(field);
   auto field_type = mutable_field->type();
+  // PredicateValue reads temporal cells as integers, losing sub-second digits.
+  // Keep precise temporal ranges in the native range iterator.
+  if (is_temporal_type(field_type) && field->decimals() != 0) return false;
 
   if (field_type == MYSQL_TYPE_NEWDECIMAL) {
     auto new_field = down_cast<Field_new_decimal *>(mutable_field);
@@ -2868,8 +2873,15 @@ bool Optimizer::decode_key_value(const uchar *key_ptr, const Field *field, Imcs:
   mutable_field->set_field_ptr(const_cast<uchar *>(key_ptr));
 
   bool decoded = true;
-  if (is_integer_type(field_type) || is_temporal_type(field_type) || field->real_type() == MYSQL_TYPE_ENUM ||
-      field->real_type() == MYSQL_TYPE_SET) {
+  if (field_type == MYSQL_TYPE_TIMESTAMP || field_type == MYSQL_TYPE_TIMESTAMP2) {
+    // The key image and IMCS cell both store UTC epoch seconds. val_int()
+    // would instead return a timezone-dependent YYYYMMDDHHMMSS value.
+    my_timeval timestamp;
+    int warnings{0};
+    decoded = !field->get_timestamp(&timestamp, &warnings) && warnings == 0;
+    if (decoded) out_value = Imcs::PredicateValue(static_cast<int64_t>(timestamp.m_tv_sec));
+  } else if (is_integer_type(field_type) || is_temporal_type(field_type) || field->real_type() == MYSQL_TYPE_ENUM ||
+             field->real_type() == MYSQL_TYPE_SET) {
     out_value = Imcs::PredicateValue(static_cast<int64_t>(field->val_int()));
   } else if (is_numeric_type(field_type)) {
     out_value = Imcs::PredicateValue(static_cast<double>(field->val_real()));

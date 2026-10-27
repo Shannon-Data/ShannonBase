@@ -75,13 +75,15 @@ ALTER TABLE wf SECONDARY_LOAD;
 --echo # ============ InnoDB baseline ============
 --echo #
 SET SESSION use_secondary_engine = OFF;
---source suite/secondary_engine/include/shannon_window_queries.inc
+--let $shannon_window_case = queries
+--source suite/secondary_engine/include/shannon_window.inc
 
 --echo #
 --echo # ============ Rapid: every answer must match the baseline exactly ======
 --echo #
 SET SESSION use_secondary_engine = FORCED;
---source suite/secondary_engine/include/shannon_window_queries.inc
+--let $shannon_window_case = queries
+--source suite/secondary_engine/include/shannon_window.inc
 
 --echo #
 --echo # ============ Rapid with the vectorized operator switched off ==========
@@ -90,7 +92,8 @@ SET SESSION use_secondary_engine = FORCED;
 --echo # isolates the operator from everything else Rapid does to the query.
 --source include/have_debug.inc
 SET SESSION debug = '+d,rapid_disable_vectorized_window';
---source suite/secondary_engine/include/shannon_window_queries.inc
+--let $shannon_window_case = queries
+--source suite/secondary_engine/include/shannon_window.inc
 SET SESSION debug = '-d,rapid_disable_vectorized_window';
 
 --echo #
@@ -174,9 +177,11 @@ SET SESSION cte_max_recursion_depth = DEFAULT;
 ANALYZE TABLE big;
 ALTER TABLE big SECONDARY_LOAD;
 
---source suite/secondary_engine/include/shannon_window_big.inc
+--let $shannon_window_case = big
+--source suite/secondary_engine/include/shannon_window.inc
 SET SESSION use_secondary_engine = FORCED;
---source suite/secondary_engine/include/shannon_window_big.inc
+--let $shannon_window_case = big
+--source suite/secondary_engine/include/shannon_window.inc
 
 --echo #
 --echo # ---- The operator itself: partitions ending on an ingest-pass boundary ----
@@ -233,13 +238,15 @@ CREATE DATABASE sh_wf_spill;
 
 --echo # The InnoDB answer.
 USE sh_wf_base;
---source suite/secondary_engine/include/shannon_window_align.inc
+--let $shannon_window_case = align
+--source suite/secondary_engine/include/shannon_window.inc
 
 --echo # The Rapid answer.
 USE sh_wf_rpd;
 SET SESSION use_secondary_engine = FORCED;
 let $before = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_window_rows_total', Value, 1);
---source suite/secondary_engine/include/shannon_window_align.inc
+--let $shannon_window_case = align
+--source suite/secondary_engine/include/shannon_window.inc
 let $after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_window_rows_total', Value, 1);
 --let $emitted = `SELECT $after - $before`
 --echo # rows emitted by the vectorized window operator (16412 expected):
@@ -254,7 +261,8 @@ let $after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_win
 USE sh_wf_spill;
 SET SESSION debug = '+d,rapid_window_tiny_buffer';
 let $before = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_window_rows_total', Value, 1);
---source suite/secondary_engine/include/shannon_window_align.inc
+--let $shannon_window_case = align
+--source suite/secondary_engine/include/shannon_window.inc
 let $after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_window_rows_total', Value, 1);
 SET SESSION debug = '-d,rapid_window_tiny_buffer';
 --let $emitted = `SELECT $after - $before`
@@ -267,12 +275,14 @@ SET SESSION use_secondary_engine = OFF;
 --echo #
 --echo # Rapid against the InnoDB baseline, row by row: every number must be 0.
 --let $rpd = sh_wf_rpd
---source suite/secondary_engine/include/shannon_window_align_check.inc
+--let $shannon_window_case = align_check
+--source suite/secondary_engine/include/shannon_window.inc
 
 --echo #
 --echo # ... and the spilled Rapid run against the same baseline.
 --let $rpd = sh_wf_spill
---source suite/secondary_engine/include/shannon_window_align_check.inc
+--let $shannon_window_case = align_check
+--source suite/secondary_engine/include/shannon_window.inc
 
 --echo #
 --echo # The rows straddling every partition boundary, spelled out, so a value
@@ -332,13 +342,15 @@ ALTER TABLE edge SECONDARY_LOAD;
 
 --echo # The InnoDB answer.
 USE sh_wf_base;
---source suite/secondary_engine/include/shannon_window_edge.inc
+--let $shannon_window_case = edge
+--source suite/secondary_engine/include/shannon_window.inc
 
 --echo # The Rapid answer.
 USE sh_wf_rpd;
 SET SESSION use_secondary_engine = FORCED;
 let $before = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_window_rows_total', Value, 1);
---source suite/secondary_engine/include/shannon_window_edge.inc
+--let $shannon_window_case = edge
+--source suite/secondary_engine/include/shannon_window.inc
 let $after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_window_rows_total', Value, 1);
 --let $emitted = `SELECT $after - $before`
 --echo # rows emitted by the vectorized window operator (6040 expected):
@@ -348,7 +360,8 @@ let $after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_win
 USE sh_wf_spill;
 SET SESSION debug = '+d,rapid_window_tiny_buffer';
 let $before = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_window_rows_total', Value, 1);
---source suite/secondary_engine/include/shannon_window_edge.inc
+--let $shannon_window_case = edge
+--source suite/secondary_engine/include/shannon_window.inc
 let $after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_window_rows_total', Value, 1);
 SET SESSION debug = '-d,rapid_window_tiny_buffer';
 --let $emitted = `SELECT $after - $before`
@@ -361,12 +374,14 @@ SET SESSION use_secondary_engine = OFF;
 --echo #
 --echo # Rapid against the InnoDB baseline: every number must be 0.
 --let $rpd = sh_wf_rpd
---source suite/secondary_engine/include/shannon_window_edge_check.inc
+--let $shannon_window_case = edge_check
+--source suite/secondary_engine/include/shannon_window.inc
 
 --echo #
 --echo # ... and the spilled run against the same baseline.
 --let $rpd = sh_wf_spill
---source suite/secondary_engine/include/shannon_window_edge_check.inc
+--let $shannon_window_case = edge_check
+--source suite/secondary_engine/include/shannon_window.inc
 
 --echo #
 --echo # The small partitions spelled out: an all-NULL frame yields NULL for
@@ -481,9 +496,11 @@ ANALYZE TABLE wf_big_int;
 ALTER TABLE wf_big_int SECONDARY_LOAD;
 
 SET SESSION use_secondary_engine = OFF;
---source suite/secondary_engine/include/shannon_window_bigint.inc
+--let $shannon_window_case = bigint
+--source suite/secondary_engine/include/shannon_window.inc
 SET SESSION use_secondary_engine = FORCED;
---source suite/secondary_engine/include/shannon_window_bigint.inc
+--let $shannon_window_case = bigint
+--source suite/secondary_engine/include/shannon_window.inc
 
 --echo # Those three run on MySQL's iterators (a ROWS running frame needs no
 --echo # buffer, and the trailing ORDER BY materializes above the window step).
@@ -544,11 +561,13 @@ SELECT * FROM sh_wf_rpd.i2 ORDER BY id;
 --source include/have_debug.inc
 
 SET SESSION use_secondary_engine = OFF;
---source suite/secondary_engine/include/shannon_window_spill.inc
+--let $shannon_window_case = spill
+--source suite/secondary_engine/include/shannon_window.inc
 
 SET SESSION use_secondary_engine = FORCED;
 SET SESSION debug = '+d,rapid_window_tiny_buffer';
---source suite/secondary_engine/include/shannon_window_spill.inc
+--let $shannon_window_case = spill
+--source suite/secondary_engine/include/shannon_window.inc
 
 --echo # The spilled queries must have gone through the vectorized operator, not
 --echo # quietly fallen back to the native one.

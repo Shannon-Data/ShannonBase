@@ -1,4 +1,5 @@
---source suite/secondary_engine/include/storage_layer_baseline.inc
+--let $shannon_storage_layer_case = baseline
+--source suite/secondary_engine/include/shannon_storage_layer.inc
 --error ER_SECONDARY_ENGINE_PLUGIN
 ALTER TABLE t SECONDARY_LOAD;
 --error ER_SECONDARY_ENGINE_PLUGIN

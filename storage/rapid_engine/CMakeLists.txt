@@ -193,7 +193,9 @@ SET(SHANNON_OPTIMIZE
     optimizer/rules/condition_pushdown.cpp
     optimizer/rules/join_reorder.cpp
     optimizer/rules/prune.cpp
+    optimizer/rules/cost_refinement.cpp
     cost/cost.cpp
+    cost/planning_statistics.cpp
 )
 
 SET(SHANNON_ML

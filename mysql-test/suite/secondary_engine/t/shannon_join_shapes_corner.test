@@ -33,13 +33,105 @@ insert into c2 values (1,1,100),(2,2,200),(3,null,300),(4,3,400);
 alter table c1 secondary_load;
 alter table c2 secondary_load;
 
---let $shannon_reads = suite/secondary_engine/include/shannon_join_shapes_reads.inc
---source suite/secondary_engine/include/shannon_3way.inc
-
+--let $join_data_states = 2
+while ($join_data_states) {
+--let $join_scenario = 3
+while ($join_scenario) {
+  if ($join_scenario == 3) {
+    --echo # ----- InnoDB baseline -----
+    set session use_secondary_engine = off;
+    --disable_warnings
+    set session optimizer_switch='hypergraph_optimizer=off';
+    --enable_warnings
+  }
+  if ($join_scenario == 2) {
+    --echo # ----- Rapid (legacy optimizer) -----
+    set session use_secondary_engine = forced;
+  }
+  if ($join_scenario == 1) {
+    --echo # ----- Rapid (hypergraph optimizer) -----
+    --disable_warnings
+    set session optimizer_switch='hypergraph_optimizer=on';
+    --enable_warnings
+  }
+# Read block for shannon_join_shapes_corner.test.
+--echo # cartesian product, explicit and implicit
+select a.id, b.id from c1 a cross join c2 b order by a.id, b.id;
+--let $assert_query = select a.id, b.id from c1 a cross join c2 b order by a.id, b.id
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+select count(*) as c from c1, c2;
+--let $assert_query = select count(*) as c from c1, c2
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--echo # cartesian product with a filter that is not a join condition
+select a.id, b.id from c1 a cross join c2 b where a.k > b.k order by a.id, b.id;
+--let $assert_query = select a.id, b.id from c1 a cross join c2 b where a.k > b.k order by a.id, b.id
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--echo # self join, including the NULL key that must not match itself
+select a.id, b.id, a.k from c1 a join c1 b on a.k = b.k and a.id < b.id order by a.id, b.id;
+--let $assert_query = select a.id, b.id, a.k from c1 a join c1 b on a.k = b.k and a.id < b.id order by a.id, b.id
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+select a.id, b.id from c1 a left join c1 b on a.k = b.k and a.id <> b.id order by a.id, b.id;
+--let $assert_query = select a.id, b.id from c1 a left join c1 b on a.k = b.k and a.id <> b.id order by a.id, b.id
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--echo # correlated EXISTS / NOT EXISTS
+select id from c1 where exists (select 1 from c2 where c2.k = c1.k) order by id;
+--let $assert_query = select id from c1 where exists (select 1 from c2 where c2.k = c1.k) order by id
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+select id from c1 where not exists (select 1 from c2 where c2.k = c1.k) order by id;
+--let $assert_query = select id from c1 where not exists (select 1 from c2 where c2.k = c1.k) order by id
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+select id from c1 where exists (select 1 from c2 where c2.k > c1.k) order by id;
+--let $assert_query = select id from c1 where exists (select 1 from c2 where c2.k > c1.k) order by id
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--echo # scalar subquery: a match, no match (NULL) and an aggregate
+select id, (select w from c2 where c2.k = c1.k limit 1) as w from c1 order by id;
+--let $assert_query = select id, (select w from c2 where c2.k = c1.k limit 1) as w from c1 order by id
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+select id, k, (select max(w) from c2) as mx from c1 order by id;
+--let $assert_query = select id, k, (select max(w) from c2) as mx from c1 order by id
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+select id from c1 where k = (select min(k) from c2) order by id;
+--let $assert_query = select id from c1 where k = (select min(k) from c2) order by id
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--echo # a CTE referenced twice in one query
+with cte as (select k, count(*) as c from c1 group by k)
+select l.k as lk, r.k as rk, l.c, r.c from cte l join cte r on l.c = r.c
+order by lk, rk;
+--let $assert_query = with cte as (select k, count(*) as c from c1 group by k) select l.k as lk, r.k as rk, l.c, r.c from cte l join cte r on l.c = r.c order by lk, rk
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--echo # LATERAL: the derived table depends on the outer row
+select c1.id, d.n from c1, lateral (select count(*) as n from c2 where c2.k <= c1.k) d
+order by c1.id;
+--let $assert_query = select c1.id, d.n from c1, lateral (select count(*) as n from c2 where c2.k <= c1.k) d order by c1.id
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--echo # STRAIGHT_JOIN pins the join order rather than the answer
+select straight_join c1.id, c2.id from c1 join c2 on c1.k = c2.k order by c1.id, c2.id;
+--let $assert_query = select straight_join c1.id, c2.id from c1 join c2 on c1.k = c2.k order by c1.id, c2.id
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--dec $join_scenario
+}
+set session use_secondary_engine = off;
+set session optimizer_switch = default;
+if ($join_data_states == 2) {
 --echo ##### the same shapes with one side empty
 delete from c2;
 --SLEEP 1
---source suite/secondary_engine/include/shannon_3way.inc
+}
+--dec $join_data_states
+}
 
 use test;
 drop database sh_joinsh;

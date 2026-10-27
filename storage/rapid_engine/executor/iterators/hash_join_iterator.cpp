@@ -1179,12 +1179,12 @@ void VectorizedHashJoinIterator::BuildRuntimeFilter() {
   });
 }
 
-Utils::RuntimeBloomPolicy VectorizedHashJoinIterator::RuntimeFilterPolicy() const {
+Optimizer::Utils::RuntimeBloomPolicy VectorizedHashJoinIterator::RuntimeFilterPolicy() const {
   const auto pool = ResMgmt::system_pool_stats();
   const auto ap = ResMgmt::work_governor().snapshot(ResMgmt::WorkClass::AP);
   const auto sync = ResMgmt::work_governor().snapshot(ResMgmt::WorkClass::SYNC);
   const auto maint = ResMgmt::work_governor().snapshot(ResMgmt::WorkClass::MAINT);
-  auto policy = Utils::RuntimeBloomPolicy::choose(
+  auto policy = Optimizer::Utils::RuntimeBloomPolicy::choose(
       m_build_memory.limit(), m_build_memory.used() - m_bloom.bytes(), pool.capacity, pool.used, pool.reserved,
       ap.active + sync.active + maint.active, ap.waiting != 0 || sync.waiting != 0 || maint.waiting != 0);
   DBUG_EXECUTE_IF("rapid_bloom_resource_pressure", { policy.max_bytes = 0; });
@@ -1217,7 +1217,7 @@ bool VectorizedHashJoinIterator::RejectRuntimeHash(uint64_t hash) {
   ++m_pushdown_checks;
   m_pushdown_rejects += rejected;
   if (m_pushdown_checks == (4 * SHANNON_KB)) {
-    m_bloom_pushdown_disabled = !Utils::RuntimeBloomPolicy::scan_pushdown_after_sample(
+    m_bloom_pushdown_disabled = !Optimizer::Utils::RuntimeBloomPolicy::scan_pushdown_after_sample(
         !m_bloom_pushdown_disabled, m_pushdown_checks, m_pushdown_rejects);
     m_pushdown_checks = m_pushdown_rejects = 0;
   }

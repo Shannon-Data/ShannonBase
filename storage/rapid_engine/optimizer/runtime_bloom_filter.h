@@ -23,8 +23,8 @@
 
    Copyright (c) 2023, Shannon Data AI and/or its affiliates.
 */
-#ifndef SHANNONBASE_RUNTIME_BLOOM_FILTER_H
-#define SHANNONBASE_RUNTIME_BLOOM_FILTER_H
+#ifndef __SHANNONBASE_RUNTIME_BLOOM_FILTER_H__
+#define __SHANNONBASE_RUNTIME_BLOOM_FILTER_H__
 
 #include <algorithm>
 #include <array>
@@ -34,7 +34,9 @@
 #include <new>
 #include <vector>
 
-namespace ShannonBase::Utils {
+namespace ShannonBase {
+namespace Optimizer {
+namespace Utils {
 // Snapshot-based policy: no hot-loop locks and no new resource reservation.
 // Active/queued AP and propagation work are Rapid's workload pressure signal.
 struct RuntimeBloomPolicy {
@@ -72,12 +74,15 @@ class RuntimeBloomFilter {
   RuntimeBloomFilter &operator=(const RuntimeBloomFilter &) = delete;
 
   void reset() noexcept { decltype(m_blocks)(m_blocks.get_allocator()).swap(m_blocks); }
+
   bool prepare(size_t keys, size_t max_bytes) noexcept {
     reset();
     if (!keys || keys > std::numeric_limits<size_t>::max() / 2) return false;
+
     // At least 16 bits per key. Round up to whole blocks, without overflow.
     const size_t blocks = keys / 16 + (keys % 16 != 0);
     if (blocks > std::numeric_limits<uint32_t>::max() || blocks > max_bytes / sizeof(Block)) return false;
+
     try {
       m_blocks.resize(blocks, Block{});
     } catch (const std::bad_alloc &) {
@@ -86,20 +91,25 @@ class RuntimeBloomFilter {
     }
     return true;
   }
+
   void insert(uint64_t hash) noexcept {
     if (m_blocks.empty()) return;
     auto &block = m_blocks[block_index(hash)];
     const uint32_t key = static_cast<uint32_t>(hash);
     for (size_t i = 0; i < block.size(); ++i) block[i] |= mask(key, i);
   }
+
   bool may_contain(uint64_t hash) const noexcept {
     if (m_blocks.empty()) return true;  // disabled filters never reject
+
     const auto &block = m_blocks[block_index(hash)];
     const uint32_t key = static_cast<uint32_t>(hash);
-    for (size_t i = 0; i < block.size(); ++i)
+    for (size_t i = 0; i < block.size(); ++i) {
       if ((block[i] & mask(key, i)) == 0) return false;
+    }
     return true;
   }
+
   size_t bytes() const noexcept { return m_blocks.capacity() * sizeof(Block); }
 
  private:
@@ -107,6 +117,7 @@ class RuntimeBloomFilter {
   size_t block_index(uint64_t hash) const noexcept {
     return ((hash >> 32) * static_cast<uint64_t>(m_blocks.size())) >> 32;
   }
+
   static uint32_t mask(uint32_t key, size_t lane) noexcept {
     constexpr uint32_t salts[] = {0x47b6137bU, 0x44974d91U, 0x8824ad5bU, 0xa2b7289dU,
                                   0x705495c7U, 0x2df1424bU, 0x9efc4947U, 0x5c6bfb31U};
@@ -114,5 +125,7 @@ class RuntimeBloomFilter {
   }
   std::pmr::vector<Block> m_blocks;
 };
-}  // namespace ShannonBase::Utils
+}  // namespace Utils
+}  // namespace Optimizer
+}  // namespace ShannonBase
 #endif

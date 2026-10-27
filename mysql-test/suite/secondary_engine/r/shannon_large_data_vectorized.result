@@ -101,9 +101,9 @@ sum(S_ACCTBAL)
 180625222.15
 explain format=tree select sum(S_ACCTBAL), count(S_ACCTBAL) from SUPPLIER group by S_NATIONKEY order by sum(S_ACCTBAL);
 EXPLAIN
--> Sort: sum(S_ACCTBAL)
+-> Sort: sum(S_ACCTBAL)  (cost=X rows=X)
     -> Table scan on <temporary>
-        -> Aggregate using temporary table
+        -> Aggregate using temporary table  (cost=X rows=X)
             -> Vectorized table scan on SUPPLIER in secondary engine Rapid  (cost=X rows=X)
 
 select sum(S_ACCTBAL), count(S_ACCTBAL) from SUPPLIER group by S_NATIONKEY order by sum(S_ACCTBAL);
@@ -180,9 +180,9 @@ sum(S_ACCTBAL)
 180625222.15
 explain format=tree select sum(S_ACCTBAL), count(S_ACCTBAL) from SUPPLIER group by S_NATIONKEY order by sum(S_ACCTBAL);
 EXPLAIN
--> Sort: sum(S_ACCTBAL)
+-> Sort: sum(S_ACCTBAL)  (cost=X rows=X)
     -> Table scan on <temporary>
-        -> Aggregate using temporary table
+        -> Aggregate using temporary table  (cost=X rows=X)
             -> Vectorized table scan on SUPPLIER in secondary engine Rapid  (cost=X rows=X)
 
 Warnings:
@@ -219,7 +219,7 @@ EXPLAIN
 -> Sort: sum(S_ACCTBAL)
     -> Filter: (count(SUPPLIER.S_ACCTBAL) > X)
         -> Table scan on <temporary>
-            -> Aggregate using temporary table
+            -> Aggregate using temporary table  (cost=X rows=X)
                 -> Vectorized table scan on SUPPLIER in secondary engine Rapid  (cost=X rows=X)
 
 Warnings:
