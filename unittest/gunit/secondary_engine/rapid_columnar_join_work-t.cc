@@ -92,6 +92,7 @@ TEST(RapidAggregatePlacement, RequiresMeaningfulSavingsAtExtremeCardinalities) {
 #include "storage/rapid_engine/imcs/predicate.h"
 #include "sql/item_cmpfunc.h"
 #include "sql/item_sum.h"
+#include "sql/sql_optimizer.h"
 #include "storage/rapid_engine/optimizer/rules/condition_pushdown.h"
 #include "unittest/gunit/fake_table.h"
 #include "unittest/gunit/test_utils.h"
@@ -149,6 +150,36 @@ TEST_F(RapidAggregatePlacementRule, SelectiveJoinKeepsOriginalTree) {
   AggregationPushDown().apply(plan);
   EXPECT_EQ(original, plan.get());
   EXPECT_EQ(PlanNode::Type::HASH_JOIN, plan->children[0]->type());
+}
+
+TEST_F(RapidAggregatePlacementRule, NativeAggregatePreservesPhysicalGroupingCache) {
+  Query_block query_block(server.thd()->mem_root, nullptr, nullptr);
+  JOIN join(server.thd(), &query_block);
+  Item *input_key = new Item_field(probe->field[0]);
+  Cached_item *cached = new_Cached_item(server.thd(), input_key);
+  ASSERT_FALSE(join.group_fields.push_front(cached));
+  join.group_fields_cache = join.group_fields;
+  join.streaming_aggregation = true;
+
+  AccessPath input;
+  input.type = AccessPath::TABLE_SCAN;
+  input.table_scan().table = probe.get();
+  auto child = std::make_unique<MySQLNative>();
+  child->original_path = &input;
+  child->vectorized = false;
+  LocalAgg aggregate;
+  aggregate.join = &join;
+  // Legacy GROUP BY can have been rebound to an output temporary table.
+  aggregate.group_by.push_back(new Item_field(build->field[0]));
+  aggregate.children.push_back(std::move(child));
+  AccessPath *path = aggregate.ToAccessPath(server.thd());
+  ASSERT_NE(nullptr, path);
+  EXPECT_FALSE(path->vectorized);
+  ASSERT_EQ(1U, join.group_fields.size());
+  EXPECT_EQ(cached, join.group_fields.head());
+  EXPECT_EQ(input_key, join.group_fields.head()->get_item());
+  EXPECT_EQ(cached, join.group_fields_cache.head());
+  EXPECT_TRUE(join.streaming_aggregation);
 }
 
 TEST_F(RapidAggregatePlacementRule, DenseJoinMovesSameAggregateBelowProbe) {

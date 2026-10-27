@@ -79,6 +79,11 @@ void Util::close_spill_file(FILE *stream) {
 static size_t rapid_operator_memory_budget(uint64 floor_bytes [[maybe_unused]]) {
   DBUG_EXECUTE_IF("rapid_operator_budget_floor", { return static_cast<size_t>(floor_bytes); });
   DBUG_EXECUTE_IF("rapid_operator_tiny_budget", { return 64 * 1024; });
+  // The calibrated floor, not the adaptive ceiling: this value is both the
+  // operator's initial grant and the number the cost model prices a spill
+  // against. Execution grows from here on demand (ResMgmt::grow_query_memory),
+  // so a plan is chosen as if memory were tight and cannot drift with pool
+  // occupancy.
   return ResMgmt::system_memory_limits().operation;
 }
 

@@ -1,0 +1,20 @@
+# Expression chunks are aggregate-owned and must not alter the child's schema.
+--source include/elide_costs.inc
+SET use_secondary_engine=OFF;
+CREATE TABLE expr_batch_src (id INT PRIMARY KEY, g INT, v INT, d DECIMAL(12,2)) SECONDARY_ENGINE=rapid;
+INSERT INTO expr_batch_src WITH RECURSIVE n AS
+ (SELECT 1 AS i UNION ALL SELECT i+1 FROM n WHERE i<1000)
+ SELECT i,MOD(i,5),IF(MOD(i,7)=0,NULL,i),IF(MOD(i,11)=0,NULL,i*1.25) FROM n;
+ALTER TABLE expr_batch_src SECONDARY_LOAD;
+--disable_warnings
+SET optimizer_switch='hypergraph_optimizer=on';
+--enable_warnings
+SET use_secondary_engine=FORCED;
+--replace_regex $elide_costs_and_rows
+EXPLAIN FORMAT=TREE SELECT g,SUM(v*2),AVG(d*2),COUNT(v*2) FROM expr_batch_src GROUP BY g;
+--let $assert_query = SELECT g,SUM(v*2),AVG(d*2),COUNT(v*2),SUM(d+v) FROM expr_batch_src GROUP BY g
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_query = SELECT g,SUM(v*2),COUNT(d*3) FROM expr_batch_src WHERE id>30 GROUP BY g
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+SET use_secondary_engine=OFF;
+DROP TABLE expr_batch_src;

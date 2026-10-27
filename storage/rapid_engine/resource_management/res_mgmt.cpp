@@ -24,6 +24,8 @@
 #include "storage/rapid_engine/resource_management/res_mgmt.h"
 #include "storage/rapid_engine/include/rapid_arch_inf.h"
 
+#include <algorithm>
+#include <cmath>
 #include <fstream>
 #include <set>
 #include <sstream>
@@ -72,7 +74,65 @@ SystemMemoryLimits system_memory_limits(size_t root_capacity) {
   constexpr size_t granule = 64 * 1024;
   const size_t capacity = (root_capacity / 8 / granule) * granule;
   if (capacity < 16 * granule) return {};
+  // 1/16 is the per-operator FLOOR, not the grant; operator_memory_limit()
+  // scales it with the pool's free space so a lone hash aggregate does not
+  // spill. Raising the floor itself to capacity/8 made Q17 pick a spilling hash
+  // aggregate and lose 50% at SF=1, because the cost model prices a spill
+  // against this value.
   return {capacity, capacity - capacity / 4, capacity / 4, capacity / 16};
+}
+
+namespace {
+// Caller holds system_pool_mutex (or a private state), so this must not take
+// system_pool_state() again.
+size_t operator_ceiling(const SystemPoolState &state) {
+  const SystemMemoryLimits &limits = state.limits;
+  const size_t floor_bytes = limits.operation;
+  const size_t ceiling = std::max(floor_bytes, limits.query);
+  if (ceiling == floor_bytes) return floor_bytes;
+
+  const auto pool = state.pool->stats();
+  const size_t used = pool.used_bytes;
+  const size_t free_bytes = pool.total_capacity > used ? pool.total_capacity - used : 0;
+  // Scans and checkpointing also live in sys_pool, so hold a quarter back.
+  const size_t usable = free_bytes - free_bytes / 4;
+  const size_t grants = std::max<size_t>(state.budget.active_grants(), 1);
+  return std::min(std::max(usable / grants, floor_bytes), ceiling);
+}
+
+// Bytes the pool can hand to one operator right now, with the scan/checkpoint
+// reserve removed. Unlike operator_ceiling() this is not divided by the number
+// of live grants: growth is first-come-first-served, and fairness is restored
+// by the floor below and by eviction when the pool runs short.
+size_t one_shot_capacity(const SystemPoolState &state) {
+  const auto pool = state.pool->stats();
+  const size_t free_bytes = pool.total_capacity > pool.used_bytes ? pool.total_capacity - pool.used_bytes : 0;
+  return free_bytes - free_bytes / 4;
+}
+
+// The tiny/floor hooks exist so tests can drive the spill paths on small data.
+// Growing past them would silently turn those tests into no-ops.
+bool budget_pinned_by_debug() {
+  return DBUG_EVALUATE_IF("rapid_operator_tiny_budget", true, false) ||
+         DBUG_EVALUATE_IF("rapid_operator_budget_floor", true, false) ||
+         DBUG_EVALUATE_IF("rapid_hash_aggregate_tiny_budget", true, false) ||
+         DBUG_EVALUATE_IF("rapid_sort_tiny_budget", true, false);
+}
+}  // namespace
+
+size_t operator_memory_limit() {
+  auto state = system_pool_state();
+  return state ? operator_ceiling(*state) : 0;
+}
+
+size_t initial_spill_fanout(double resident_bytes, size_t hash_budget) {
+  DBUG_EXECUTE_IF("rapid_spill_fanout_2", { return 2; });
+  // Keep existing deliberately tiny-workspace tests deterministic.
+  if (budget_pinned_by_debug() || hash_budget == 0 || !std::isfinite(resident_bytes) || resident_bytes <= 0) return 16;
+  const double partition_target = static_cast<double>(hash_budget) * 0.75;
+  size_t fanout = 2;
+  while (fanout < 16 && resident_bytes / fanout > partition_target) fanout *= 2;
+  return fanout;
 }
 
 bool initialize_system_pool(const std::shared_ptr<Utils::MemoryPool> &root) {
@@ -104,7 +164,8 @@ SystemPoolStats system_pool_stats() {
   auto state = system_pool_state();
   if (!state) return {};
   auto stats = state->pool->stats();
-  return {stats.total_capacity, stats.used_bytes, stats.peak_usage, state->budget.reserved(), stats.failed_allocations};
+  return {stats.total_capacity,     stats.used_bytes,         stats.peak_usage,
+          state->budget.reserved(), stats.failed_allocations, operator_ceiling(*state)};
 }
 
 MemoryBudget::Reservation reserve_query_memory(const void *query, QueryMemoryOperator op, size_t requested) {
@@ -117,11 +178,119 @@ MemoryBudget::Reservation reserve_query_memory(const void *query, QueryMemoryOpe
   if (!system_pool) return {};
 
   requested = PlanningMemoryScope::limit_request(query, requested);
+  // The initial grant is the calibrated floor, never the adaptive ceiling: an
+  // operator grows on demand (grow_query_memory) instead of every operator
+  // predicting what the others will need. The cost model reads the same floor,
+  // so plan choice stays deterministic.
   requested = std::min(requested, system_pool->limits.operation);
   DBUG_EXECUTE_IF("rapid_operator_tiny_budget", { requested = std::min<size_t>(requested, 64 * 1024); });
   auto grant = system_pool->budget.reserve(query, requested, std::min<size_t>(requested, 64 * 1024));
   grant.retain(system_pool);
   return grant;
+}
+
+size_t grow_query_memory(MemoryBudget::Reservation &grant, QueryMemoryOperator op, size_t want_total,
+                         const Evictable *requester) {
+  const size_t before = grant.bytes();
+  if (op == QueryMemoryOperator::kCount || want_total <= before) return before;
+  if (budget_pinned_by_debug()) return before;
+
+  auto state = system_pool_state();
+  if (!state) return before;
+
+  // Free budget must be tried first. Even an unsuccessful cooperative Evict()
+  // arms the victim's spill flag, so speculative eviction makes an otherwise
+  // unconstrained query spill or stop growing simply due to pull order.
+  const size_t granted = grant.grow(want_total, one_shot_capacity(*state));
+  if (granted >= want_total) return granted;
+  state->budget.evict_for(grant.query(), requester, want_total - granted);
+
+  // Read the pool after the eviction pass: it already reflects what the
+  // victims gave back.
+  return grant.grow(want_total, one_shot_capacity(*state));
+}
+
+void MemoryBudget::register_evictable(const void *query, QueryMemoryOperator op, Evictable *victim) {
+  if (victim == nullptr) return;
+  std::lock_guard lock(m_mutex);
+  for (const Victim &existing : m_victims)
+    if (existing.victim == victim) return;
+  m_victims.push_back(Victim{query, op, victim});
+  std::sort(m_victims.begin(), m_victims.end(), [](const Victim &a, const Victim &b) {
+    const int rank_a = eviction_rank(a.op), rank_b = eviction_rank(b.op);
+    return rank_a == rank_b ? a.victim < b.victim : rank_a < rank_b;
+  });
+}
+
+void MemoryBudget::unregister_evictable(Evictable *victim) {
+  if (victim == nullptr) return;
+  std::lock_guard lock(m_mutex);
+  m_victims.erase(std::remove_if(m_victims.begin(), m_victims.end(),
+                                 [victim](const Victim &entry) { return entry.victim == victim; }),
+                  m_victims.end());
+}
+
+size_t MemoryBudget::evict_for(const void *query, const Evictable *requester, size_t needed) {
+  if (needed == 0) return 0;
+  std::vector<Evictable *> victims;
+  {
+    std::lock_guard lock(m_mutex);
+    for (const Victim &entry : m_victims)
+      if (entry.query == query && entry.victim != requester) victims.push_back(entry.victim);
+  }
+  // Evict() must not take this mutex: an operator reports its own bytes and
+  // releases them through its reservation, which takes the mutex itself.
+  size_t freed = 0;
+  for (Evictable *victim : victims) {
+    freed += victim->Evict(needed - std::min(needed, freed));
+    if (freed >= needed) break;
+  }
+  return freed;
+}
+
+void register_evictable(const void *query, QueryMemoryOperator op, Evictable *victim) {
+  auto state = system_pool_state();
+  if (state) state->budget.register_evictable(query, op, victim);
+}
+
+void unregister_evictable(Evictable *victim) {
+  auto state = system_pool_state();
+  if (state) state->budget.unregister_evictable(victim);
+}
+
+size_t MemoryBudget::grow(const void *query, size_t extra) {
+  if (extra == 0) return 0;
+  std::lock_guard lock(m_mutex);
+  const auto found = m_queries.find(query);
+  const size_t query_used = found == m_queries.end() ? 0 : found->second;
+  const size_t granted = std::min(extra, std::min(m_global_limit - m_reserved, m_query_limit - query_used));
+  if (granted == 0) return 0;
+  m_queries[query] = query_used + granted;
+  m_reserved += granted;
+  return granted;
+}
+
+size_t MemoryBudget::Reservation::try_grow(size_t extra) {
+  if (m_owner == nullptr || extra == 0) return 0;
+  const size_t granted = m_owner->grow(m_query, extra);
+  m_bytes += granted;
+  return granted;
+}
+
+size_t MemoryBudget::Reservation::grow(size_t want_total, size_t available_capacity) {
+  if (m_owner == nullptr || want_total <= m_bytes) return m_bytes;
+  const size_t wanted = want_total - m_bytes;
+  const size_t capped = available_capacity == SIZE_MAX ? wanted : std::min(wanted, available_capacity);
+  const size_t granted = m_owner->grow(m_query, capped);
+  m_bytes += granted;
+  return m_bytes;
+}
+
+void MemoryBudget::Reservation::release_bytes(size_t bytes) {
+  if (m_owner == nullptr || bytes == 0) return;
+  if (bytes > m_bytes) bytes = m_bytes;
+  m_owner->release(m_query, bytes);
+  m_bytes -= bytes;
 }
 
 void SystemPoolDeleter::operator()(uint8_t *pointer) const noexcept {

@@ -1,0 +1,31 @@
+--source include/have_debug.inc
+SET use_secondary_engine=OFF;
+CREATE TABLE bloom_budget_b(id INT PRIMARY KEY,k INT,v INT) SECONDARY_ENGINE=rapid;
+CREATE TABLE bloom_budget_p(id INT PRIMARY KEY,k INT,v INT) SECONDARY_ENGINE=rapid;
+INSERT INTO bloom_budget_b WITH RECURSIVE n AS (SELECT 1 i UNION ALL SELECT i+1 FROM n WHERE i<256)
+ SELECT i,i DIV 2,i FROM n;
+SET cte_max_recursion_depth=10000;
+INSERT INTO bloom_budget_p WITH RECURSIVE n AS (SELECT 1 i UNION ALL SELECT i+1 FROM n WHERE i<8192)
+ SELECT i,i,i FROM n;
+ALTER TABLE bloom_budget_b SECONDARY_LOAD;
+ALTER TABLE bloom_budget_p SECONDARY_LOAD;
+--disable_warnings
+SET optimizer_switch='hypergraph_optimizer=on';
+--enable_warnings
+SET secondary_engine_cost_threshold=0;
+SET use_secondary_engine=FORCED;
+SET debug='+d,rapid_test_bloom_evict';
+--let $before = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_hash_join_bloom_builds_total', Value, 1)
+PREPARE bloom_budget_stmt FROM 'SELECT COUNT(*),SUM(p.v) FROM bloom_budget_p p JOIN bloom_budget_b b ON p.k=b.k';
+EXECUTE bloom_budget_stmt;
+EXECUTE bloom_budget_stmt;
+DEALLOCATE PREPARE bloom_budget_stmt;
+--let $after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_hash_join_bloom_builds_total', Value, 1)
+if ($after <= $before) {
+  --die The test did not exercise a constructed Bloom filter
+}
+--let $assert_query = SELECT COUNT(*),SUM(p.v) FROM bloom_budget_p p JOIN bloom_budget_b b ON p.k=b.k
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+SET debug='-d,rapid_test_bloom_evict';
+SET use_secondary_engine=OFF;
+DROP TABLE bloom_budget_b,bloom_budget_p;

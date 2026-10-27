@@ -38,6 +38,7 @@
 
 #include <gtest/gtest.h>
 
+#include "storage/rapid_engine/compress/dictionary/dictionary.h"
 #include "storage/rapid_engine/imcs/predicate.h"
 
 namespace shannon_storage_index_unittest {
@@ -148,8 +149,7 @@ TEST(StorageIndexPruningTest, BetweenAndNotBetween) {
 
   const auto between = [](int64 lo, int64 hi) {
     std::vector<std::unique_ptr<ShannonBase::Imcs::Predicate>> preds;
-    preds.push_back(
-        std::make_unique<Simple_Predicate>(kCol, PredicateValue(lo), PredicateValue(hi), kColType));
+    preds.push_back(std::make_unique<Simple_Predicate>(kCol, PredicateValue(lo), PredicateValue(hi), kColType));
     return preds;
   };
 
@@ -229,7 +229,6 @@ TEST(StorageIndexPruningTest, OutOfRangeColumnNeverSkips) {
                                                      PredicateValue(int64{9999}), kColType));
   EXPECT_FALSE(index->can_skip_imcu(preds));
 }
-
 
 // ------------------------------------------------------- serialize round-trip
 
@@ -327,3 +326,83 @@ TEST(StorageIndexSerializeTest, RejectsAnImplausibleStringLength) {
 }
 
 }  // namespace shannon_storage_index_unittest
+
+namespace shannon_like_predicate_unittest {
+using namespace ShannonBase::Imcs;
+
+TEST(LikePredicateTest, SqlEscapesNullAndNegation) {
+  Simple_Predicate like(0, PredicateOperator::LIKE, PredicateValue(std::string("a!_%")), MYSQL_TYPE_VARCHAR,
+                        &my_charset_utf8mb4_0900_ai_ci, '!');
+  Simple_Predicate unlike(0, PredicateOperator::NOT_LIKE, PredicateValue(std::string("a!_%")), MYSQL_TYPE_VARCHAR,
+                          &my_charset_utf8mb4_0900_ai_ci, '!');
+  const std::string matching = "A_tail";
+  const std::string other = "abc";
+  EXPECT_EQ(TruthValue::TRUE_VALUE, like.evaluate(reinterpret_cast<const uchar *>(matching.data()), matching.size()));
+  EXPECT_EQ(TruthValue::FALSE_VALUE,
+            unlike.evaluate(reinterpret_cast<const uchar *>(matching.data()), matching.size()));
+  EXPECT_EQ(TruthValue::FALSE_VALUE, like.evaluate(reinterpret_cast<const uchar *>(other.data()), other.size()));
+  EXPECT_EQ(TruthValue::TRUE_VALUE, unlike.evaluate(reinterpret_cast<const uchar *>(other.data()), other.size()));
+  const uchar *null_value = nullptr;
+  EXPECT_EQ(TruthValue::UNKNOWN, unlike.evaluate(null_value));
+  auto clone = like.clone();
+  EXPECT_TRUE(clone->equals(like));
+  EXPECT_EQ(TruthValue::TRUE_VALUE, static_cast<Simple_Predicate *>(clone.get())
+                                        ->evaluate(reinterpret_cast<const uchar *>(matching.data()), matching.size()));
+}
+
+TEST(LikePredicateTest, DictionaryMaskRefreshesAndKeepsPriorSnapshotValid) {
+  auto dictionary = std::make_shared<ShannonBase::Compress::Dictionary>();
+  auto store = [&](const std::string &text) {
+    return dictionary->store(reinterpret_cast<const uchar *>(text.data()), text.size());
+  };
+  const auto first = store("alpha");
+  const auto second = store("beta");
+  Simple_Predicate like(0, PredicateOperator::LIKE, PredicateValue(std::string("a%")), MYSQL_TYPE_VARCHAR,
+                        &my_charset_utf8mb4_0900_ai_ci, '\\');
+  auto mask = like.like_dictionary_mask(dictionary);
+  ASSERT_TRUE(mask);
+  EXPECT_EQ(1, mask->at(first));
+  EXPECT_EQ(0, mask->at(second));
+  EXPECT_EQ(mask, like.like_dictionary_mask(dictionary));
+  const auto added = store("ALPINE");
+  auto refreshed = like.like_dictionary_mask(dictionary);
+  ASSERT_TRUE(refreshed);
+  EXPECT_NE(mask, refreshed);
+  EXPECT_EQ(1, refreshed->at(added));
+  EXPECT_EQ(1, mask->at(first));
+  auto replacement = std::make_shared<ShannonBase::Compress::Dictionary>();
+  const std::string other = "beta";
+  const auto id = replacement->store(reinterpret_cast<const uchar *>(other.data()), other.size());
+  EXPECT_EQ(0, like.like_dictionary_mask(replacement)->at(id));
+}
+
+TEST(LikePredicateTest, CollationMultibyteAndEmbeddedNull) {
+  auto matches = [](const CHARSET_INFO *charset, const std::string &text, const std::string &pattern, int escape) {
+    Simple_Predicate pred(0, PredicateOperator::LIKE, PredicateValue(pattern), MYSQL_TYPE_VARCHAR, charset, escape);
+    return pred.evaluate(reinterpret_cast<const uchar *>(text.data()), text.size());
+  };
+  EXPECT_EQ(TruthValue::TRUE_VALUE, matches(&my_charset_utf8mb4_0900_ai_ci, "ALPHA", "a%", '\\'));
+  EXPECT_EQ(TruthValue::FALSE_VALUE, matches(&my_charset_utf8mb4_bin, "ALPHA", "a%", '\\'));
+  EXPECT_EQ(TruthValue::TRUE_VALUE, matches(&my_charset_utf8mb4_0900_ai_ci, "猫咪", "_咪", '\\'));
+  EXPECT_EQ(TruthValue::TRUE_VALUE, matches(&my_charset_utf8mb4_0900_ai_ci, "a_tail", "a__%", '_'));
+  EXPECT_EQ(TruthValue::TRUE_VALUE, matches(&my_charset_utf8mb4_0900_ai_ci, "a%tail", "a%%tail", '%'));
+  EXPECT_EQ(TruthValue::TRUE_VALUE,
+            matches(&my_charset_utf8mb4_bin, std::string("a\0b", 3), std::string("a\0_", 3), '\\'));
+  EXPECT_EQ(TruthValue::FALSE_VALUE, matches(&my_charset_utf8mb4_bin, "alpha  ", "alpha", '\\'));
+  EXPECT_EQ(TruthValue::TRUE_VALUE, matches(&my_charset_utf8mb4_bin, "", "", '\\'));
+}
+
+TEST(LikePredicateTest, CharDictionaryTrimsOnlyTextPadding) {
+  auto dictionary = std::make_shared<ShannonBase::Compress::Dictionary>();
+  const std::string padded = "alpha       ";
+  const auto id = dictionary->store(reinterpret_cast<const uchar *>(padded.data()), padded.size());
+  Simple_Predicate text(0, PredicateOperator::LIKE, PredicateValue(std::string("alpha")), MYSQL_TYPE_STRING,
+                        &my_charset_utf8mb4_0900_ai_ci, '\\');
+  EXPECT_EQ(TruthValue::TRUE_VALUE, text.evaluate(reinterpret_cast<const uchar *>(padded.data()), padded.size()));
+  ASSERT_TRUE(text.like_dictionary_mask(dictionary));
+  EXPECT_EQ(1, text.like_dictionary_mask(dictionary)->at(id));
+  Simple_Predicate binary(0, PredicateOperator::LIKE, PredicateValue(std::string("alpha")), MYSQL_TYPE_STRING,
+                          &my_charset_bin, '\\');
+  EXPECT_EQ(TruthValue::FALSE_VALUE, binary.evaluate(reinterpret_cast<const uchar *>(padded.data()), padded.size()));
+}
+}  // namespace shannon_like_predicate_unittest

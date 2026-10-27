@@ -462,7 +462,13 @@ bool PredicatePushDown::is_simple_predicate(Item *item) {
       case Item_func::GT_FUNC:
       case Item_func::GE_FUNC:
       case Item_func::BETWEEN:
+      case Item_func::LIKE_FUNC:
         return true;
+      case Item_func::NOT_FUNC: {
+        if (func->argument_count() != 1) return false;
+        Item *inner = func->arguments()[0]->real_item();
+        return inner->type() == Item::FUNC_ITEM && down_cast<Item_func *>(inner)->functype() == Item_func::LIKE_FUNC;
+      }
       default:
         return false;
     }

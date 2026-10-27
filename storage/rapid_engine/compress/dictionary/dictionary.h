@@ -111,6 +111,12 @@ class Dictionary {
 
   size_t size() const { return m_next_id.load(); }
 
+  // A mask must not cache an allocated ID before store() publishes its entry.
+  size_t publish_next_id() const {
+    std::shared_lock lock(m_dict_mutex);
+    return m_next_id.load();
+  }
+
   /**
    * Bytes of dictionary payload currently held, for
    * performance_schema.rpd_columns.DICT_SIZE_BYTES.  Maintained incrementally

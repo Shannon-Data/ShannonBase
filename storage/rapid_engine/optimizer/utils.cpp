@@ -305,6 +305,10 @@ bool is_storage_index_predicate_safe(const Imcs::Predicate *predicate) {
   const auto type = simple->column_type.load(std::memory_order_acquire);
   const Field *field = simple->field_meta.load(std::memory_order_acquire);
 
+  if (simple->op == Imcs::PredicateOperator::LIKE || simple->op == Imcs::PredicateOperator::NOT_LIKE)
+    return simple->has_mysql_like() && field != nullptr && ShannonBase::Utils::Util::is_string(type) &&
+           !ShannonBase::Utils::IsOffPageField(field);
+
   if (!is_pushable_comparison(simple->op)) return false;
 
   switch (type) {

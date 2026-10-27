@@ -34,6 +34,7 @@
 #include <cstring>
 #include <limits>
 
+#include "mysql/strings/m_ctype.h"  // my_wildcmp
 #include "sql/field.h"
 #include "sql/item.h"
 #include "sql/item_cmpfunc.h"
@@ -41,6 +42,7 @@
 #include "sql/opt_trace.h"
 #include "sql/sql_class.h"
 #include "sql/table.h"  // TABLE
+#include "storage/rapid_engine/compress/dictionary/dictionary.h"
 
 namespace ShannonBase {
 namespace Executor {

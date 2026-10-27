@@ -466,7 +466,7 @@ EXPLAIN FORMAT=TREE SELECT o.customer_id, COUNT(*) AS cnt, SUM(o.amount) AS tota
 FROM orders o JOIN customers c ON o.customer_id = c.id
 GROUP BY o.customer_id;
 EXPLAIN
--> Group vectorized aggregate: count(0), sum(o.amount)  (rows=14)
+-> Group aggregate: count(0), sum(o.amount)  (rows=14)
     -> Sort: c.id  (rows=206)
         -> Vectorized inner hash join (o.customer_id = c.id)  (rows=206)
             -> Vectorized table scan on o in secondary engine Rapid  (rows=206)
@@ -504,7 +504,7 @@ EXPLAIN FORMAT=TREE SELECT o.customer_id, COUNT(*) AS cnt, SUM(o.amount) AS tota
 FROM customers c JOIN orders o ON c.id = o.customer_id
 GROUP BY o.customer_id;
 EXPLAIN
--> Group vectorized aggregate: count(0), sum(o.amount)  (rows=14)
+-> Group aggregate: count(0), sum(o.amount)  (rows=14)
     -> Sort: c.id  (rows=206)
         -> Vectorized inner hash join (c.id = o.customer_id)  (rows=206)
             -> Vectorized table scan on o in secondary engine Rapid  (rows=206)
@@ -618,7 +618,7 @@ EXPLAIN FORMAT=TREE SELECT o.customer_id, SUM(c.region) AS total_region
 FROM orders o JOIN customers c ON o.customer_id = c.id
 GROUP BY o.customer_id;
 EXPLAIN
--> Group vectorized aggregate: sum(c.region)  (rows=14)
+-> Group aggregate: sum(c.region)  (rows=14)
     -> Sort: c.id  (rows=206)
         -> Vectorized inner hash join (o.customer_id = c.id)  (rows=206)
             -> Vectorized table scan on o in secondary engine Rapid  (rows=206)

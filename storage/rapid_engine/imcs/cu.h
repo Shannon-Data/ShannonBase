@@ -309,6 +309,7 @@ class CU : public MemoryObject {
   inline enum_field_types type() const { return m_header.field_desc.type; }
   inline enum_field_types real_type() const { return m_header.field_desc.real_type(); }
   inline Compress::Dictionary *dictionary() const { return m_header.field_desc.dictionary.get(); }
+  inline std::shared_ptr<Compress::Dictionary> shared_dictionary() const { return m_header.field_desc.dictionary; }
   inline size_t get_normalized_length() const { return m_header.field_desc.normalized_length; }
   inline Field *get_source_field() const { return m_header.field_desc.src_field; }
 

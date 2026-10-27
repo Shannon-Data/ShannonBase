@@ -21,8 +21,8 @@
 
    Copyright (c) 2026, Shannon Data AI and/or its affiliates.
 */
-#ifndef SHANNON_CHANGE_RECORD_H
-#define SHANNON_CHANGE_RECORD_H
+#ifndef __SHANNON_CHANGE_RECORD_H__
+#define __SHANNON_CHANGE_RECORD_H__
 #include <limits>
 #include <map>
 #include <memory>

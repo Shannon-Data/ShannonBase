@@ -50,10 +50,12 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <regex>
 #include <shared_mutex>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -68,6 +70,9 @@
 class my_decimal;
 
 namespace ShannonBase {
+namespace Compress {
+class Dictionary;
+}
 namespace Imcs {
 /**
  * Predicate operator enumeration
@@ -477,6 +482,10 @@ class Predicate {
  */
 class Simple_Predicate : public Predicate {
  public:
+  // MySQL LIKE semantics are prepared by the optimizer. Dictionary bindings
+  // belong to execution and are refreshed separately as dictionaries grow.
+  Simple_Predicate(uint32 col_id, PredicateOperator op_type, const PredicateValue &val, enum_field_types type,
+                   const CHARSET_INFO *charset, int escape);
   Simple_Predicate(uint32 col_id, PredicateOperator op_type, const PredicateValue &val,
                    enum_field_types type = MYSQL_TYPE_NULL)
       : Predicate(op_type, false), column_id(col_id), value(val), column_type(type) {
@@ -509,7 +518,8 @@ class Simple_Predicate : public Predicate {
         value_list(other.value_list),
         field_meta(other.field_meta.load(std::memory_order_acquire)),
         low_order(other.low_order.load(std::memory_order_acquire)),
-        column_type(other.column_type.load(std::memory_order_acquire)) {
+        column_type(other.column_type.load(std::memory_order_acquire)),
+        m_like_oper(other.m_like_oper) {
     // Regex will be lazily initialized if needed
   }
 
@@ -544,6 +554,9 @@ class Simple_Predicate : public Predicate {
 
   /** Bind MySQL field metadata and set column_name, e.g. "t1.grp_low". */
   void set_column_name_from_field(const Field *field);
+  bool has_mysql_like() const { return m_like_oper.has_value(); }
+  std::shared_ptr<const std::vector<uint8_t>> like_dictionary_mask(
+      const std::shared_ptr<Compress::Dictionary> &dictionary) const;
 
  private:
   TruthValue evaluate_impl(const uchar *input_value, size_t input_length, bool has_input_length) const;
@@ -598,6 +611,17 @@ class Simple_Predicate : public Predicate {
   mutable std::once_flag m_like_flag;
   mutable PatternType m_pattern_type{PatternType::EXACT};
   mutable std::once_flag m_pattern_flag;
+
+  struct LikeOper {
+    const CHARSET_INFO *charset;
+    int escape;
+    bool trim_char_padding;
+    bool matches(std::string_view text, std::string_view pattern) const;
+  };
+  std::optional<LikeOper> m_like_oper;
+  mutable std::mutex m_like_dictionary_mutex;
+  mutable std::shared_ptr<Compress::Dictionary> m_like_dictionary;
+  mutable std::shared_ptr<const std::vector<uint8_t>> m_like_dictionary_mask;
 };
 
 /**

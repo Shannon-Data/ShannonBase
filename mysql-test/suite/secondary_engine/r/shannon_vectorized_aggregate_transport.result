@@ -1,0 +1,48 @@
+CREATE DATABASE rapid_aggregate_transport;
+USE rapid_aggregate_transport;
+CREATE TABLE t (id INT PRIMARY KEY, grp INT, amount INT) SECONDARY_ENGINE=rapid;
+INSERT INTO t VALUES (1,1,10),(2,1,20),(3,2,30),(4,2,NULL),
+(5,NULL,40),(6,NULL,50),(7,3,NULL),(8,3,NULL);
+ANALYZE TABLE t;
+Table	Op	Msg_type	Msg_text
+rapid_aggregate_transport.t	analyze	status	OK
+ALTER TABLE t SECONDARY_LOAD;
+SET USE_SECONDARY_ENGINE=FORCED;
+# Hypergraph: the batch scan feeds a vectorized grouped aggregate.
+SET SESSION optimizer_switch='hypergraph_optimizer=on';
+Warnings:
+Warning	1287	The hypergraph optimizer is highly experimental and is meant for testing only. Do not enable it unless you are a MySQL developer.
+EXPLAIN FORMAT=TREE SELECT grp,COUNT(*),COUNT(amount),SUM(amount)
+FROM t GROUP BY grp ORDER BY grp;
+EXPLAIN
+-> Group vectorized aggregate: count(0), count(t.amount), sum(t.amount)  (...)
+    -> Vectorized table scan on t in secondary engine Rapid  (...)
+
+Warnings:
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+SELECT grp,COUNT(*),COUNT(amount),SUM(amount) FROM t GROUP BY grp ORDER BY grp;
+grp	COUNT(*)	COUNT(amount)	SUM(amount)
+NULL	2	2	90
+1	2	2	30
+2	2	1	30
+3	2	0	NULL
+# Legacy: verify the same NULL keys and all-NULL aggregate groups.
+SET SESSION optimizer_switch='hypergraph_optimizer=off';
+EXPLAIN FORMAT=TREE SELECT grp,COUNT(*),COUNT(amount),SUM(amount)
+FROM t GROUP BY grp ORDER BY grp;
+EXPLAIN
+-> Sort: t.grp
+    -> Table scan on <temporary>
+        -> Aggregate using temporary table
+            -> Vectorized table scan on t in secondary engine Rapid  (...)
+
+Warnings:
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+SELECT grp,COUNT(*),COUNT(amount),SUM(amount) FROM t GROUP BY grp ORDER BY grp;
+grp	COUNT(*)	COUNT(amount)	SUM(amount)
+NULL	2	2	90
+1	2	2	30
+2	2	1	30
+3	2	0	NULL
+SET USE_SECONDARY_ENGINE=OFF;
+DROP DATABASE rapid_aggregate_transport;

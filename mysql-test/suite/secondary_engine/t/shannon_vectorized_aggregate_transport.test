@@ -1,0 +1,37 @@
+# Keep positive vectorized-aggregate coverage alongside the native fallback
+# regression: a batch scan with a small resident group table must stay Rapid.
+--source include/elide_costs.inc
+
+CREATE DATABASE rapid_aggregate_transport;
+USE rapid_aggregate_transport;
+--disable_warnings
+CREATE TABLE t (id INT PRIMARY KEY, grp INT, amount INT) SECONDARY_ENGINE=rapid;
+--enable_warnings
+INSERT INTO t VALUES (1,1,10),(2,1,20),(3,2,30),(4,2,NULL),
+                     (5,NULL,40),(6,NULL,50),(7,3,NULL),(8,3,NULL);
+ANALYZE TABLE t;
+ALTER TABLE t SECONDARY_LOAD;
+SET USE_SECONDARY_ENGINE=FORCED;
+
+--echo # Hypergraph: the batch scan feeds a vectorized grouped aggregate.
+SET SESSION optimizer_switch='hypergraph_optimizer=on';
+--replace_regex $elide_costs_and_rows
+EXPLAIN FORMAT=TREE SELECT grp,COUNT(*),COUNT(amount),SUM(amount)
+FROM t GROUP BY grp ORDER BY grp;
+SELECT grp,COUNT(*),COUNT(amount),SUM(amount) FROM t GROUP BY grp ORDER BY grp;
+--let $assert_query = SELECT grp,COUNT(*),COUNT(amount),SUM(amount) FROM t GROUP BY grp ORDER BY grp
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+
+--echo # Legacy: verify the same NULL keys and all-NULL aggregate groups.
+SET SESSION optimizer_switch='hypergraph_optimizer=off';
+--replace_regex $elide_costs_and_rows
+EXPLAIN FORMAT=TREE SELECT grp,COUNT(*),COUNT(amount),SUM(amount)
+FROM t GROUP BY grp ORDER BY grp;
+SELECT grp,COUNT(*),COUNT(amount),SUM(amount) FROM t GROUP BY grp ORDER BY grp;
+--let $assert_query = SELECT grp,COUNT(*),COUNT(amount),SUM(amount) FROM t GROUP BY grp ORDER BY grp
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+
+SET USE_SECONDARY_ENGINE=OFF;
+DROP DATABASE rapid_aggregate_transport;

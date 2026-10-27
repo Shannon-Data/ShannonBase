@@ -1,0 +1,58 @@
+--source include/have_debug.inc
+--source include/have_debug_sync.inc
+--source include/no_ps_protocol.inc
+SET use_secondary_engine=OFF;
+CREATE TABLE reclaim_seq (i INT PRIMARY KEY);
+INSERT INTO reclaim_seq WITH RECURSIVE n AS (SELECT 0 i UNION ALL SELECT i+1 FROM n WHERE i<999) SELECT i FROM n;
+CREATE TABLE reclaim_src (id INT PRIMARY KEY, g INT, v INT) SECONDARY_ENGINE=rapid;
+INSERT INTO reclaim_src SELECT a.i*32+b.i,a.i*32+b.i,IF(MOD(b.i,7)=0,NULL,b.i)
+ FROM reclaim_seq a JOIN reclaim_seq b ON b.i<32 WHERE a.i<250;
+CREATE TABLE reclaim_ref AS SELECT g,SUM(v*2) AS s,COUNT(v) AS c FROM reclaim_src GROUP BY g;
+CREATE TABLE reclaim_ref_small AS SELECT g,SUM(v) AS s FROM reclaim_src WHERE id<3200 GROUP BY g;
+ALTER TABLE reclaim_src SECONDARY_LOAD;
+--let $capacity = `SELECT CAST(SUBSTRING_INDEX(SUBSTRING_INDEX(VARIABLE_VALUE,'capacity=',-1),' ',1) AS UNSIGNED) FROM performance_schema.global_status WHERE VARIABLE_NAME='rapid_sys_pool_status'`
+--echo # Actual test system pool capacity: $capacity
+if ($capacity != 25165824) {
+  --die The reclaim test did not get its expected 24 MiB system pool
+}
+connect (reclaim_query,localhost,root,,test);
+--disable_warnings
+SET optimizer_switch='hypergraph_optimizer=on';
+--enable_warnings
+SET use_secondary_engine=FORCED;
+SET secondary_engine_cost_threshold=0;
+SET debug='+d,rapid_test_hash_reclaim,rapid_pause_hash_before_reclaim,rapid_pause_hash_after_reclaim';
+--send CREATE TABLE reclaim_got AS SELECT g,SUM(v*2) AS s,COUNT(v) AS c FROM reclaim_src GROUP BY g
+connection default;
+SET DEBUG_SYNC='now WAIT_FOR rapid_hash_before_reclaim_ready TIMEOUT 45';
+--let $before = `SELECT CAST(SUBSTRING_INDEX(SUBSTRING_INDEX(VARIABLE_VALUE,'reserved=',-1),' ',1) AS UNSIGNED) FROM performance_schema.global_status WHERE VARIABLE_NAME='rapid_sys_pool_status'`
+SET DEBUG_SYNC='now SIGNAL rapid_hash_before_reclaim_continue';
+SET DEBUG_SYNC='now WAIT_FOR rapid_hash_after_reclaim_ready TIMEOUT 45';
+--let $after = `SELECT CAST(SUBSTRING_INDEX(SUBSTRING_INDEX(VARIABLE_VALUE,'reserved=',-1),' ',1) AS UNSIGNED) FROM performance_schema.global_status WHERE VARIABLE_NAME='rapid_sys_pool_status'`
+if ($after >= $before) {
+  --die Aggregate pressure did not return its reservation at the safe point
+}
+--echo # Pressure returned a live reservation before the query completed.
+SET DEBUG_SYNC='now SIGNAL rapid_hash_after_reclaim_continue';
+connection reclaim_query;
+--reap
+SET debug='-d,rapid_test_hash_reclaim,rapid_pause_hash_before_reclaim,rapid_pause_hash_after_reclaim';
+# A completed in-memory aggregate can return unused capacity immediately
+# while its output groups stay live and readable.
+SET debug='+d,rapid_test_hash_output_reclaim,rapid_pause_hash_output_reclaim';
+--send CREATE TABLE reclaim_got_small AS SELECT g,SUM(v) AS s FROM reclaim_src WHERE id<3200 GROUP BY g
+connection default;
+SET DEBUG_SYNC='now WAIT_FOR rapid_hash_output_reclaim_ready TIMEOUT 45';
+SET DEBUG_SYNC='now SIGNAL rapid_hash_output_reclaim_continue';
+connection reclaim_query;
+--reap
+SET debug='-d,rapid_test_hash_output_reclaim,rapid_pause_hash_output_reclaim';
+disconnect reclaim_query;
+connection default;
+SET DEBUG_SYNC='RESET';
+SET use_secondary_engine=OFF;
+SELECT COUNT(*) AS missing FROM (SELECT * FROM reclaim_ref EXCEPT ALL SELECT * FROM reclaim_got) x;
+SELECT COUNT(*) AS extra FROM (SELECT * FROM reclaim_got EXCEPT ALL SELECT * FROM reclaim_ref) x;
+SELECT COUNT(*) AS small_missing FROM (SELECT * FROM reclaim_ref_small EXCEPT ALL SELECT * FROM reclaim_got_small) x;
+SELECT COUNT(*) AS small_extra FROM (SELECT * FROM reclaim_got_small EXCEPT ALL SELECT * FROM reclaim_ref_small) x;
+DROP TABLE reclaim_ref,reclaim_ref_small,reclaim_got,reclaim_got_small,reclaim_src,reclaim_seq;

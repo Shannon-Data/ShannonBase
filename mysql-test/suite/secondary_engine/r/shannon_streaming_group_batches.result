@@ -1,0 +1,39 @@
+SET use_secondary_engine=OFF;
+CREATE TABLE stream_seq (i INT PRIMARY KEY);
+INSERT INTO stream_seq WITH RECURSIVE n AS
+(SELECT 0 i UNION ALL SELECT i+1 FROM n WHERE i<255) SELECT i FROM n;
+CREATE TABLE stream_groups (
+g INT NOT NULL, id INT NOT NULL, v DECIMAL(15,2), f DOUBLE,
+PRIMARY KEY(g,id)
+) SECONDARY_ENGINE=rapid;
+INSERT INTO stream_groups
+SELECT 1+a.i*256+b.i,c.i,
+IF(MOD(a.i,7)=0,NULL,(b.i-c.i)*1.25),IF(MOD(a.i,11)=0,NULL,b.i*0.1-c.i)
+FROM stream_seq a JOIN stream_seq b JOIN stream_seq c ON c.i<1+MOD(a.i+b.i,5);
+INSERT INTO stream_groups SELECT 0,a.i*256+b.i,b.i*1.25,b.i*0.1
+FROM stream_seq a JOIN stream_seq b ON b.i<32;
+INSERT INTO stream_groups VALUES (70000,0,NULL,NULL);
+ALTER TABLE stream_groups SECONDARY_LOAD;
+SET optimizer_switch='hypergraph_optimizer=on';
+SET use_secondary_engine=FORCED;
+EXPLAIN FORMAT=TREE SELECT g,SUM(v),AVG(v),COUNT(v),MIN(v),MAX(v) FROM stream_groups GROUP BY g;
+EXPLAIN
+-> Group vectorized aggregate: sum(stream_groups.v), avg(stream_groups.v), count(stream_groups.v), min(stream_groups.v), max(stream_groups.v)  (...)
+    -> Vectorized index scan on stream_groups using PRIMARY in secondary engine Rapid  (...)
+
+Warnings:
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+PREPARE stream_stmt FROM 'SELECT g,SUM(v),COUNT(*) FROM stream_groups GROUP BY g ORDER BY g LIMIT 3';
+EXECUTE stream_stmt;
+g	SUM(v)	COUNT(*)
+0	158720.00	8192
+1	NULL	1
+2	NULL	2
+EXECUTE stream_stmt;
+g	SUM(v)	COUNT(*)
+0	158720.00	8192
+1	NULL	1
+2	NULL	2
+DEALLOCATE PREPARE stream_stmt;
+SET use_secondary_engine=OFF;
+DROP TABLE stream_groups,stream_seq;
