@@ -1,0 +1,18 @@
+--source include/have_debug.inc
+CREATE DATABASE iterator_allocation_status;
+USE iterator_allocation_status;
+CREATE TABLE t (id INT PRIMARY KEY, value INT) SECONDARY_ENGINE=rapid;
+INSERT INTO t VALUES (1,10),(2,NULL),(3,30),(4,NULL);
+ALTER TABLE t SECONDARY_LOAD;
+SET use_secondary_engine=FORCED;
+SET secondary_engine_cost_threshold=0;
+SET optimizer_switch='hypergraph_optimizer=off';
+--echo # A refused streaming aggregate column must abort, including COUNT(nullable).
+SET debug='+d,rapid_aggregate_column_allocation_failure';
+--error ER_SECONDARY_ENGINE_PLUGIN
+SELECT COUNT(value),SUM(value) FROM t;
+SET debug='-d,rapid_aggregate_column_allocation_failure';
+--echo # The same session must produce the correct NULL-sensitive result after refusal.
+SELECT COUNT(value),SUM(value) FROM t;
+SET use_secondary_engine=OFF;
+DROP DATABASE iterator_allocation_status;

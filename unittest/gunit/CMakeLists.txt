@@ -280,6 +280,7 @@ SET(SERVER_TESTS
   rapid_ringbuffer
   rapid_resources
   rapid_columnar_join_work
+  rapid_nested_loop
   rapid_aggregate_order
   rapid_bloom_filter
   rapid_ml
@@ -363,6 +364,7 @@ SET(RAPID_TESTS
   rapid_ringbuffer
   rapid_resources
   rapid_columnar_join_work
+  rapid_nested_loop
   rapid_aggregate_order
   rapid_bloom_filter
   rapid_ml

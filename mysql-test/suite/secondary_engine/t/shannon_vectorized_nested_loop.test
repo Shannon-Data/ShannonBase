@@ -1,0 +1,80 @@
+--source include/have_debug.inc
+--source include/elide_costs.inc
+CREATE DATABASE rapid_nlj;
+USE rapid_nlj;
+SET use_secondary_engine=OFF;
+CREATE TABLE o (id INT PRIMARY KEY) SECONDARY_ENGINE=rapid;
+CREATE TABLE i (id INT PRIMARY KEY, k INT, amount INT, label VARCHAR(20), KEY(k)) SECONDARY_ENGINE=rapid;
+INSERT INTO o VALUES (1),(2),(3),(4);
+SET cte_max_recursion_depth=2000;
+INSERT INTO i WITH RECURSIVE seq AS
+ (SELECT 1 n UNION ALL SELECT n+1 FROM seq WHERE n<1600)
+ SELECT n,IF(n<=1200,1,2),IF(MOD(n,7)=0,NULL,n),IF(MOD(n,11)=0,NULL,CONCAT('v',MOD(n,5))) FROM seq;
+INSERT INTO i VALUES (1601,NULL,7,'null-key');
+SET cte_max_recursion_depth=DEFAULT;
+ANALYZE TABLE o,i;
+ALTER TABLE o SECONDARY_LOAD;
+ALTER TABLE i SECONDARY_LOAD;
+SET optimizer_switch='hypergraph_optimizer=off';
+SET use_secondary_engine=FORCED;
+
+--echo # Adaptive transport: indexed inner probes, more than one output batch.
+--replace_regex $elide_costs_and_rows
+EXPLAIN FORMAT=TREE SELECT COUNT(*),SUM(i.amount),COUNT(i.label)
+FROM o STRAIGHT_JOIN i FORCE INDEX(k) ON i.k=o.id;
+--let $batch_before = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_aggregate_batch_rows_total', Value, 1)
+SELECT COUNT(*),SUM(i.amount),COUNT(i.label) FROM o STRAIGHT_JOIN i FORCE INDEX(k) ON i.k=o.id;
+--let $batch_after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_aggregate_batch_rows_total', Value, 1)
+--let $batch_used = `SELECT $batch_after > $batch_before`
+if ($batch_used == 0) {
+  --die Aggregate did not consume nested-loop batches
+}
+--echo # aggregate consumed NLJ batches (1 expected): $batch_used
+--let $assert_query = SELECT COUNT(*),SUM(i.amount),COUNT(i.label) FROM o STRAIGHT_JOIN i FORCE INDEX(k) ON i.k=o.id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+
+--echo # A row-consuming aggregate keeps vectorized scans below the nested loop.
+SET optimizer_switch='hypergraph_optimizer=on';
+SET SESSION debug='+d,rapid_force_vectorized_nlj';
+--replace_regex $elide_costs_and_rows
+EXPLAIN FORMAT=TREE SELECT o.id,SUM(CASE WHEN i.amount IS NULL THEN 0 ELSE i.amount*2 END)
+FROM o LEFT JOIN i FORCE INDEX(k) ON i.k=o.id GROUP BY o.id;
+--let $assert_query = SELECT o.id,SUM(CASE WHEN i.amount IS NULL THEN 0 ELSE i.amount*2 END) FROM o LEFT JOIN i FORCE INDEX(k) ON i.k=o.id GROUP BY o.id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+SET SESSION debug='-d,rapid_force_vectorized_nlj';
+SET optimizer_switch='hypergraph_optimizer=off';
+
+--echo # REF_OR_NULL probes must retain the NULL-key range on every outer row.
+--let $assert_query = SELECT COUNT(*),SUM(i.amount) FROM o STRAIGHT_JOIN i FORCE INDEX(k) ON i.k=o.id OR i.k IS NULL
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--echo # Semi and anti queries preserve existence rather than inner fan-out.
+--let $assert_query = SELECT COUNT(*) FROM o WHERE EXISTS (SELECT 1 FROM i WHERE i.k=o.id)
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_query = SELECT COUNT(*) FROM o WHERE NOT EXISTS (SELECT 1 FROM i WHERE i.k=o.id)
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+
+--echo # Outer join: NULL-complemented rows after the last matching batch.
+--replace_regex $elide_costs_and_rows
+EXPLAIN FORMAT=TREE SELECT COUNT(*),COUNT(i.id),SUM(i.amount),COUNT(i.label)
+FROM o LEFT JOIN i FORCE INDEX(k) ON i.k=o.id;
+--let $assert_query = SELECT COUNT(*),COUNT(i.id),SUM(i.amount),COUNT(i.label) FROM o LEFT JOIN i FORCE INDEX(k) ON i.k=o.id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+
+--echo # Native transport remains a correct fallback.
+SET SESSION debug='+d,rapid_disable_vectorized_nlj';
+--let $assert_query = SELECT COUNT(*),SUM(i.amount),COUNT(i.label) FROM o STRAIGHT_JOIN i FORCE INDEX(k) ON i.k=o.id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+SET SESSION debug='-d,rapid_disable_vectorized_nlj';
+
+--echo # Reinitialize the join after an early LIMIT on grouped output.
+PREPARE nlj_stmt FROM 'SELECT o.id,SUM(i.amount) FROM o LEFT JOIN i FORCE INDEX(k) ON i.k=o.id GROUP BY o.id ORDER BY o.id LIMIT 2';
+EXECUTE nlj_stmt;
+EXECUTE nlj_stmt;
+DEALLOCATE PREPARE nlj_stmt;
+--echo # An insufficient auxiliary budget reports a SQL error.
+SET SESSION debug='+d,rapid_force_vectorized_nlj,rapid_nlj_tiny_budget';
+--error ER_SECONDARY_ENGINE_PLUGIN
+SELECT COUNT(*),SUM(i.amount),COUNT(i.label) FROM o STRAIGHT_JOIN i FORCE INDEX(k) ON i.k=o.id;
+SET SESSION debug='-d,rapid_force_vectorized_nlj,rapid_nlj_tiny_budget';
+SET use_secondary_engine=OFF;
+DROP DATABASE rapid_nlj;

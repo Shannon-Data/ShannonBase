@@ -57,7 +57,7 @@ namespace Executor {
  * is gathered in that order on output. With a LIMIT, a bounded heap keeps only
  * the best rows. Past the memory budget, sorted runs go to disk and are merged.
  */
-class VectorizedSortIterator final : public RowIterator {
+class VectorizedSortIterator final : public RowIterator, public BatchReadable {
   // Declared first so the reservation outlives all retained buffers.
   ResMgmt::MemoryBudget::Reservation m_memory_reservation;
   ResMgmt::BoundedMemoryResource m_sort_memory;
@@ -74,6 +74,7 @@ class VectorizedSortIterator final : public RowIterator {
   /// Whether this operator can run the sort; false keeps SortingIterator.
   /// Decided when the plan is built, so EXPLAIN shows what runs.
   static bool CanVectorize(const Filesort *filesort, bool unwrap_rollup, table_map tables_to_get_rowid_for);
+  static bool CanVectorizeBatches(const Filesort *filesort);
 
   VectorizedSortIterator(THD *thd, Filesort *filesort, unique_ptr_destroy_only<RowIterator> source,
                          pack_rows::TableCollection tables, size_t memory_budget, ha_rows *examined_rows);
@@ -81,6 +82,10 @@ class VectorizedSortIterator final : public RowIterator {
 
   bool Init() override;
   int Read() override;
+  bool SupportsBatchRead() const override { return m_batch_source != nullptr; }
+  std::shared_ptr<Compress::Dictionary> Dictionary(const Field *field) const override;
+  int ReadBatch(std::pmr::vector<ColumnChunk> &chunks, size_t capacity, size_t &rows) override;
+  bool PushbackBatchTail(const std::pmr::vector<ColumnChunk> &chunks, size_t from, size_t total) override;
   void SetNullRowFlag(bool is_null_row) override;
   void UnlockRow() override {}
   void StartPSIBatchMode() override { m_source->StartPSIBatchMode(); }
@@ -114,20 +119,26 @@ class VectorizedSortIterator final : public RowIterator {
     Field *field{nullptr};
     size_t offset{0};  // of its NULL byte in the fixed row image
     size_t width{0};
+    size_t chunk_index{0};
   };
 
   void EncodeKey(uchar *to) const;
+  bool InitImpl();
+  int ReadBatchImpl(std::pmr::vector<ColumnChunk> &chunks, size_t capacity, size_t &rows);
   bool SetupBatch();
   bool EncodeBatchKeys(size_t rows);
   long FetchBlock();
   const uchar *BlockPayload(size_t row, size_t *length);
   bool LoadRow(const uchar *row);
+  size_t ChunkIndex(const Field *field) const;
+  int NextPayload(const uchar **row);
+  bool LoadTailRow();
   bool RestoreDictionaryField(Field *field, uint32_t code);
   bool EncodeDictionaryVarstringKey(const KeyPart &key_part, uint32_t code, uchar *to);
   bool Sink();
   bool SinkTopN();
   bool CanUseTopN() const;
-  void SortBuffered();
+  bool SortBuffered();
   bool SpillRun();
   bool AdvanceRun(Run *run);
   bool MergePass();
@@ -139,8 +150,8 @@ class VectorizedSortIterator final : public RowIterator {
   static constexpr size_t kMaxOpenRuns = 8;
   size_t MergeFanIn() const { return std::clamp(m_memory_budget / (32 * 1024), size_t{2}, kMaxOpenRuns); }
   bool StartMerge();
-  int ReadMerged();
-  void ResetState();
+  int ReadMerged(const uchar **row);
+  bool ResetState();
 
   Filesort *m_filesort;
   unique_ptr_destroy_only<RowIterator> m_source;
@@ -151,6 +162,7 @@ class VectorizedSortIterator final : public RowIterator {
   std::pmr::vector<KeyPart> m_key_parts{&m_aux_memory};
   size_t m_key_width{0};
   ha_rows m_limit{HA_POS_ERROR};
+  ha_rows m_emitted{0};
 
   // Buffered rows: m_keys holds m_key_width bytes per row, m_payload the
   // packed rows back to back, m_payload_offsets[i]..[i+1] the i-th row.
@@ -187,6 +199,9 @@ class VectorizedSortIterator final : public RowIterator {
 
   std::pmr::vector<char> m_row_storage{&m_aux_memory};
   String m_row_buffer;
+  std::pmr::vector<ColumnChunk> m_output_tail{&m_aux_memory};
+  std::pmr::vector<const PayloadField *> m_output_columns{&m_aux_memory};
+  size_t m_output_tail_start{0}, m_output_tail_count{0};
 };
 }  // namespace Executor
 }  // namespace ShannonBase

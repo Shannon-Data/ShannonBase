@@ -166,32 +166,44 @@ ColumnChunk::Buffer ColumnChunk::allocate_buffer(size_t capacity) {
   BufferDeleter deleter;
   deleter.memory = m_memory;
   deleter.bytes = bytes;
-  auto *base = static_cast<uchar *>(m_memory ? m_memory->allocate(bytes, alignof(bit_array_t))
-                                             : deleter.pool.allocate(bytes, alignof(bit_array_t)));
+  auto *base = static_cast<uchar *>(m_memory ? m_memory->try_allocate(bytes, alignof(bit_array_t))
+                                             : deleter.pool.try_allocate(bytes, alignof(bit_array_t)));
+  // An empty buffer reports the failure: valid() is false for every caller.
+  if (base == nullptr) return Buffer(nullptr, BufferDeleter{});
   auto *data = base + sizeof(bit_array_t);
   new (base) bit_array_t(capacity, data + capacity * m_field_width);
   return Buffer(data, std::move(deleter));
 }
 
-void ColumnChunk::initialize_buffers() {
+bool ColumnChunk::initialize_buffers() {
   if (m_chunk_size == 0 || m_field_width == 0) {
     m_null_mask.reset();
     m_cols_buffer.reset();
     m_cols_buffer_data = nullptr;
     m_null_mask_data = nullptr;
-    return;
+    return true;
   }
 
-  if (m_chunk_size > SIZE_MAX / m_field_width || m_chunk_size > SIZE_MAX - 7) throw std::bad_alloc();
+  if (m_chunk_size > SIZE_MAX / m_field_width || m_chunk_size > SIZE_MAX - 7) return false;
   const size_t buffer_size = m_chunk_size * m_field_width;
-  if (buffer_size > SIZE_MAX - (m_chunk_size + 7) / 8 - sizeof(bit_array_t)) throw std::bad_alloc();
+  if (buffer_size > SIZE_MAX - (m_chunk_size + 7) / 8 - sizeof(bit_array_t)) return false;
   auto data = allocate_buffer(m_chunk_size);
+  if (!data) {
+    // Leave the chunk unusable rather than holding a stale shape.
+    m_null_mask.reset();
+    m_cols_buffer.reset();
+    m_cols_buffer_data = nullptr;
+    m_null_mask_data = nullptr;
+    m_chunk_size = 0;
+    return false;
+  }
   auto *descriptor = reinterpret_cast<bit_array_t *>(data.get() - sizeof(bit_array_t));
   m_null_mask.reset();  // Destroy the old descriptor before returning its buffer.
   m_cols_buffer = std::move(data);
   m_null_mask.reset(descriptor);
   m_cols_buffer_data = m_cols_buffer.get();
   m_null_mask_data = m_null_mask->data;
+  return true;
 }
 
 void ColumnChunk::copy_from(const ColumnChunk &other) {
@@ -204,7 +216,8 @@ void ColumnChunk::copy_from(const ColumnChunk &other) {
   m_chunk_size = other.m_chunk_size;
   m_current_size = other.m_current_size;
 
-  initialize_buffers();
+  // A failed allocation leaves this copy invalid; checked by valid().
+  if (!initialize_buffers()) return;
 
   if (other.m_cols_buffer && m_cols_buffer && m_current_size != 0) {
     const size_t data_size = m_current_size * m_field_width;
@@ -217,11 +230,11 @@ void ColumnChunk::copy_from(const ColumnChunk &other) {
   }
 }
 
-void ColumnChunk::reset(Field *mysql_fld, size_t chunk_size) {
+bool ColumnChunk::reset(Field *mysql_fld, size_t chunk_size) {
   if ((mysql_fld == m_source_fld) && (chunk_size == m_chunk_size)) {
     // Fast path: logical reset only. append() overwrites each touched null bit.
     m_current_size = 0;
-    return;
+    return true;
   }
 
   m_source_fld = mysql_fld;
@@ -240,7 +253,7 @@ void ColumnChunk::reset(Field *mysql_fld, size_t chunk_size) {
   }
 
   m_current_size = 0;
-  initialize_buffers();  // realloc only when necessary
+  return initialize_buffers();  // realloc only when necessary
 }
 
 bool ColumnChunk::grow(size_t new_capacity) {
@@ -252,6 +265,7 @@ bool ColumnChunk::grow(size_t new_capacity) {
     return false;
   const size_t current = m_current_size;
   auto new_buffer = allocate_buffer(new_capacity);
+  if (!new_buffer) return false;
   auto *new_null_mask = reinterpret_cast<bit_array_t *>(new_buffer.get() - sizeof(bit_array_t));
   if (current > 0) {
     std::memcpy(new_buffer.get(), m_cols_buffer.get(), current * m_field_width);
@@ -269,6 +283,8 @@ bool ColumnChunk::grow(size_t new_capacity) {
 
 bool ColumnChunk::add(const uchar *data, size_t length, bool null) {
   if (!data && !null) return false;
+  // A chunk whose buffers could not be allocated stays unusable.
+  if (!valid()) return false;
 
   size_t actual_idx = m_current_size++;
   if (actual_idx >= m_chunk_size) {
@@ -292,6 +308,8 @@ bool ColumnChunk::add(const uchar *data, size_t length, bool null) {
 bool ColumnChunk::add_batch(const std::vector<std::pair<const uchar *, size_t>> &data_batch,
                             const std::vector<bool> &null_flags) {
   if (data_batch.size() != null_flags.size()) return false;
+  // A chunk whose buffers could not be allocated stays unusable.
+  if (!valid()) return false;
 
   size_t batch_size = data_batch.size();
   if (batch_size == 0) return true;
@@ -1137,12 +1155,19 @@ bool VectorizedFilterIterator::BuildConditionChunkMap(const std::pmr::vector<Col
 
 bool VectorizedFilterIterator::MaterializeConditionRow(const std::pmr::vector<ColumnChunk> &chunks, size_t row) {
   if (m_condition_chunk_map.size() != m_condition_fields.size()) return true;
+  // A NULL from an outer join may belong to a NOT NULL marker column. Such
+  // fields have no null bit; restore the table-level flag, just as the join's
+  // scalar row materializer does. Clear it before materializing each new row.
+  for (Field *field : m_condition_fields) field->table->reset_null_row();
   for (size_t i = 0; i < m_condition_fields.size(); ++i) {
     Field *field = m_condition_fields[i];
     const ColumnChunk &chunk = chunks[m_condition_chunk_map[i]];
     if (row >= chunk.size()) return true;
     if (chunk.nullable_fast(row)) {
-      field->set_null();
+      if (field->is_nullable())
+        field->set_null();
+      else
+        field->table->set_null_row();
       continue;
     }
     field->set_notnull();
@@ -1271,7 +1296,8 @@ bool PushbackBatchTailShared(const std::pmr::vector<ColumnChunk> &chunks, size_t
     const size_t pending = *lookahead_count;
     if (tail > std::numeric_limits<size_t>::max() - pending || lookahead_chunks->size() != chunks.size()) return true;
     std::pmr::vector<ColumnChunk> merged(lookahead_chunks->get_allocator());
-    merged.reserve(chunks.size());
+    if (!TryReserve(merged, chunks.size()))
+      return AllocationError("Rapid lookahead merged descriptors allocation failed");
     size_t copied = 0;
     for (size_t col = 0; col < chunks.size(); ++col) {
       const ColumnChunk &source = chunks[col];
@@ -1283,11 +1309,13 @@ bool PushbackBatchTailShared(const std::pmr::vector<ColumnChunk> &chunks, size_t
       if (source.size() < total_rows || *lookahead_start > old.size() || pending > old.size() - *lookahead_start)
         return true;
       for (size_t row = from_row; row < total_rows; ++row) {
-        if (!merged.back().append_from(source, row)) return true;
+        if (!merged.back().append_from(source, row))
+          return AllocationError("Rapid lookahead merged column allocation failed");
         if (!source.nullable_fast(row)) copied += source.width();
       }
       for (size_t row = *lookahead_start; row < *lookahead_start + pending; ++row) {
-        if (!merged.back().append_from(old, row)) return true;
+        if (!merged.back().append_from(old, row))
+          return AllocationError("Rapid lookahead pending column allocation failed");
         if (!old.nullable_fast(row)) copied += old.width();
       }
     }
@@ -1311,7 +1339,8 @@ bool PushbackBatchTailShared(const std::pmr::vector<ColumnChunk> &chunks, size_t
 
   if (rebuild) {
     lookahead_chunks->clear();
-    lookahead_chunks->reserve(chunks.size());
+    if (!TryReserve(*lookahead_chunks, chunks.size()))
+      return AllocationError("Rapid lookahead descriptors allocation failed");
     // Mirror the source width, not Util::normalized_length(): a chunk may hold
     // full MySQL record images (see ColumnChunk's explicit-width constructor),
     // and a narrower lookahead slot would make every append_from() below fail.
@@ -1330,7 +1359,7 @@ bool PushbackBatchTailShared(const std::pmr::vector<ColumnChunk> &chunks, size_t
         // Report the failure instead of silently truncating the input stream.
         *lookahead_start = 0;
         *lookahead_count = 0;
-        return true;
+        return AllocationError("Rapid lookahead column allocation failed");
       }
       if (bytes_copied != nullptr && !chunks[col].nullable_fast(row)) *bytes_copied += chunks[col].width();
     }

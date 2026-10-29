@@ -136,7 +136,7 @@ class VectorizedTableScanIterator final : public TableRowIterator, public BatchR
    * Preallocate memory for column chunks to avoid runtime allocations
    * Sets up the columnar storage buffers for batch processing
    */
-  void PreallocateColumnChunks();
+  bool PreallocateColumnChunks();
 
   int ReadNextBatch();
 

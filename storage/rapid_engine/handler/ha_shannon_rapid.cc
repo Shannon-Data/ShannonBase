@@ -1709,6 +1709,10 @@ static const char *rapid_propagation_mode_names[] = {"DIRECT_NOTIFICATION", "RED
   X(query_vectorized_hash_join_spill_rows_total, query_vectorized_hash_join_spill_rows_total)                     \
   X(query_vectorized_aggregate_spill_rows_total, query_vectorized_aggregate_spill_rows_total)                     \
   X(query_vectorized_aggregate_batch_rows_total, query_vectorized_aggregate_batch_rows_total)                     \
+  X(query_vectorized_sort_batch_rows_total, query_vectorized_sort_batch_rows_total)                               \
+  X(query_vectorized_ref_batch_rows_total, query_vectorized_ref_batch_rows_total)                                 \
+  X(query_vectorized_stream_batch_rows_total, query_vectorized_stream_batch_rows_total)                           \
+  X(query_vectorized_materialize_batch_rows_total, query_vectorized_materialize_batch_rows_total)                 \
   X(query_vectorized_aggregate_row_materializations_total, query_vectorized_aggregate_row_materializations_total) \
   X(query_vectorized_aggregate_dict_cache_hits_total, query_vectorized_aggregate_dict_cache_hits_total)           \
   X(query_vectorized_aggregate_dict_cache_misses_total, query_vectorized_aggregate_dict_cache_misses_total)       \
@@ -2402,6 +2406,13 @@ static MYSQL_SYSVAR_ULONGLONG(sort_spill_size_max,
                               nullptr, nullptr, 8ULL * 1024 * 1024 * 1024,
                               1024 * 1024, ULLONG_MAX, 0);
 
+static MYSQL_SYSVAR_ULONGLONG(materialize_spill_size_max,
+                              ShannonBase::shannon_rpd_engine_cfg.materialize_spill_size_max,
+                              PLUGIN_VAR_OPCMDARG | PLUGIN_VAR_READONLY,
+                              "Maximum live temporary column spool bytes per Rapid materialization.",
+                              nullptr, nullptr, 8ULL * 1024 * 1024 * 1024,
+                              1024 * 1024, ULLONG_MAX, 0);
+
 static MYSQL_SYSVAR_ULONGLONG(parallel_load_max,
                               ShannonBase::shannon_rpd_engine_cfg.para_load_threshold,
                               PLUGIN_VAR_OPCMDARG,
@@ -2687,6 +2698,7 @@ static struct SYS_VAR *rapid_system_variables[] = {
     MYSQL_SYSVAR(resource_maint_user_group),
     MYSQL_SYSVAR(memory_size_max),
     MYSQL_SYSVAR(sort_spill_size_max),
+    MYSQL_SYSVAR(materialize_spill_size_max),
     MYSQL_SYSVAR(window_spill_size_max),
     MYSQL_SYSVAR(window_spill_size_total),
     MYSQL_SYSVAR(query_sync_timeout_ms),

@@ -1834,7 +1834,8 @@ HashSpillEstimate EstimateHashSpill(THD *thd, AccessPath *build, AccessPath *pro
                        ShannonBase::ResMgmt::system_memory_limits().operation);
   const size_t build_budget = std::min(requested, nominal_grant / RapidCostConstants::kHashJoinGrantParts);
   const double retained =
-      columnar ? ColumnarJoinCostEstimator::estimate(build_rows, probe_rows, build_width, key_width).retained_bytes
+      columnar ? RpdCostEstimator::ColumnarJoinCostEstimator::estimate(build_rows, probe_rows, build_width, key_width)
+                     .retained_bytes
                : build_rows * (build_width + RapidCostConstants::kHashEntryOverheadBytes);
   if (retained <= build_budget) return {};
   // Ordered spill writes and reads both inputs and the materialized output.
@@ -1906,7 +1907,8 @@ bool ModifyHashJoinCost(THD *thd, const JoinHypergraph &graph, AccessPath *path,
   const double key_width = use_columnar_width ? JoinKeyWidth(hj_expr) : -1;
   double build_work_cost = 0;
   if (use_columnar_width) {
-    const auto work = ColumnarJoinCostEstimator::estimate(inner_rows, outer_rows, build_width, key_width);
+    const auto work =
+        RpdCostEstimator::ColumnarJoinCostEstimator::estimate(inner_rows, outer_rows, build_width, key_width);
     // Byte costs distinguish narrow/wide candidate builds without changing
     // cardinalities or reconstructing plans. MySQL retains control of legal
     // join orders, hints, dependencies and physical ordering properties.

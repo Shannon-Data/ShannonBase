@@ -51,54 +51,6 @@ class Predicate;
 class ColumnStatistics;
 }  // namespace Imcs
 namespace Optimizer {
-// Byte counts supplement, rather than replace, the calibrated per-row costs.
-// Row estimates are the filtered AccessPath estimates, never base table sizes.
-struct ColumnarJoinCostEstimator {
-  double build_copy_bytes{0};
-  double key_bytes{0};
-  double retained_bytes{0};
-
-  static ColumnarJoinCostEstimator estimate(double build_rows, double probe_rows, double projected_width,
-                                            double key_width) {
-    if (!std::isfinite(build_rows) || !std::isfinite(probe_rows) || !std::isfinite(projected_width) ||
-        !std::isfinite(key_width) || build_rows < 0 || probe_rows < 0 || projected_width < 0 || key_width < 0)
-      return {};
-    // HashSlot (40 bytes on 64-bit), plus an approximate bucket allowance.
-    // Column null bitmaps are included in projected_width.
-    // Keys are retained separately from projected columns.
-    const double width = std::max(1.0, projected_width);
-    return {build_rows * width, (build_rows + probe_rows) * key_width, build_rows * (width + key_width + 64.0)};
-  }
-};
-
-// Incremental work when choosing between an already ordered input and hash
-// aggregation of the same rows. Eligibility and proof of ordering belong to
-// the translator; this model cannot manufacture an ordering.
-struct AggregateOrderEstimator {
-  double groups{0};
-  double index_rows{0};
-  double spill_bytes{0};
-  bool valid{false};
-
-  static AggregateOrderEstimator estimate(double rows, double groups, double spill_row_bytes, double group_bytes,
-                                          double budget) {
-    if (!std::isfinite(rows) || !std::isfinite(groups) || !std::isfinite(spill_row_bytes) ||
-        !std::isfinite(group_bytes) || !std::isfinite(budget) || rows <= 0 || groups <= 0 || groups > rows ||
-        spill_row_bytes < 0 || group_bytes <= 0 || budget < 0)
-      return {};
-    const double retained = groups * group_bytes;
-    if (!std::isfinite(retained)) return {};
-    const double resident = std::min(1.0, budget / retained);
-    const double spill = (1.0 - resident) * rows * spill_row_bytes;
-    if (!std::isfinite(spill)) return {};
-    return {groups, rows, spill, true};
-  }
-
-  bool prefer_ordered(double group_init_cost, double index_row_cost, double spill_byte_cost) const {
-    return valid && index_rows * index_row_cost < groups * group_init_cost + spill_bytes * spill_byte_cost;
-  }
-};
-
 /**
  * MySQL Cost Model Constants (for reference)
  *
@@ -299,34 +251,6 @@ struct RapidCostConstants {
   static constexpr double kIndexScanImcuSkipDamping = 0.7;
 };
 
-// Compare only work changed by moving an aggregate across a unique INNER join.
-// Scans and the unchanged join side cancel out. Semantic proof belongs to the rule.
-struct AggregatePlacementCost {
-  double join_first{0};
-  double aggregate_first{0};
-  bool valid{false};
-
-  bool push_aggregation() const { return valid && aggregate_first < join_first * 0.8; }
-
-  static AggregatePlacementCost estimate(double input_rows, double joined_rows, double output_groups, bool build_side) {
-    if (!std::isfinite(input_rows) || !std::isfinite(joined_rows) || !std::isfinite(output_groups) || input_rows <= 0 ||
-        joined_rows <= 0 || joined_rows > input_rows || output_groups <= 0 || output_groups > joined_rows)
-      return {};
-
-    // The available group estimate is AFTER the join. Extrapolate with its match
-    // fraction; using it unchanged would underprice pre-aggregation precisely
-    // when a selective join removes most groups. This assumes uniform matches.
-    const double groups = std::min(input_rows, (output_groups / joined_rows) * input_rows);
-    const double join_row = build_side ? RapidCostConstants::kHashBuildPerRow + RapidCostConstants::kMemoryWritePerRow
-                                       : RapidCostConstants::kHashProbePerRow;
-    const double agg_row = RapidCostConstants::kVectorCpuPerRow * 2.0;
-    const double first = input_rows * join_row + joined_rows * agg_row;
-    const double pushed = input_rows * agg_row + groups * join_row;
-    if (!std::isfinite(first) || !std::isfinite(pushed)) return {};
-    return {first, pushed, true};
-  }
-};
-
 class RpdCostEstimator;
 class SelectivityEstimator : public MemoryObject {
  public:
@@ -468,6 +392,111 @@ class CostEstimator : public MemoryObject {
  */
 class RpdCostEstimator : public CostEstimator {
  public:
+  // Rapid-specific work models share this estimator namespace and cost units.
+  // Byte counts supplement, rather than replace, the calibrated per-row costs.
+  // Row estimates are the filtered AccessPath estimates, never base table sizes.
+  struct ColumnarJoinCostEstimator {
+    double build_copy_bytes{0};
+    double key_bytes{0};
+    double retained_bytes{0};
+
+    static ColumnarJoinCostEstimator estimate(double build_rows, double probe_rows, double projected_width,
+                                              double key_width) {
+      if (!std::isfinite(build_rows) || !std::isfinite(probe_rows) || !std::isfinite(projected_width) ||
+          !std::isfinite(key_width) || build_rows < 0 || probe_rows < 0 || projected_width < 0 || key_width < 0)
+        return {};
+      // HashSlot (40 bytes on 64-bit), plus an approximate bucket allowance.
+      // Column null bitmaps are included in projected_width.
+      // Keys are retained separately from projected columns.
+      const double width = std::max(1.0, projected_width);
+      return {build_rows * width, (build_rows + probe_rows) * key_width, build_rows * (width + key_width + 64.0)};
+    }
+  };
+
+  // Compare only transport/consumer work: scalar REF probing is common to both
+  // alternatives. Rates are supplied by the engine cost model, not by a switch.
+  struct NestedLoopBatchEstimator {
+    double scalar{0}, batches{0}, retained_bytes{0};
+    bool valid{false};
+    bool choose_batches() const { return valid && batches < scalar; }
+    static NestedLoopBatchEstimator estimate(double rows, double columns, double string_columns,
+                                             double normalized_width, double record_width, double budget,
+                                             double consumer_per_row, double cell_copy, double dictionary_lookup,
+                                             double batch_setup, double byte_copy) {
+      for (double value : {rows, columns, string_columns, normalized_width, record_width, budget, consumer_per_row,
+                           cell_copy, dictionary_lookup, batch_setup, byte_copy})
+        if (!std::isfinite(value) || value < 0) return {};
+      if (rows == 0 || columns == 0 || string_columns > columns || consumer_per_row == 0) return {};
+      const double capacity = std::min(1024.0, std::max(1.0, std::ceil(rows)));
+      const double retained = 2 * record_width + 2 * capacity * normalized_width + 32 * capacity + columns * 256;
+      if (!std::isfinite(retained) || retained > budget) return {};
+      const double common = rows * columns * cell_copy;
+      const double scalar = common + rows * consumer_per_row;
+      const double batch = common + rows * string_columns * dictionary_lookup +
+                           std::ceil(rows / capacity) * (batch_setup + 2 * record_width * byte_copy);
+      if (!std::isfinite(scalar) || !std::isfinite(batch)) return {};
+      return {scalar, batch, retained, true};
+    }
+  };
+
+  // Incremental work when choosing between an already ordered input and hash
+  // aggregation of the same rows. Eligibility and proof of ordering belong to
+  // the translator; this model cannot manufacture an ordering.
+  struct AggregateOrderEstimator {
+    double groups{0};
+    double index_rows{0};
+    double spill_bytes{0};
+    bool valid{false};
+
+    static AggregateOrderEstimator estimate(double rows, double groups, double spill_row_bytes, double group_bytes,
+                                            double budget) {
+      if (!std::isfinite(rows) || !std::isfinite(groups) || !std::isfinite(spill_row_bytes) ||
+          !std::isfinite(group_bytes) || !std::isfinite(budget) || rows <= 0 || groups <= 0 || groups > rows ||
+          spill_row_bytes < 0 || group_bytes <= 0 || budget < 0)
+        return {};
+      const double retained = groups * group_bytes;
+      if (!std::isfinite(retained)) return {};
+      const double resident = std::min(1.0, budget / retained);
+      const double spill = (1.0 - resident) * rows * spill_row_bytes;
+      if (!std::isfinite(spill)) return {};
+      return {groups, rows, spill, true};
+    }
+
+    bool prefer_ordered(double group_init_cost, double index_row_cost, double spill_byte_cost) const {
+      return valid && index_rows * index_row_cost < groups * group_init_cost + spill_bytes * spill_byte_cost;
+    }
+  };
+
+  // Compare only work changed by moving an aggregate across a unique INNER join.
+  // Scans and the unchanged join side cancel out. Semantic proof belongs to the rule.
+  struct AggregatePlacementCost {
+    double join_first{0};
+    double aggregate_first{0};
+    bool valid{false};
+
+    bool push_aggregation() const { return valid && aggregate_first < join_first * 0.8; }
+
+    static AggregatePlacementCost estimate(double input_rows, double joined_rows, double output_groups,
+                                           bool build_side) {
+      if (!std::isfinite(input_rows) || !std::isfinite(joined_rows) || !std::isfinite(output_groups) ||
+          input_rows <= 0 || joined_rows <= 0 || joined_rows > input_rows || output_groups <= 0 ||
+          output_groups > joined_rows)
+        return {};
+
+      // The available group estimate is AFTER the join. Extrapolate with its match
+      // fraction; using it unchanged would underprice pre-aggregation precisely
+      // when a selective join removes most groups. This assumes uniform matches.
+      const double groups = std::min(input_rows, (output_groups / joined_rows) * input_rows);
+      const double join_row = build_side ? RapidCostConstants::kHashBuildPerRow + RapidCostConstants::kMemoryWritePerRow
+                                         : RapidCostConstants::kHashProbePerRow;
+      const double agg_row = RapidCostConstants::kVectorCpuPerRow * 2.0;
+      const double first = input_rows * join_row + joined_rows * agg_row;
+      const double pushed = input_rows * agg_row + groups * join_row;
+      if (!std::isfinite(first) || !std::isfinite(pushed)) return {};
+      return {first, pushed, true};
+    }
+  };
+
   static constexpr double VECTOR_CPU_FACTOR = 0.001;  // vectorized CPU factor
   static constexpr double HASH_BUILD_FACTOR = 0.02;   // Hash building cost factor
   static constexpr double HASH_PROBE_FACTOR = 0.01;   // Hash probing cost factor

@@ -111,6 +111,9 @@ class Dictionary {
 
   size_t size() const { return m_next_id.load(); }
 
+  // Reverse lookup without allocating a temporary string for a scalar probe.
+  int64 find_id(std::string_view value) const;
+
   // A mask must not cache an allocated ID before store() publishes its entry.
   size_t publish_next_id() const {
     std::shared_lock lock(m_dict_mutex);

@@ -988,8 +988,8 @@ Plan AggregationPushDown::try_push_below_join(Plan agg_node) {
     if (node->estimated_rows > 0 && node->estimated_rows != HA_POS_ERROR) return node->estimated_rows;
     return node->original_path ? node->original_path->num_output_rows() : -1.0;
   };
-  const auto placement = AggregatePlacementCost::estimate(rows(join->children[push_side].get()), rows(join.get()),
-                                                          rows(agg), push_side == 1);
+  const auto placement = RpdCostEstimator::AggregatePlacementCost::estimate(
+      rows(join->children[push_side].get()), rows(join.get()), rows(agg), push_side == 1);
   bool push = placement.push_aggregation();
   // A/B baseline after all semantic guards; never bypass correctness checks.
   DBUG_EXECUTE_IF("rapid_aggregate_placement_legacy", { push = true; });

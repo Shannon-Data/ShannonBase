@@ -315,6 +315,8 @@ enum class QueryMemoryOperator : uint8_t {
   kHashAggregate,
   kHashJoin,
   kWindow,
+  kNestedLoop,
+  kBatchTransport,
   kCount,
 };
 
@@ -328,6 +330,10 @@ inline const char *query_memory_operator_name(QueryMemoryOperator op) {
       return "hash_join";
     case QueryMemoryOperator::kWindow:
       return "window";
+    case QueryMemoryOperator::kNestedLoop:
+      return "nested_loop";
+    case QueryMemoryOperator::kBatchTransport:
+      return "batch_transport";
     case QueryMemoryOperator::kCount:
       return "invalid";
   }
@@ -575,6 +581,8 @@ class PoolMemoryResource final : public std::pmr::memory_resource {
 };
 
 /** Charges allocations, including simultaneous old/new buffers on growth. */
+enum class AllocationFailure { kNone, kBudgetExhausted, kPoolExhausted };
+
 class BoundedMemoryResource final : public std::pmr::memory_resource {
  public:
   explicit BoundedMemoryResource(size_t limit, std::pmr::memory_resource *upstream = nullptr)
@@ -586,6 +594,19 @@ class BoundedMemoryResource final : public std::pmr::memory_resource {
     Reservation() = default;
     Reservation(BoundedMemoryResource *resource, size_t bytes) : m_resource(resource), m_bytes(bytes) {
       if (m_resource) m_resource->acquire(bytes);
+    }
+    bool try_acquire(BoundedMemoryResource *resource, size_t bytes) noexcept {
+      reset();
+      resource->m_last_failure = AllocationFailure::kNone;
+      if (bytes > resource->m_limit - resource->m_used) {
+        resource->m_last_failure = AllocationFailure::kBudgetExhausted;
+        return false;
+      }
+      resource->m_used += bytes;
+      resource->m_peak = std::max(resource->m_peak, resource->m_used);
+      m_resource = resource;
+      m_bytes = bytes;
+      return true;
     }
     Reservation(const Reservation &) = delete;
     Reservation &operator=(const Reservation &) = delete;
@@ -618,10 +639,45 @@ class BoundedMemoryResource final : public std::pmr::memory_resource {
   // Raises the hard boundary after the operator's reservation grew. Never
   // lowers it below what is already charged, so an in-flight buffer survives.
   void set_limit(size_t limit) { m_limit = std::max(limit, m_used); }
+  // Non-throwing allocation for explicitly sized buffers; nullptr means the
+  // budget or the pool is exhausted; last_failure() distinguishes them.
+  // do_allocate() keeps the throwing pmr
+  // contract for containers.
+  AllocationFailure last_failure() const noexcept { return m_last_failure; }
+  void *try_allocate(size_t bytes, size_t alignment = alignof(std::max_align_t)) noexcept {
+    m_last_failure = AllocationFailure::kNone;
+    if (bytes > m_limit - m_used) {
+      m_last_failure = AllocationFailure::kBudgetExhausted;
+      return nullptr;
+    }
+    void *pointer = nullptr;
+    if (m_upstream == &m_pool_memory) {
+      pointer = m_pool_memory.try_allocate(bytes, alignment);
+    } else {
+      // A foreign upstream can only report exhaustion by throwing.
+      try {
+        pointer = m_upstream->allocate(bytes, alignment);
+      } catch (const std::bad_alloc &) {
+        m_last_failure = AllocationFailure::kPoolExhausted;
+        return nullptr;
+      }
+    }
+    if (pointer == nullptr) {
+      m_last_failure = AllocationFailure::kPoolExhausted;
+      return nullptr;
+    }
+    m_used += bytes;
+    m_peak = std::max(m_peak, m_used);
+    return pointer;
+  }
 
  private:
   void acquire(size_t bytes) {
-    if (bytes > m_limit - m_used) throw std::bad_alloc();
+    m_last_failure = AllocationFailure::kNone;
+    if (bytes > m_limit - m_used) {
+      m_last_failure = AllocationFailure::kBudgetExhausted;
+      throw std::bad_alloc();
+    }
     m_used += bytes;
     m_peak = std::max(m_peak, m_used);
   }
@@ -630,13 +686,8 @@ class BoundedMemoryResource final : public std::pmr::memory_resource {
     m_used -= bytes;
   }
   void *do_allocate(size_t bytes, size_t alignment) override {
-    acquire(bytes);
-    try {
-      return m_upstream->allocate(bytes, alignment);
-    } catch (...) {
-      release(bytes);
-      throw;
-    }
+    if (void *pointer = try_allocate(bytes, alignment)) return pointer;
+    throw std::bad_alloc();  // Required by the std::pmr contract.
   }
   void do_deallocate(void *pointer, size_t bytes, size_t alignment) override {
     m_upstream->deallocate(pointer, bytes, alignment);
@@ -647,6 +698,7 @@ class BoundedMemoryResource final : public std::pmr::memory_resource {
   PoolMemoryResource m_pool_memory;
   std::pmr::memory_resource *m_upstream;
   size_t m_used{0}, m_peak{0};
+  AllocationFailure m_last_failure{AllocationFailure::kNone};
 };
 }  // namespace ResMgmt
 }  // namespace ShannonBase

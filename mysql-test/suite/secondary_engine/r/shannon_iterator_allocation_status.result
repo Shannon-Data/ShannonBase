@@ -1,0 +1,19 @@
+CREATE DATABASE iterator_allocation_status;
+USE iterator_allocation_status;
+CREATE TABLE t (id INT PRIMARY KEY, value INT) SECONDARY_ENGINE=rapid;
+INSERT INTO t VALUES (1,10),(2,NULL),(3,30),(4,NULL);
+ALTER TABLE t SECONDARY_LOAD;
+SET use_secondary_engine=FORCED;
+SET secondary_engine_cost_threshold=0;
+SET optimizer_switch='hypergraph_optimizer=off';
+# A refused streaming aggregate column must abort, including COUNT(nullable).
+SET debug='+d,rapid_aggregate_column_allocation_failure';
+SELECT COUNT(value),SUM(value) FROM t;
+ERROR HY000: Rapid aggregate column allocation failed
+SET debug='-d,rapid_aggregate_column_allocation_failure';
+# The same session must produce the correct NULL-sensitive result after refusal.
+SELECT COUNT(value),SUM(value) FROM t;
+COUNT(value)	SUM(value)
+2	40
+SET use_secondary_engine=OFF;
+DROP DATABASE iterator_allocation_status;

@@ -19,6 +19,7 @@ Variable_name	Value
 rapid_async_column_threshold	16
 rapid_change_propagation_mode	CAPTURE
 rapid_gc_interval_scn	1000000
+rapid_materialize_spill_size_max	8589934592
 rapid_max_purger_timeout	30
 rapid_memory_size_max	2147483648
 rapid_min_versions_for_purge	10
@@ -55,6 +56,7 @@ Variable_name	Value
 rapid_async_column_threshold	11
 rapid_change_propagation_mode	CAPTURE
 rapid_gc_interval_scn	1000000
+rapid_materialize_spill_size_max	8589934592
 rapid_max_purger_timeout	30
 rapid_memory_size_max	2147483648
 rapid_min_versions_for_purge	10
@@ -93,6 +95,7 @@ Variable_name	Value
 rapid_async_column_threshold	10
 rapid_change_propagation_mode	CAPTURE
 rapid_gc_interval_scn	1000000
+rapid_materialize_spill_size_max	8589934592
 rapid_max_purger_timeout	30
 rapid_memory_size_max	2147483648
 rapid_min_versions_for_purge	10
@@ -129,6 +132,7 @@ Variable_name	Value
 rapid_async_column_threshold	10
 rapid_change_propagation_mode	CAPTURE
 rapid_gc_interval_scn	1000000
+rapid_materialize_spill_size_max	8589934592
 rapid_max_purger_timeout	30
 rapid_memory_size_max	2147483648
 rapid_min_versions_for_purge	10

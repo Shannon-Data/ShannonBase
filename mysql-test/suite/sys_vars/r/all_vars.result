@@ -77,6 +77,8 @@ rapid_change_propagation_mode
 rapid_change_propagation_mode
 rapid_gc_interval_scn
 rapid_gc_interval_scn
+rapid_materialize_spill_size_max
+rapid_materialize_spill_size_max
 rapid_max_purger_timeout
 rapid_max_purger_timeout
 rapid_memory_size_max

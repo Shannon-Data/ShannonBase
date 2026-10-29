@@ -176,7 +176,7 @@ class VectorizedHashJoinIterator final : public RowIterator, public BatchReadabl
   // Parents cache this decision in their own Init(), i.e. before this operator
   // has read a single row, so it cannot depend on whether the build side later
   // spills: ReadBatch() serves the ordered-merge output too.
-  bool SupportsBatchRead() const override { return !m_columns_hold_row_images; }
+  bool SupportsBatchRead() const override;
   int ReadBatch(std::pmr::vector<ColumnChunk> &col_chunks, size_t capacity, size_t &rows_read) override;
   bool PushbackBatchTail(const std::pmr::vector<ColumnChunk> &chunks, size_t from_row, size_t total_rows) override;
 
@@ -189,6 +189,10 @@ class VectorizedHashJoinIterator final : public RowIterator, public BatchReadabl
     size_t probe_row_idx{0};
     bool is_null_complemented{false};
   };
+
+  int ReadImpl();
+  int ReadBatchImpl(std::pmr::vector<ColumnChunk> &col_chunks, size_t capacity, size_t &rows_read);
+  bool PushbackBatchTailImpl(const std::pmr::vector<ColumnChunk> &chunks, size_t from_row, size_t total_rows);
 
   // Build hash table from build input
   bool BuildHashTable();

@@ -26,6 +26,8 @@ SET debug='+d,rapid_operator_budget_floor';
 EXPLAIN FORMAT=TREE SELECT COUNT(*),SUM(b.v) FROM a JOIN b ON a.k=b.k;
 --let $assert_query = SELECT COUNT(*),SUM(b.v) FROM a JOIN b ON a.k=b.k
 --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+# Charging the legacy full record width can favor NLJ over a spilling hash
+# join. Keep the result-parity check as well as the distinct EXPLAIN plan.
 SET debug='+d,rapid_legacy_join_width_cost';
 --replace_regex $elide_costs_and_rows
 EXPLAIN FORMAT=TREE SELECT COUNT(*),SUM(b.v) FROM a JOIN b ON a.k=b.k;

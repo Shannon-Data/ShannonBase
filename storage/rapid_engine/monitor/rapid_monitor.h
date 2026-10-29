@@ -133,6 +133,10 @@ struct Metrics {
   uint64_t query_hash_join_bloom_disabled_total{0};
   uint64_t query_vectorized_aggregate_spill_rows_total{0};
   uint64_t query_vectorized_aggregate_batch_rows_total{0};
+  uint64_t query_vectorized_sort_batch_rows_total{0};
+  uint64_t query_vectorized_ref_batch_rows_total{0};
+  uint64_t query_vectorized_stream_batch_rows_total{0};
+  uint64_t query_vectorized_materialize_batch_rows_total{0};
   uint64_t query_vectorized_aggregate_row_materializations_total{0};
   uint64_t query_vectorized_aggregate_dict_cache_hits_total{0};
   uint64_t query_vectorized_aggregate_dict_cache_misses_total{0};
@@ -196,6 +200,10 @@ struct RapidCounters {
   std::atomic<uint64_t> query_hash_join_bloom_disabled_total{0};
   std::atomic<uint64_t> query_vectorized_aggregate_spill_rows_total{0};
   std::atomic<uint64_t> query_vectorized_aggregate_batch_rows_total{0};
+  std::atomic<uint64_t> query_vectorized_sort_batch_rows_total{0};
+  std::atomic<uint64_t> query_vectorized_ref_batch_rows_total{0};
+  std::atomic<uint64_t> query_vectorized_stream_batch_rows_total{0};
+  std::atomic<uint64_t> query_vectorized_materialize_batch_rows_total{0};
   std::atomic<uint64_t> query_vectorized_aggregate_row_materializations_total{0};
   std::atomic<uint64_t> query_vectorized_aggregate_dict_cache_hits_total{0};
   std::atomic<uint64_t> query_vectorized_aggregate_dict_cache_misses_total{0};

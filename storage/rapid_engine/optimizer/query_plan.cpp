@@ -26,6 +26,10 @@
 #include "storage/rapid_engine/optimizer/query_plan.h"
 #include "sql/dd/cache/dictionary_client.h"    // Dictionary_client
 #include "storage/innobase/include/dict0dd.h"  //dd_table_is_partitioned
+#include "storage/rapid_engine/executor/iterators/materialize_iterator.h"
+#include "storage/rapid_engine/executor/iterators/nested_loop_iterator.h"
+#include "storage/rapid_engine/executor/iterators/sort_iterator.h"
+#include "storage/rapid_engine/executor/iterators/stream_iterator.h"
 #include "storage/rapid_engine/optimizer/optimizer.h"
 
 #include "sql/filesort.h"                                    // Filesort
@@ -108,7 +112,8 @@ void PropagateCostAndRows(const PlanNode *node, AccessPath *path) {
  * subplans, leaving `original` and its MaterializePathParameters untouched.
  */
 AccessPath *RebuildMaterializeWithOperands(THD *thd, AccessPath *original,
-                                           const std::vector<std::unique_ptr<PlanNode>> &inner_plans) {
+                                           const std::vector<std::unique_ptr<PlanNode>> &inner_plans,
+                                           bool batch_requested = false) {
   if (original == nullptr || original->type != AccessPath::MATERIALIZE) return original;
   const MaterializePathParameters *source = original->materialize().param;
   if (source == nullptr) return original;
@@ -134,6 +139,7 @@ AccessPath *RebuildMaterializeWithOperands(THD *thd, AccessPath *original,
   auto *path = new (thd->mem_root) AccessPath(*original);
   path->materialize().param = param;
   path->iterator = nullptr;
+  path->vectorized = batch_requested && Executor::VectorizedMaterializeIterator::CanVectorize(path);
   return path;
 }
 }  // namespace
@@ -249,6 +255,8 @@ AccessPath *NestLoopJoin::ToAccessPath(THD *thd) {
       (this->original_path != nullptr && this->original_path->type == AccessPath::NESTED_LOOP_JOIN)
           ? this->original_path->nested_loop_join().join_type
           : JoinType::INNER;
+  // Read() on the existing vectorized children already supplies TABLE buffers.
+  // A row-consuming join must not disable their internal batch scans/filters.
   path->nested_loop_join().outer = (children.size() >= 1 && children[0]) ? children[0]->ToAccessPath(thd) : nullptr;
   path->nested_loop_join().inner = (children.size() >= 2 && children[1]) ? children[1]->ToAccessPath(thd) : nullptr;
   path->nested_loop_join().pfs_batch_mode = this->pfs_batch_mode;
@@ -256,8 +264,17 @@ AccessPath *NestLoopJoin::ToAccessPath(THD *thd) {
   path->nested_loop_join().join_predicate = this->source_join_predicate;
   path->nested_loop_join().equijoin_predicates = this->equijoin_predicates;
 
-  path->vectorized = AllChildrenVectorized({path->nested_loop_join().outer, path->nested_loop_join().inner});
+  PropagateCostAndRows(this, path);
+  path->vectorized = !row_mode && Executor::SelectVectorizedNestedLoop(thd, path, batch_output_requested);
   path->secondary_engine_data = nullptr;
+  if (path->vectorized) {
+    auto *params = new (thd->mem_root) RapidNestedLoopParameters;
+    params->memory_budget = std::min<size_t>(ShannonBase::Utils::Util::hash_join_memory_budget(thd), 2 * 1024 * 1024);
+    DBUG_EXECUTE_IF("rapid_nlj_tiny_budget", { params->memory_budget = 64; });
+    path->secondary_engine_data = params;
+  }
+  produces_batches = path->vectorized;
+  PropagateCostAndRows(this, path);
   return path;
 }
 
@@ -347,8 +364,10 @@ AccessPath *HashJoin::ToAccessPath(THD *thd) {
     spill, not a prediction that this one will.
   */
   const bool materialized_input =
-      (path->hash_join().outer != nullptr && path->hash_join().outer->type == AccessPath::MATERIALIZE) ||
-      (path->hash_join().inner != nullptr && path->hash_join().inner->type == AccessPath::MATERIALIZE);
+      (path->hash_join().outer != nullptr && path->hash_join().outer->type == AccessPath::MATERIALIZE &&
+       !path->hash_join().outer->vectorized) ||
+      (path->hash_join().inner != nullptr && path->hash_join().inner->type == AccessPath::MATERIALIZE &&
+       !path->hash_join().inner->vectorized);
   /*
     A materialized derived table (e.g. the deduplicated derived table MySQL
     builds for NOT EXISTS) is a MySQL temp table, read through
@@ -375,16 +394,67 @@ std::string HashJoin::ToString(int indent) const {
 
 AccessPath *LocalAgg::ToAccessPath(THD *thd) {
   // Predict batch transport before recursively building the child AccessPath.
-  const auto can_batches = [](const auto &self, const PlanNode *node) -> bool {
-    if (node == nullptr || !node->vectorized) return false;
+  const auto can_batches = [thd](const auto &self, const PlanNode *node) -> bool {
+    if (node == nullptr || !node->vectorized || node->row_mode) return false;
     switch (node->type()) {
-      case PlanNode::Type::SCAN:
-      case PlanNode::Type::HASH_JOIN:
-        return true;
+      case PlanNode::Type::SCAN: {
+        const auto *scan = static_cast<const ScanTable *>(node);
+        return scan->source_table != nullptr && scan->source_table->part_info == nullptr &&
+               Executor::CanBatchRecords(scan->source_table);
+      }
+      case PlanNode::Type::HASH_JOIN: {
+        if (node->original_path == nullptr) return false;
+        bool supported = true;
+        WalkTablesUnderAccessPath(
+            node->original_path,
+            [&](TABLE *table) {
+              supported = supported && Executor::CanBatchRecords(table);
+              return false;
+            },
+            true);
+        return supported;
+      }
+      case PlanNode::Type::NESTED_LOOP_JOIN:
+        return Executor::SelectVectorizedNestedLoop(thd, node->original_path,
+                                                    static_cast<const NestLoopJoin *>(node)->batch_output_requested);
+      case PlanNode::Type::REF_LOOKUP:
+        return Executor::SelectVectorizedLookup(thd, node->original_path);
+      case PlanNode::Type::STREAM: {
+        if (node->original_path == nullptr || node->children.size() != 1 || !self(self, node->children[0].get()))
+          return false;
+        const auto &stream = node->original_path->stream();
+        return Executor::VectorizedStreamIterator::CanVectorize(stream.temp_table_param, stream.table,
+                                                                stream.provide_rowid);
+      }
+      case PlanNode::Type::MATERIALIZE_DERIVED:
+        return static_cast<const MaterializeDerived *>(node)->batch_output_requested &&
+               Executor::VectorizedMaterializeIterator::CanVectorize(node->original_path);
+      case PlanNode::Type::SORT: {
+        const auto *sort = static_cast<const Sort *>(node);
+        return node->children.size() == 1 && self(self, node->children[0].get()) &&
+               Executor::VectorizedSortIterator::CanVectorize(sort->filesort, sort->unwrap_rollup,
+                                                              sort->tables_to_get_rowid_for) &&
+               Executor::VectorizedSortIterator::CanVectorizeBatches(sort->filesort);
+      }
+      case PlanNode::Type::TOP_N: {
+        const auto *top = static_cast<const TopN *>(node);
+        if (top->offset != 0 || top->original_path == nullptr || node->children.size() != 1 ||
+            !self(self, node->children[0].get()))
+          return false;
+        const auto &sort = top->original_path->sort();
+        return Executor::VectorizedSortIterator::CanVectorize(top->filesort, sort.unwrap_rollup,
+                                                              sort.tables_to_get_rowid_for) &&
+               Executor::VectorizedSortIterator::CanVectorizeBatches(top->filesort);
+      }
       case PlanNode::Type::FILTER: {
         const auto *filter = static_cast<const Filter *>(node);
         return node->children.size() == 1 && self(self, node->children[0].get()) &&
                (filter->condition == nullptr || !filter->condition->has_subquery());
+      }
+      case PlanNode::Type::LIMIT: {
+        const auto *limit = static_cast<const Limit *>(node);
+        return !limit->count_all_rows && !limit->reject_multiple_rows && node->children.size() == 1 &&
+               self(self, node->children[0].get());
       }
       default:
         return false;
@@ -404,9 +474,57 @@ AccessPath *LocalAgg::ToAccessPath(THD *thd) {
   // row it spills, which costs more than MySQL's sorted-stream aggregate. Hand those
   // back: the child then builds in row mode, so no conversion is paid either side.
   const bool fits_budget = FitsHashMemoryBudget(thd);
+  const PlanNode *input = children.empty() ? nullptr : children[0].get();
+  const bool expanded_transport =
+      input != nullptr &&
+      (input->type() == PlanNode::Type::SORT || input->type() == PlanNode::Type::TOP_N ||
+       input->type() == PlanNode::Type::STREAM || input->type() == PlanNode::Type::MATERIALIZE_DERIVED ||
+       input->type() == PlanNode::Type::LIMIT || input->type() == PlanNode::Type::REF_LOOKUP ||
+       input->type() == PlanNode::Type::NESTED_LOOP_JOIN);
+  bool consumes_batches = true;
+  if (expanded_transport && strategy == AggregateStrategy::STREAMING) {
+    // A new batch-capable edge must not route DISTINCT/expression streaming
+    // aggregates into an implementation that will immediately request rows.
+    for (Item_func *function : aggregates) {
+      auto *sum = down_cast<Item_sum *>(function);
+      Item *argument = sum->arg_count == 0 ? nullptr : sum->get_arg(0)->real_item();
+      Field *field = argument != nullptr && argument->type() == Item::FIELD_ITEM
+                         ? down_cast<Item_field *>(argument)->field
+                         : nullptr;
+      if (sum->has_with_distinct()) consumes_batches = false;
+      if (sum->sum_func() == Item_sum::COUNT_FUNC) {
+        if (field == nullptr && sum->arg_count != 0 &&
+            (argument == nullptr || !argument->const_item() || argument->is_null()))
+          consumes_batches = false;
+      } else if (field == nullptr || field->is_flag_set(UNSIGNED_FLAG) ||
+                 (field->type() != MYSQL_TYPE_LONG && field->type() != MYSQL_TYPE_LONGLONG &&
+                  field->type() != MYSQL_TYPE_FLOAT && field->type() != MYSQL_TYPE_DOUBLE &&
+                  field->type() != MYSQL_TYPE_NEWDECIMAL) ||
+                 (sum->sum_func() != Item_sum::SUM_FUNC && sum->sum_func() != Item_sum::MIN_FUNC &&
+                  sum->sum_func() != Item_sum::MAX_FUNC && sum->sum_func() != Item_sum::AVG_FUNC)) {
+        consumes_batches = false;
+      }
+    }
+    if (input->original_path != nullptr) {
+      for (Item *key : group_by) {
+        Item *item = key->real_item();
+        Field *field = item->type() == Item::FIELD_ITEM ? down_cast<Item_field *>(item)->field : nullptr;
+        bool found = false;
+        WalkTablesUnderAccessPath(
+            input->original_path,
+            [&](TABLE *table) {
+              found = found || (field != nullptr && table == field->table &&
+                                bitmap_is_set(table->read_set, field->field_index()));
+              return false;
+            },
+            true);
+        consumes_batches = consumes_batches && found;
+      }
+    }
+  }
   // Only the edge feeding this aggregate changes transport; a row-mode child
   // propagates the request further itself (see Filter::ToAccessPath).
-  const bool vectorize = temptable || !native_fallback_safe || (plan_batches && fits_budget);
+  const bool vectorize = temptable || !native_fallback_safe || (plan_batches && fits_budget && consumes_batches);
   if (!vectorize && !children.empty() && children[0] != nullptr) children[0]->row_mode = true;
 
   // Build the child before committing JOIN grouping metadata. If child
@@ -515,6 +633,10 @@ AccessPath *TopN::ToAccessPath(THD *thd) {
   // native form. Whether Rapid runs this sort is decided by CanVectorize()
   // where the iterator is built.
   sort_path->vectorized = AllChildrenVectorized({sort_path->sort().child});
+  produces_batches = offset == 0 && sort_path->vectorized && !children.empty() && children[0]->produces_batches &&
+                     Executor::VectorizedSortIterator::CanVectorize(filesort, sort_path->sort().unwrap_rollup,
+                                                                    sort_path->sort().tables_to_get_rowid_for) &&
+                     Executor::VectorizedSortIterator::CanVectorizeBatches(filesort);
   sort_path->secondary_engine_data = nullptr;
 
   if (offset == 0) return sort_path;
@@ -596,6 +718,10 @@ AccessPath *Sort::ToAccessPath(THD *thd) {
   // native form. Whether Rapid runs this sort is decided by CanVectorize()
   // where the iterator is built.
   path->vectorized = AllChildrenVectorized({path->sort().child});
+  produces_batches =
+      path->vectorized && !children.empty() && children[0]->produces_batches &&
+      Executor::VectorizedSortIterator::CanVectorize(path->sort().filesort, unwrap_rollup, tables_to_get_rowid_for) &&
+      Executor::VectorizedSortIterator::CanVectorizeBatches(path->sort().filesort);
   path->secondary_engine_data = nullptr;
   PropagateCostAndRows(this, path);
   return path;
@@ -618,6 +744,8 @@ AccessPath *Limit::ToAccessPath(THD *thd) {
       this->original_path ? this->original_path->limit_offset().send_records_override : nullptr;
 
   path->vectorized = AllChildrenVectorized({path->limit_offset().child});
+  produces_batches = path->vectorized && !count_all_rows && !reject_multiple_rows && !children.empty() &&
+                     children[0]->produces_batches;
   path->secondary_engine_data = nullptr;
   PropagateCostAndRows(this, path);
   return path;
@@ -703,7 +831,10 @@ std::string MaterializeCTE::ToString(int indent) const {
 }
 
 AccessPath *MaterializeDerived::ToAccessPath(THD *thd) {
-  return RebuildMaterializeWithOperands(thd, original_path, inner_plans);
+  AccessPath *path =
+      RebuildMaterializeWithOperands(thd, original_path, inner_plans, !row_mode && batch_output_requested);
+  produces_batches = path != nullptr && path->vectorized;
+  return path;
 }
 
 std::string MaterializeDerived::ToString(int indent) const {
@@ -722,6 +853,17 @@ std::string MaterializeDerived::ToString(int indent) const {
     }
   }
   return result;
+}
+
+AccessPath *RefLookup::ToAccessPath(THD *thd) {
+  if (original_path == nullptr) return nullptr;
+  auto *path = new (thd->mem_root) AccessPath(*original_path);
+  path->iterator = nullptr;
+  path->secondary_engine_data = nullptr;
+  path->vectorized = !row_mode && Executor::SelectVectorizedLookup(thd, path);
+  produces_batches = path->vectorized;
+  PropagateCostAndRows(this, path);
+  return path;
 }
 
 AccessPath *MySQLNative::ToAccessPath(THD *) {
@@ -764,8 +906,10 @@ AccessPath *Stream::ToAccessPath(THD *thd) {
       NewStreamingAccessPath(thd, child, source.join, source.temp_table_param, source.table, source.ref_slice);
   path->stream().provide_rowid = source.provide_rowid;
   path->has_group_skip_scan = child->has_group_skip_scan;
-  // The streaming wrapper is a MySQL row iterator; only the block below it runs
-  // vectorized, so the flag stays off here and the child keeps its own.
+  path->vectorized =
+      !row_mode && children[0]->produces_batches &&
+      Executor::VectorizedStreamIterator::CanVectorize(source.temp_table_param, source.table, source.provide_rowid);
+  produces_batches = path->vectorized;
   PropagateCostAndRows(this, path);
   return path;
 }

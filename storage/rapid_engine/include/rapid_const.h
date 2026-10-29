@@ -123,7 +123,7 @@ constexpr size_t SHANNON_LARGE_DELETE_COUNT = 10000;
 constexpr size_t SHANNON_DEFAULT_GC_INTERVAL_SCN = 1000000;
 constexpr size_t SHANNON_DEFAULT_GC_INTERVAL_TIME = 30;
 
-const uint SHANNON_MAX_COLUMNS = 256;
+constexpr uint SHANNON_MAX_COLUMNS = 256;
 
 constexpr uint MAX_N_FIELD_PARALLEL = 128;
 constexpr uint DEFAULT_N_FIELD_PARALLEL = 16;

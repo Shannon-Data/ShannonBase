@@ -68,7 +68,11 @@
 #include "storage/rapid_engine/executor/iterators/aggregate_iterator.h"
 #include "storage/rapid_engine/executor/iterators/hash_join_iterator.h"
 #include "storage/rapid_engine/executor/iterators/iterator.h"
+#include "storage/rapid_engine/executor/iterators/limit_iterator.h"
+#include "storage/rapid_engine/executor/iterators/materialize_iterator.h"
+#include "storage/rapid_engine/executor/iterators/nested_loop_iterator.h"
 #include "storage/rapid_engine/executor/iterators/sort_iterator.h"
+#include "storage/rapid_engine/executor/iterators/stream_iterator.h"
 #include "storage/rapid_engine/executor/iterators/table_scan_iterator.h"
 #include "storage/rapid_engine/executor/iterators/window_iterator.h"
 #include "storage/rapid_engine/handler/ha_shannon_rapid.h"  // ha_rapid, for explain_extra
@@ -323,6 +327,35 @@ static RowIterator *FindSingleIteratorOfType(AccessPath *path, AccessPath::Type 
   }
 }
 
+static bool IsSimpleBatchMaterializeInput(const AccessPath *path) {
+  if (path == nullptr || !path->vectorized) return false;
+  switch (path->type) {
+    case AccessPath::TABLE_SCAN:
+    case AccessPath::INDEX_SCAN:
+      return true;
+    case AccessPath::FILTER:
+      return !(path->filter().condition->used_tables() & (RAND_TABLE_BIT | OUTER_REF_TABLE_BIT)) &&
+             !path->filter().condition->has_subquery() && IsSimpleBatchMaterializeInput(path->filter().child);
+    case AccessPath::SORT:
+      return IsSimpleBatchMaterializeInput(path->sort().child);
+    case AccessPath::LIMIT_OFFSET:
+      return !path->limit_offset().count_all_rows && !path->limit_offset().reject_multiple_rows &&
+             IsSimpleBatchMaterializeInput(path->limit_offset().child);
+    default:
+      return false;
+  }
+}
+
+static bool CanUseDirectBatchMaterialize(const AccessPath *path) {
+  if (!path->vectorized || !ShannonBase::Executor::VectorizedMaterializeIterator::CanVectorize(path)) return false;
+  const auto *param = path->materialize().param;
+  if (param->m_operands.size() != 1 || param->reject_multiple_rows || MaterializeIsDoingDeduplication(param->table))
+    return false;
+  const auto &input = param->m_operands[0];
+  return input.copy_items && input.join != nullptr && IsSimpleBatchMaterializeInput(input.subquery_path) &&
+         ShannonBase::Executor::VectorizedStreamIterator::CanVectorize(input.temp_table_param, param->table, false);
+}
+
 /***************************************************************************************************************/
 /* this function is identical with CreateIteratorFromAccessPath in sql join optimizer
  * but we replace some Iterators with vectorized execution supported iterators. and replace
@@ -382,14 +415,33 @@ unique_ptr_destroy_only<RowIterator> PathGenerator::CreateIteratorFromAccessPath
   if (top_path == nullptr) return nullptr;
 
   size_t memory_operators = 0;
-  WalkAccessPaths(
-      top_path, top_join, WalkAccessPathPolicy::ENTIRE_TREE, [&memory_operators](const AccessPath *path, const JOIN *) {
-        if (path->vectorized && (path->type == AccessPath::SORT || path->type == AccessPath::HASH_JOIN ||
-                                 path->type == AccessPath::AGGREGATE || path->type == AccessPath::TEMPTABLE_AGGREGATE ||
-                                 path->type == AccessPath::WINDOW))
-          ++memory_operators;
-        return false;
-      });
+  WalkAccessPaths(top_path, top_join, WalkAccessPathPolicy::ENTIRE_TREE,
+                  [&memory_operators](const AccessPath *path, const JOIN *) {
+                    if (!path->vectorized) return false;
+                    switch (path->type) {
+                      case AccessPath::SORT:
+                      case AccessPath::HASH_JOIN:
+                      case AccessPath::AGGREGATE:
+                      case AccessPath::TEMPTABLE_AGGREGATE:
+                      case AccessPath::WINDOW:
+                      case AccessPath::NESTED_LOOP_JOIN:
+                      case AccessPath::REF:
+                      case AccessPath::REF_OR_NULL:
+                      case AccessPath::EQ_REF:
+                      case AccessPath::STREAM:
+                      case AccessPath::LIMIT_OFFSET:
+                        ++memory_operators;
+                        break;
+                      case AccessPath::MATERIALIZE:
+                        // The direct path also owns a projection iterator, which has no
+                        // AccessPath node but must share the same construction allowance.
+                        memory_operators += CanUseDirectBatchMaterialize(path) ? 2 : 1;
+                        break;
+                      default:
+                        break;
+                    }
+                    return false;
+                  });
   ResMgmt::PlanningMemoryScope memory_scope(thd, ResMgmt::system_memory_limits().query, memory_operators);
 
   unique_ptr_destroy_only<RowIterator> ret;
@@ -785,8 +837,16 @@ unique_ptr_destroy_only<RowIterator> PathGenerator::CreateIteratorFromAccessPath
           continue;
         }
 
-        iterator = NewIterator<NestedLoopIterator>(thd, mem_root, std::move(job.children[0]),
-                                                   std::move(job.children[1]), param.join_type, param.pfs_batch_mode);
+        if (path->vectorized && path->secondary_engine_data != nullptr) {
+          const auto *params = static_cast<const RapidNestedLoopParameters *>(path->secondary_engine_data);
+          iterator = NewIterator<ShannonBase::Executor::VectorizedNestedLoopIterator>(
+              thd, mem_root, std::move(job.children[0]), std::move(job.children[1]), param.join_type,
+              param.pfs_batch_mode, GetUsedTables(path, true), params->memory_budget, path->num_output_rows());
+          path->secondary_engine_data = nullptr;
+        } else {
+          iterator = NewIterator<NestedLoopIterator>(thd, mem_root, std::move(job.children[0]),
+                                                     std::move(job.children[1]), param.join_type, param.pfs_batch_mode);
+        }
         break;
       }
       case AccessPath::NESTED_LOOP_SEMIJOIN_WITH_DUPLICATE_REMOVAL: {
@@ -1094,6 +1154,13 @@ unique_ptr_destroy_only<RowIterator> PathGenerator::CreateIteratorFromAccessPath
         } else if (join != nullptr) {
           send_records = &join->send_records;
         }
+        if (path->vectorized && !param.count_all_rows && !param.reject_multiple_rows) {
+          iterator = NewIterator<ShannonBase::Executor::VectorizedLimitIterator>(
+              thd, mem_root, std::move(job.children[0]), param.limit, param.offset, send_records,
+              GetUsedTables(param.child, true),
+              std::min<size_t>(ShannonBase::Utils::Util::hash_join_memory_budget(thd), 2 * 1024 * 1024));
+          break;
+        }
         iterator =
             NewIterator<LimitOffsetIterator>(thd, mem_root, std::move(job.children[0]), param.limit, param.offset,
                                              param.count_all_rows, param.reject_multiple_rows, send_records);
@@ -1104,6 +1171,14 @@ unique_ptr_destroy_only<RowIterator> PathGenerator::CreateIteratorFromAccessPath
         if (job.children.is_null()) {
           SetupJobsForChildren(mem_root, param.child, param.join, eligible_for_batch_mode, &job, &todo);
           continue;
+        }
+        if (path->vectorized && ShannonBase::Executor::VectorizedStreamIterator::CanVectorize(
+                                    param.temp_table_param, param.table, param.provide_rowid)) {
+          iterator = NewIterator<ShannonBase::Executor::VectorizedStreamIterator>(
+              thd, mem_root, std::move(job.children[0]), param.temp_table_param, param.table, param.provide_rowid,
+              param.join, param.ref_slice, GetUsedTables(param.child, true),
+              std::min<size_t>(ShannonBase::Utils::Util::hash_join_memory_budget(thd), 2 * 1024 * 1024));
+          break;
         }
         iterator = NewIterator<StreamingIterator>(thd, mem_root, std::move(job.children[0]), param.temp_table_param,
                                                   param.table, param.provide_rowid, param.join, param.ref_slice);
@@ -1137,6 +1212,20 @@ unique_ptr_destroy_only<RowIterator> PathGenerator::CreateIteratorFromAccessPath
                             {}});
           }
           continue;
+        }
+        if (CanUseDirectBatchMaterialize(path)) {
+          const auto &input = param->m_operands[0];
+          // A pure projection can populate the column store directly. No
+          // SQL row copy or temporary-table handler is needed on this path.
+          iterator = NewIterator<ShannonBase::Executor::VectorizedStreamIterator>(
+              thd, mem_root, std::move(job.children[1]), input.temp_table_param, param->table, false, input.join,
+              param->ref_slice, GetUsedTables(input.subquery_path, true),
+              std::min<size_t>(ShannonBase::Utils::Util::hash_join_memory_budget(thd), 2 * 1024 * 1024));
+          iterator = NewIterator<ShannonBase::Executor::VectorizedMaterializeIterator>(
+              thd, mem_root, std::move(iterator), param->table, ShannonBase::Utils::Util::hash_join_memory_budget(thd),
+              param->limit_rows);
+          job.children[0].reset();
+          break;
         }
         unique_ptr_destroy_only<RowIterator> table_iterator = std::move(job.children[0]);
         Mem_root_array<materialize_iterator::Operand> operands(thd->mem_root, param->m_operands.size());
@@ -1173,6 +1262,10 @@ unique_ptr_destroy_only<RowIterator> PathGenerator::CreateIteratorFromAccessPath
 
         iterator = unique_ptr_destroy_only<RowIterator>(
             materialize_iterator::CreateIterator(thd, std::move(operands), param, std::move(table_iterator), subjoin));
+        if (path->vectorized && ShannonBase::Executor::VectorizedMaterializeIterator::CanVectorize(path)) {
+          iterator = NewIterator<ShannonBase::Executor::VectorizedMaterializeIterator>(
+              thd, mem_root, std::move(iterator), param->table, ShannonBase::Utils::Util::hash_join_memory_budget(thd));
+        }
 
         break;
       }
@@ -1327,6 +1420,13 @@ unique_ptr_destroy_only<RowIterator> PathGenerator::CreateIteratorFromAccessPath
       return nullptr;
     }
 
+    if (path->vectorized &&
+        (path->type == AccessPath::REF || path->type == AccessPath::REF_OR_NULL || path->type == AccessPath::EQ_REF)) {
+      iterator = NewIterator<ShannonBase::Executor::VectorizedRefIterator>(
+          thd, mem_root, std::move(iterator), GetUsedTables(path, true),
+          std::min<size_t>(ShannonBase::Utils::Util::hash_join_memory_budget(thd), 2 * 1024 * 1024),
+          path->num_output_rows(), "ref");
+    }
     binding_transaction.BindPath(path, iterator.get());
     *job.destination = std::move(iterator);
   }

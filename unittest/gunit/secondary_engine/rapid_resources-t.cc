@@ -9,14 +9,21 @@
 #include <limits>
 #include <thread>
 #include <vector>
+#include "sql/iterators/timing_iterator.h"
 #include "storage/rapid_engine/utils/memory_pool.h"
 #include "storage/rapid_engine/utils/utils.h"
 
 #include "storage/rapid_engine/executor/iterators/iterator.h"
-#include "storage/rapid_engine/resource_management/res_mgmt.h"
+#include "storage/rapid_engine/executor/iterators/window_iterator.h"
 #include "storage/rapid_engine/resource_management/io_scheduler.h"
+#include "storage/rapid_engine/resource_management/res_mgmt.h"
 
 namespace ShannonBase::ResMgmt {
+// NewIterator constructs both ordinary and EXPLAIN ANALYZE iterators on MEM_ROOT.
+// An over-aligned bitmap member must not raise their alignment above its guarantee.
+static_assert(alignof(Executor::VectorizedWindowIterator) <= ALIGN_SIZE(1));
+static_assert(alignof(TimingIterator<Executor::VectorizedWindowIterator>) <= ALIGN_SIZE(1));
+
 TEST(RapidResourcesTest, SystemPoolPolicyUsesActualRootCapacity) {
   constexpr size_t mib = 1024 * 1024;
   const auto limits = system_memory_limits(2048 * mib);
@@ -48,8 +55,7 @@ TEST_F(RapidSystemPoolTest, QueryMemoryBudgetExplicitlyListsSupportedOperators) 
   EXPECT_STREQ("invalid", query_memory_operator_name(QueryMemoryOperator::kCount));
 
   int query = 0;
-  auto grant = reserve_query_memory(&query, QueryMemoryOperator::kSort,
-                                   system_memory_limits().operation / 2);
+  auto grant = reserve_query_memory(&query, QueryMemoryOperator::kSort, system_memory_limits().operation / 2);
   EXPECT_TRUE(grant);
   EXPECT_GT(grant.bytes(), 0u);
 }
@@ -71,6 +77,20 @@ TEST_F(RapidSystemPoolTest, QueryBuffersAllocateFromPoolAndReturnCapacity) {
   EXPECT_EQ(0u, system_pool_stats().used);
   EXPECT_GE(system_pool_stats().peak, 1024u);
 }
+TEST_F(RapidSystemPoolTest, ExplicitAllocationReportsRealPoolExhaustion) {
+  auto occupied = allocate_system_buffer(system_pool_stats().capacity);
+  ASSERT_TRUE(occupied);
+  BoundedMemoryResource resource(4096);
+  bit_array_t bits(resource);
+  EXPECT_FALSE(bits.grow(1));
+  EXPECT_EQ(AllocationFailure::kPoolExhausted, resource.last_failure());
+  EXPECT_EQ(nullptr, bits.data);
+  EXPECT_EQ(0u, resource.used());
+  occupied.reset();
+  ASSERT_TRUE(bits.grow(1));
+  EXPECT_EQ(AllocationFailure::kNone, resource.last_failure());
+}
+
 TEST_F(RapidSystemPoolTest, ExhaustionHasNoHeapFallbackAndFreeAllowsReuse) {
   const size_t capacity = system_pool_stats().capacity;
   auto buffer = allocate_system_buffer(capacity);
@@ -168,7 +188,8 @@ TEST(RapidResourcesTest, WorkAdmissionAndMoveReleaseExactlyOnce) {
   auto moved = std::move(first);
   first.reset();
   EXPECT_EQ(1u, governor.snapshot(WorkClass::AP).active);
-  moved.reset(); moved.reset();
+  moved.reset();
+  moved.reset();
   EXPECT_EQ(0u, governor.snapshot(WorkClass::AP).active);
   EXPECT_EQ(1u, governor.snapshot(WorkClass::AP).rejected);
   EXPECT_TRUE(governor.try_acquire(WorkClass::AP));
@@ -179,16 +200,19 @@ TEST(RapidResourcesTest, BackgroundClassesCannotBorrowEachOthersQuota) {
   auto sync = governor.try_acquire(WorkClass::SYNC);
   auto maint = governor.try_acquire(WorkClass::MAINT);
   auto ap = governor.try_acquire(WorkClass::AP);
-  EXPECT_TRUE(sync); EXPECT_TRUE(maint); EXPECT_TRUE(ap);
+  EXPECT_TRUE(sync);
+  EXPECT_TRUE(maint);
+  EXPECT_TRUE(ap);
   EXPECT_FALSE(governor.try_acquire(WorkClass::SYNC));
-  EXPECT_FALSE(governor.configure(IsolationMode::OFF, {1,1,1}));
+  EXPECT_FALSE(governor.configure(IsolationMode::OFF, {1, 1, 1}));
 }
 TEST(RapidResourcesTest, ObserveCountsWithoutRejectingAtLimit) {
   WorkGovernor governor;
   ASSERT_TRUE(governor.configure(IsolationMode::OBSERVE, {1, 1, 1}));
   auto first = governor.try_acquire(WorkClass::AP);
   auto second = governor.try_acquire(WorkClass::AP);
-  EXPECT_TRUE(first); EXPECT_TRUE(second);
+  EXPECT_TRUE(first);
+  EXPECT_TRUE(second);
   EXPECT_EQ(2u, governor.snapshot(WorkClass::AP).peak);
 }
 static bool wait_for_governor_queue(WorkGovernor &governor, size_t count) {
@@ -202,9 +226,10 @@ TEST(RapidResourcesTest, CancelledHeadDoesNotBlockNextWaiter) {
   ASSERT_TRUE(governor.configure(IsolationMode::SOFT, {1, 1, 1}));
   auto active = governor.try_acquire(WorkClass::SYNC);
   std::atomic<bool> cancel{false};
-  auto first = std::async(std::launch::async, [&] { return governor.acquire(WorkClass::SYNC, [&] {return cancel.load();}); });
+  auto first =
+      std::async(std::launch::async, [&] { return governor.acquire(WorkClass::SYNC, [&] { return cancel.load(); }); });
   EXPECT_TRUE(wait_for_governor_queue(governor, 1));
-  auto second = std::async(std::launch::async, [&] { return governor.acquire(WorkClass::SYNC, [] {return false;}); });
+  auto second = std::async(std::launch::async, [&] { return governor.acquire(WorkClass::SYNC, [] { return false; }); });
   EXPECT_TRUE(wait_for_governor_queue(governor, 2));
   cancel.store(true);
   const bool cancelled = first.wait_for(std::chrono::seconds(2)) == std::future_status::ready;
@@ -225,7 +250,7 @@ TEST(RapidResourcesTest, ShutdownWakesWaitersAndRejectsNewWork) {
   WorkGovernor governor;
   ASSERT_TRUE(governor.configure(IsolationMode::SOFT, {1, 1, 1}));
   auto active = governor.try_acquire(WorkClass::SYNC);
-  auto waiter = std::async(std::launch::async, [&] {return governor.acquire(WorkClass::SYNC, [] {return false;});});
+  auto waiter = std::async(std::launch::async, [&] { return governor.acquire(WorkClass::SYNC, [] { return false; }); });
   EXPECT_TRUE(wait_for_governor_queue(governor, 1));
   governor.stop();
   EXPECT_FALSE(waiter.get());
@@ -239,9 +264,9 @@ TEST(RapidResourcesTest, WaitingWorkIsGrantedInFifoOrder) {
   WorkGovernor governor;
   ASSERT_TRUE(governor.configure(IsolationMode::SOFT, {1, 1, 1}));
   auto active = governor.try_acquire(WorkClass::SYNC);
-  auto first = std::async(std::launch::async, [&] {return governor.acquire(WorkClass::SYNC, [] {return false;});});
+  auto first = std::async(std::launch::async, [&] { return governor.acquire(WorkClass::SYNC, [] { return false; }); });
   EXPECT_TRUE(wait_for_governor_queue(governor, 1));
-  auto second = std::async(std::launch::async, [&] {return governor.acquire(WorkClass::SYNC, [] {return false;});});
+  auto second = std::async(std::launch::async, [&] { return governor.acquire(WorkClass::SYNC, [] { return false; }); });
   EXPECT_TRUE(wait_for_governor_queue(governor, 2));
   active.reset();
   const bool ready = first.wait_for(std::chrono::seconds(2)) == std::future_status::ready;
@@ -251,8 +276,9 @@ TEST(RapidResourcesTest, WaitingWorkIsGrantedInFifoOrder) {
   EXPECT_TRUE(lease);
   EXPECT_EQ(std::future_status::timeout, second.wait_for(std::chrono::milliseconds(20)));
   lease.reset();
-  governor.stop(); // Release/cancel race is legal; either result owns no leaked grant.
-  auto next = second.get(); next.reset();
+  governor.stop();  // Release/cancel race is legal; either result owns no leaked grant.
+  auto next = second.get();
+  next.reset();
   EXPECT_EQ(0u, governor.snapshot(WorkClass::SYNC).active);
 }
 
@@ -518,7 +544,7 @@ TEST(RapidResourcesTest, ColumnGrowthRefusalPreservesRowsAndMovesCharge) {
     int32_t value = 73;
     ASSERT_TRUE(column.add(reinterpret_cast<const uchar *>(&value), sizeof(value), false));
     ASSERT_TRUE(column.add(nullptr, 0, true));
-    EXPECT_THROW(column.grow(8), std::bad_alloc);
+    EXPECT_FALSE(column.grow(8));
     EXPECT_EQ(old_bytes, resource.used());
     EXPECT_EQ(4u, column.capacity());
     EXPECT_EQ(2u, column.size());
@@ -539,6 +565,75 @@ TEST(RapidResourcesTest, ColumnGrowthRefusalPreservesRowsAndMovesCharge) {
   EXPECT_EQ(0u, resource.used());
 }
 
+TEST(RapidResourcesTest, ExplicitAllocationDistinguishesBudgetAndUpstreamFailure) {
+  BoundedMemoryResource resource(16, std::pmr::null_memory_resource());
+  EXPECT_EQ(nullptr, resource.try_allocate(17));
+  EXPECT_EQ(AllocationFailure::kBudgetExhausted, resource.last_failure());
+  EXPECT_EQ(nullptr, resource.try_allocate(8));
+  EXPECT_EQ(AllocationFailure::kPoolExhausted, resource.last_failure());
+  EXPECT_EQ(0u, resource.used());
+  EXPECT_EQ(0u, resource.peak());
+  std::pmr::vector<char> buffer(&resource);
+  EXPECT_FALSE(Executor::TryReserve(buffer, 17));
+  EXPECT_EQ(AllocationFailure::kBudgetExhausted, resource.last_failure());
+  EXPECT_FALSE(Executor::TryReserve(buffer, 8));
+  EXPECT_EQ(AllocationFailure::kPoolExhausted, resource.last_failure());
+}
+
+TEST(RapidResourcesTest, AppendGrowthIsAmortizedAndPreservesValues) {
+  BoundedMemoryResource resource(1 << 20, std::pmr::new_delete_resource());
+  std::pmr::vector<size_t> groups(&resource);
+  size_t reallocations = 0;
+  for (size_t i = 0; i < 4096; ++i) {
+    const size_t capacity = groups.capacity();
+    ASSERT_TRUE(Executor::TryGrow(groups, i + 1));
+    reallocations += groups.capacity() != capacity;
+    groups.push_back(i);
+  }
+  EXPECT_LE(reallocations, 13u);
+  for (size_t i = 0; i < groups.size(); ++i) EXPECT_EQ(i, groups[i]);
+}
+
+TEST(RapidResourcesTest, BudgetedBitArrayRefusalPreservesBitsAndMoveReleasesCharge) {
+  BoundedMemoryResource resource(31, std::pmr::new_delete_resource());
+  {
+    bit_array_t bits(resource);
+    ASSERT_TRUE(bits.grow(1));
+    ASSERT_EQ(64u, bits.rows);
+    Utils::Util::bit_array_set(&bits, 0);
+    Utils::Util::bit_array_set(&bits, 63);
+    EXPECT_EQ(8u, resource.used());
+    EXPECT_FALSE(bits.grow(65));  // 8 live bytes + 24 replacement bytes > 31.
+    EXPECT_EQ(AllocationFailure::kBudgetExhausted, resource.last_failure());
+    EXPECT_EQ(64u, bits.rows);
+    EXPECT_TRUE(Utils::Util::bit_array_get(&bits, 0));
+    EXPECT_TRUE(Utils::Util::bit_array_get(&bits, 63));
+    EXPECT_EQ(8u, resource.used());
+    resource.set_limit(32);
+    ASSERT_TRUE(bits.grow(65));
+    EXPECT_TRUE(Utils::Util::bit_array_get(&bits, 63));
+    EXPECT_FALSE(Utils::Util::bit_array_get(&bits, 64));
+    EXPECT_EQ(24u, resource.used());
+    bit_array_t moved(std::move(bits));
+    EXPECT_EQ(nullptr, bits.data);
+    moved.reset();
+    EXPECT_FALSE(Utils::Util::bit_array_get(&moved, 63));
+    EXPECT_FALSE(moved.grow(SIZE_MAX));
+  }
+  EXPECT_EQ(0u, resource.used());
+}
+
+TEST(RapidResourcesTest, FailedColumnRemainsExplicitlyFailed) {
+  Field_long field(11, true, "value", false);
+  BoundedMemoryResource resource(0, std::pmr::new_delete_resource());
+  Executor::ColumnChunk column(&field, 4, sizeof(int32_t), &resource);
+  EXPECT_TRUE(column.failed());
+  EXPECT_FALSE(column.valid());
+  EXPECT_FALSE(column.add(nullptr, 0, true));
+  EXPECT_EQ(0u, column.size());
+  EXPECT_EQ(AllocationFailure::kBudgetExhausted, resource.last_failure());
+}
+
 TEST(RapidResourcesTest, PackedRowGrowthRefusalKeepsChargedBuffer) {
   BoundedMemoryResource resource(96, std::pmr::new_delete_resource());
   {
@@ -547,7 +642,7 @@ TEST(RapidResourcesTest, PackedRowGrowthRefusalKeepsChargedBuffer) {
     Executor::PrepareBudgetedString(&row, &storage, 32);
     ASSERT_EQ(48u, resource.used());
     ASSERT_FALSE(row.append("row", 3));
-    EXPECT_THROW(Executor::PrepareBudgetedString(&row, &storage, 64), std::bad_alloc);
+    EXPECT_FALSE(Executor::PrepareBudgetedString(&row, &storage, 64));
     EXPECT_EQ(48u, resource.used());
     EXPECT_EQ(3u, row.length());
     EXPECT_EQ(0, std::memcmp(row.ptr(), "row", 3));
@@ -589,12 +684,14 @@ TEST(RapidResourcesTest, UpstreamFailureRollsBackChargeAndKeepsLiveVector) {
 TEST(RapidResourcesTest, FailedAllocationUnwindsReservation) {
   MemoryBudget budget(64, 64);
   int query = 0;
-  EXPECT_THROW({
-    auto lease = budget.reserve(&query, 64);
-    BoundedMemoryResource resource(lease.bytes(), std::pmr::new_delete_resource());
-    std::pmr::vector<unsigned char> bytes(&resource);
-    bytes.resize(65);
-  }, std::bad_alloc);
+  EXPECT_THROW(
+      {
+        auto lease = budget.reserve(&query, 64);
+        BoundedMemoryResource resource(lease.bytes(), std::pmr::new_delete_resource());
+        std::pmr::vector<unsigned char> bytes(&resource);
+        bytes.resize(65);
+      },
+      std::bad_alloc);
   EXPECT_EQ(0u, budget.reserved());
 }
 }  // namespace ShannonBase::ResMgmt

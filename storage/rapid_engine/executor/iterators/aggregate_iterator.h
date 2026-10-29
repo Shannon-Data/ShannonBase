@@ -373,24 +373,22 @@ class VectorizedAggregateIterator final : public RowIterator, public ResMgmt::Ev
     size_t limit_bytes() const { return m_limit_bytes; }
     size_t used_bytes() const { return m_used_bytes; }
     size_t peak_bytes() const { return m_peak_bytes; }
+    ResMgmt::AllocationFailure last_failure() const { return m_last_failure; }
     size_t failed_allocation_bytes() const { return m_failed_allocation_bytes; }
 
    private:
     void *do_allocate(size_t bytes, size_t alignment) override {
-      // Overflow-safe hard-boundary check. We reject the allocation before
-      // touching the upstream allocator, so retained HASH state can never
-      // cross m_limit_bytes.
+      m_last_failure = ResMgmt::AllocationFailure::kNone;
       if (bytes > m_limit_bytes || m_used_bytes > m_limit_bytes - bytes) {
         m_failed_allocation_bytes = bytes;
-        throw std::bad_alloc();
+        m_last_failure = ResMgmt::AllocationFailure::kBudgetExhausted;
+        throw std::bad_alloc();  // std::pmr adapter; converted at TryAllocation.
       }
-
-      void *ptr = nullptr;
-      try {
-        ptr = m_upstream->allocate(bytes, alignment);
-      } catch (const std::bad_alloc &) {
+      void *ptr = m_pool_memory.try_allocate(bytes, alignment);
+      if (!ptr) {
         m_failed_allocation_bytes = bytes;
-        throw;
+        m_last_failure = ResMgmt::AllocationFailure::kPoolExhausted;
+        throw std::bad_alloc();
       }
       m_used_bytes += bytes;
       m_peak_bytes = std::max(m_peak_bytes, m_used_bytes);
@@ -412,6 +410,7 @@ class VectorizedAggregateIterator final : public RowIterator, public ResMgmt::Ev
     size_t m_used_bytes{0};
     size_t m_peak_bytes{0};
     size_t m_failed_allocation_bytes{0};
+    ResMgmt::AllocationFailure m_last_failure{ResMgmt::AllocationFailure::kNone};
     ResMgmt::PoolMemoryResource m_pool_memory;
     std::pmr::memory_resource *m_upstream{nullptr};
   };
@@ -583,7 +582,9 @@ class VectorizedAggregateIterator final : public RowIterator, public ResMgmt::Ev
   bool m_vectorization_enabled{true};
 
   std::unique_ptr<HashArena> CreateHashArena();
-  void SaveNextGroupRow();
+  bool InitImpl();
+  int ReadImpl();
+  bool SaveNextGroupRow();
   // Core processing methods
   void SetRollupLevel(int level);
 
@@ -648,6 +649,7 @@ class VectorizedAggregateIterator final : public RowIterator, public ResMgmt::Ev
   bool CanMaterializeBatchRows() const;
   bool CanBuildHashGroupKeyFromBatch() const;
   bool CanUseBatchGrouping() const;
+  bool ReserveHashGroupKey(std::pmr::string *key) const;
   bool BuildHashGroupKey(std::pmr::string *key) const;
   bool BuildHashGroupKeyFromBatch(size_t row_idx, std::pmr::string *key);
   bool CaptureHashGroupOrderValues(HashGroupState *group) const;
@@ -665,11 +667,11 @@ class VectorizedAggregateIterator final : public RowIterator, public ResMgmt::Ev
   // Vectorization setup and analysis
   void InitializeVectorization();
   bool AnalyzeAggregatesForVectorization();
-  void SetupColumnChunks();
+  bool SetupColumnChunks();
   bool EnsureBatchCapacity(size_t capacity);
   void UpdateBatchSizeFromPerformance(double processing_time_ms);
 
-  void SetupBatchChunks();
+  bool SetupBatchChunks();
   void ResolveGroupKeyFields();
   bool RestoreGroupKeyField(size_t row_idx);
 

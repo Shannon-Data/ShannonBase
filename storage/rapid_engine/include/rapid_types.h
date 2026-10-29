@@ -28,6 +28,7 @@
 #include <cassert>
 #include <cstring>
 #include <limits>
+#include <new>
 #include <utility>
 
 #include "field_types.h"          //for MYSQL_TYPE_XXX
@@ -37,6 +38,7 @@
 
 #include "storage/rapid_engine/include/rapid_arch_inf.h"
 #include "storage/rapid_engine/include/rapid_const.h"
+#include "storage/rapid_engine/resource_management/res_mgmt.h"
 
 namespace ShannonBase {
 // used for SHANNON_DB_TRX_ID FIELD.
@@ -61,12 +63,19 @@ extern MEM_ROOT rapid_mem_root;
 // the memory object for all rapid engine.
 class MemoryObject {};
 
-typedef struct alignas(CACHE_LINE_SIZE) BitArray {
+// Keep the descriptor naturally aligned: it is embedded in iterators allocated
+// on MEM_ROOT, which only guarantees 8-byte alignment. SIMD kernels operate on
+// the separately allocated data buffer with unaligned loads/stores.
+typedef struct BitArray {
   BitArray() = delete;
 
   explicit BitArray(size_t num_rows) : rows(num_rows), size((num_rows + 7) / 8), data(new uint8_t[size]) {
     std::memset(data, 0x0, size);
   }
+
+  // Starts empty. grow() uses the operator budget and reports failure explicitly.
+  explicit BitArray(ResMgmt::BoundedMemoryResource &memory) noexcept
+      : rows(0), size(0), data(nullptr), memory(&memory) {}
 
   // A caller-owned pooled buffer; the owner also owns this descriptor.
   BitArray(size_t num_rows, uint8_t *buffer)
@@ -74,9 +83,9 @@ typedef struct alignas(CACHE_LINE_SIZE) BitArray {
     std::memset(data, 0, size);
   }
 
-  BitArray(const BitArray &other) : rows(other.rows), size(other.size) {
+  BitArray(const BitArray &other) : rows(other.rows), size(other.size), memory(other.memory) {
     if (size > 0) {
-      data = new uint8_t[size];
+      data = memory ? static_cast<uint8_t *>(memory->allocate(size, alignof(uint8_t))) : new uint8_t[size];
       std::memcpy(data, other.data, size);
     }
   }
@@ -85,10 +94,9 @@ typedef struct alignas(CACHE_LINE_SIZE) BitArray {
       : rows(std::exchange(other.rows, 0)),
         size(std::exchange(other.size, 0)),
         data(std::exchange(other.data, nullptr)),
-        owns_data(std::exchange(other.owns_data, true)) {}
-  ~BitArray() {
-    if (owns_data) delete[] data;
-  }
+        owns_data(std::exchange(other.owns_data, true)),
+        memory(std::exchange(other.memory, nullptr)) {}
+  ~BitArray() { release_data(); }
 
   BitArray &operator=(const BitArray &other) {
     if (this != &other) {
@@ -100,7 +108,8 @@ typedef struct alignas(CACHE_LINE_SIZE) BitArray {
 
   BitArray &operator=(BitArray &&other) noexcept {
     if (this != &other) {
-      if (owns_data) delete[] data;
+      release_data();
+      memory = std::exchange(other.memory, nullptr);
       owns_data = std::exchange(other.owns_data, true);
       data = std::exchange(other.data, nullptr);
       rows = std::exchange(other.rows, 0);
@@ -124,6 +133,27 @@ typedef struct alignas(CACHE_LINE_SIZE) BitArray {
     BitArray b(rows);
     b.reset();
     return b;
+  }
+
+  // Strong failure guarantee: no bits, capacity or budget charges change when
+  // growth is refused. Overflow is checked before rounding the byte count.
+  bool grow(size_t num_rows) noexcept {
+    if (rows >= num_rows) return true;
+    if (num_rows > SIZE_MAX - 7) return false;
+    const size_t doubled = rows > (SIZE_MAX - 64) / 2 ? SIZE_MAX - 7 : rows * 2 + 64;
+    const size_t capacity = std::max(num_rows, doubled);
+    const size_t bytes = (capacity + 7) / 8;
+    auto *buffer = memory ? static_cast<uint8_t *>(memory->try_allocate(bytes, alignof(uint8_t)))
+                          : new (std::nothrow) uint8_t[bytes];
+    if (!buffer) return false;
+    std::memset(buffer, 0, bytes);
+    if (data) std::memcpy(buffer, data, size);
+    release_data();
+    data = buffer;
+    rows = capacity;
+    size = bytes;
+    owns_data = true;
+    return true;
   }
 
   void not_inplace() {
@@ -412,14 +442,24 @@ typedef struct alignas(CACHE_LINE_SIZE) BitArray {
     std::swap(rows, other.rows);
     std::swap(size, other.size);
     std::swap(owns_data, other.owns_data);
+    std::swap(memory, other.memory);
   }
 
   size_t rows{0};
   size_t size{0};
   uint8_t *data{nullptr};
   bool owns_data{true};
+  ResMgmt::BoundedMemoryResource *memory{nullptr};
 
  private:
+  void release_data() noexcept {
+    if (!owns_data || !data) return;
+    if (memory)
+      memory->deallocate(data, size, alignof(uint8_t));
+    else
+      delete[] data;
+  }
+
   inline void mask_tail_byte() noexcept {
     const size_t tail_bits = rows % 8;
     if (tail_bits != 0 && size > 0) {

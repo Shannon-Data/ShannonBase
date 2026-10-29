@@ -25,9 +25,12 @@
 */
 #include "storage/rapid_engine/optimizer/rules/prune.h"
 
-#include "sql/item.h"     //Item
+#include "sql/item.h"  //Item
+#include "sql/join_optimizer/materialize_path_parameters.h"
+#include "sql/join_optimizer/walk_access_paths.h"
 #include "sql/sql_lex.h"  //query_expression
 #include "sql/sql_list.h"
+#include "sql/temp_table_param.h"
 
 #include "storage/rapid_engine/imcs/predicate.h"       //Predicate, Compound_Predicate
 #include "storage/rapid_engine/imcs/table.h"           //RpdTable
@@ -813,7 +816,75 @@ std::map<std::string, std::set<uint32_t>> ProjectionPruning::collect_referenced_
 
   if (!root) return columns;
 
+  bool sql_bindings = false;
+  WalkPlan(root.get(), [&](PlanNode *node) {
+    sql_bindings = sql_bindings || node->type() == PlanNode::Type::MYSQL_NATIVE ||
+                   node->type() == PlanNode::Type::NESTED_LOOP_JOIN || node->type() == PlanNode::Type::REF_LOOKUP ||
+                   node->type() == PlanNode::Type::STREAM || node->type() == PlanNode::Type::MATERIALIZE_DERIVED;
+  });
+
   auto collect_ref_columns_func = [&](PlanNode *node) {
+    if (sql_bindings && node->type() == PlanNode::Type::SCAN) {
+      // SQL lookup keys, cached groups and temp-table copies can reference
+      // columns outside the visible IR expressions. Keep MySQL's requested
+      // fields at these boundaries, rather than dropping an implicit input.
+      TABLE *table = static_cast<ScanTable *>(node)->source_table;
+      if (table != nullptr && table->read_set != nullptr) {
+        const std::string key = std::string(table->s->db.str ? table->s->db.str : "") + "." +
+                                (table->s->table_name.str ? table->s->table_name.str : "");
+        for (uint i = 0; i < table->s->fields; ++i)
+          if (bitmap_is_set(table->read_set, i)) columns[key].insert(i);
+      }
+    }
+    const auto collect_copies = [&](const Temp_table_param *param) {
+      if (param == nullptr) return;
+      if (param->items_to_copy != nullptr)
+        for (const Func_ptr &copy : *param->items_to_copy) collect_from_item(copy.func(), columns);
+      for (const Copy_field &copy : param->copy_fields) {
+        Field *field = copy.from_field();
+        if (field != nullptr && field->table != nullptr) {
+          const TABLE *table = field->table;
+          columns[std::string(table->s->db.str ? table->s->db.str : "") + "." +
+                  (table->s->table_name.str ? table->s->table_name.str : "")]
+              .insert(field->field_index());
+        }
+      }
+    };
+    if (node->original_path != nullptr &&
+        (node->type() == PlanNode::Type::STREAM || node->type() == PlanNode::Type::MATERIALIZE_DERIVED ||
+         node->type() == PlanNode::Type::MYSQL_NATIVE || node->type() == PlanNode::Type::REF_LOOKUP ||
+         node->type() == PlanNode::Type::NESTED_LOOP_JOIN)) {
+      WalkAccessPaths(node->original_path, nullptr, WalkAccessPathPolicy::ENTIRE_TREE,
+                      [&](AccessPath *path, const JOIN *) {
+                        Index_lookup *lookup = nullptr;
+                        switch (path->type) {
+                          case AccessPath::REF:
+                            lookup = path->ref().ref;
+                            break;
+                          case AccessPath::REF_OR_NULL:
+                            lookup = path->ref_or_null().ref;
+                            break;
+                          case AccessPath::EQ_REF:
+                            lookup = path->eq_ref().ref;
+                            break;
+                          case AccessPath::FILTER:
+                            collect_from_item(path->filter().condition, columns);
+                            break;
+                          case AccessPath::STREAM:
+                            collect_copies(path->stream().temp_table_param);
+                            break;
+                          case AccessPath::MATERIALIZE:
+                            for (const auto &operand : path->materialize().param->m_operands)
+                              collect_copies(operand.temp_table_param);
+                            break;
+                          default:
+                            break;
+                        }
+                        if (lookup != nullptr)
+                          for (uint i = 0; i < lookup->key_parts; ++i) collect_from_item(lookup->items[i], columns);
+                        return false;
+                      });
+    }
     switch (node->type()) {
       case PlanNode::Type::HASH_JOIN:
       case PlanNode::Type::NESTED_LOOP_JOIN: {  // Collect columns from join conditions
@@ -890,7 +961,8 @@ void ProjectionPruning::collect_from_item(Item *item, std::map<std::string, std:
       TABLE *table = field->table;
 
       // Construct unique key: "db.table"
-      std::string key = std::string(table->s->db.str) + "." + std::string(table->s->table_name.str);
+      std::string key = std::string(table->s->db.str ? table->s->db.str : "") + "." +
+                        (table->s->table_name.str ? table->s->table_name.str : "");
       // Insert the field index (0-based)
       columns[key].insert(field->field_index());
     }

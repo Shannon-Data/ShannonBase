@@ -1,0 +1,86 @@
+CREATE DATABASE rapid_nlj;
+USE rapid_nlj;
+SET use_secondary_engine=OFF;
+CREATE TABLE o (id INT PRIMARY KEY) SECONDARY_ENGINE=rapid;
+CREATE TABLE i (id INT PRIMARY KEY, k INT, amount INT, label VARCHAR(20), KEY(k)) SECONDARY_ENGINE=rapid;
+INSERT INTO o VALUES (1),(2),(3),(4);
+SET cte_max_recursion_depth=2000;
+INSERT INTO i WITH RECURSIVE seq AS
+(SELECT 1 n UNION ALL SELECT n+1 FROM seq WHERE n<1600)
+SELECT n,IF(n<=1200,1,2),IF(MOD(n,7)=0,NULL,n),IF(MOD(n,11)=0,NULL,CONCAT('v',MOD(n,5))) FROM seq;
+INSERT INTO i VALUES (1601,NULL,7,'null-key');
+SET cte_max_recursion_depth=DEFAULT;
+ANALYZE TABLE o,i;
+Table	Op	Msg_type	Msg_text
+rapid_nlj.o	analyze	status	OK
+rapid_nlj.i	analyze	status	OK
+ALTER TABLE o SECONDARY_LOAD;
+ALTER TABLE i SECONDARY_LOAD;
+SET optimizer_switch='hypergraph_optimizer=off';
+SET use_secondary_engine=FORCED;
+# Adaptive transport: indexed inner probes, more than one output batch.
+EXPLAIN FORMAT=TREE SELECT COUNT(*),SUM(i.amount),COUNT(i.label)
+FROM o STRAIGHT_JOIN i FORCE INDEX(k) ON i.k=o.id;
+EXPLAIN
+-> Vectorized aggregate: count(0), sum(i.amount), count(i.label)  (...)
+    -> Vectorized nested loop inner join  (...)
+        -> Vectorized table scan on o in secondary engine Rapid  (...)
+        -> Index lookup on i using k (k=o.id) in secondary engine Rapid  (...)
+
+Warnings:
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+SELECT COUNT(*),SUM(i.amount),COUNT(i.label) FROM o STRAIGHT_JOIN i FORCE INDEX(k) ON i.k=o.id;
+COUNT(*)	SUM(i.amount)	COUNT(i.label)
+1600	1098058	1455
+# aggregate consumed NLJ batches (1 expected): 1
+# A row-consuming aggregate keeps vectorized scans below the nested loop.
+SET optimizer_switch='hypergraph_optimizer=on';
+Warnings:
+Warning	1287	The hypergraph optimizer is highly experimental and is meant for testing only. Do not enable it unless you are a MySQL developer.
+SET SESSION debug='+d,rapid_force_vectorized_nlj';
+EXPLAIN FORMAT=TREE SELECT o.id,SUM(CASE WHEN i.amount IS NULL THEN 0 ELSE i.amount*2 END)
+FROM o LEFT JOIN i FORCE INDEX(k) ON i.k=o.id GROUP BY o.id;
+EXPLAIN
+-> Group aggregate: sum((case when (i.amount is null) then 0 else (i.amount * 2) end))  (...)
+    -> Nested loop left join  (...)
+        -> Vectorized table scan on o in secondary engine Rapid  (...)
+        -> Index lookup on i using k (k=o.id) in secondary engine Rapid  (...)
+
+Warnings:
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+SET SESSION debug='-d,rapid_force_vectorized_nlj';
+SET optimizer_switch='hypergraph_optimizer=off';
+# REF_OR_NULL probes must retain the NULL-key range on every outer row.
+# Semi and anti queries preserve existence rather than inner fan-out.
+# Outer join: NULL-complemented rows after the last matching batch.
+EXPLAIN FORMAT=TREE SELECT COUNT(*),COUNT(i.id),SUM(i.amount),COUNT(i.label)
+FROM o LEFT JOIN i FORCE INDEX(k) ON i.k=o.id;
+EXPLAIN
+-> Vectorized aggregate: count(0), count(i.id), sum(i.amount), count(i.label)  (...)
+    -> Vectorized nested loop left join  (...)
+        -> Vectorized table scan on o in secondary engine Rapid  (...)
+        -> Index lookup on i using k (k=o.id) in secondary engine Rapid  (...)
+
+Warnings:
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+# Native transport remains a correct fallback.
+SET SESSION debug='+d,rapid_disable_vectorized_nlj';
+SET SESSION debug='-d,rapid_disable_vectorized_nlj';
+# Reinitialize the join after an early LIMIT on grouped output.
+PREPARE nlj_stmt FROM 'SELECT o.id,SUM(i.amount) FROM o LEFT JOIN i FORCE INDEX(k) ON i.k=o.id GROUP BY o.id ORDER BY o.id LIMIT 2';
+EXECUTE nlj_stmt;
+id	SUM(i.amount)
+1	617658
+2	480400
+EXECUTE nlj_stmt;
+id	SUM(i.amount)
+1	617658
+2	480400
+DEALLOCATE PREPARE nlj_stmt;
+# An insufficient auxiliary budget reports a SQL error.
+SET SESSION debug='+d,rapid_force_vectorized_nlj,rapid_nlj_tiny_budget';
+SELECT COUNT(*),SUM(i.amount),COUNT(i.label) FROM o STRAIGHT_JOIN i FORCE INDEX(k) ON i.k=o.id;
+ERROR HY000: Rapid record transport could not preserve its batch input
+SET SESSION debug='-d,rapid_force_vectorized_nlj,rapid_nlj_tiny_budget';
+SET use_secondary_engine=OFF;
+DROP DATABASE rapid_nlj;
