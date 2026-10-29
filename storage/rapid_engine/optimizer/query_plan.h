@@ -79,7 +79,8 @@ class PlanNode : public MemoryObject {
     MATERIALIZE_DERIVED,
     WINDOW,
     MYSQL_NATIVE,
-    STREAM
+    STREAM,
+    REF_LOOKUP
   };
 
   virtual ~PlanNode() = default;
@@ -233,6 +234,8 @@ class NestLoopJoin : public PlanNode {
  public:
   NestLoopJoin() = default;
   ~NestLoopJoin() override = default;
+
+  bool batch_output_requested{false};
 
   // the source join conditions in `Item` format from mysql `JOIN`.
   const JoinPredicate *source_join_predicate{nullptr};
@@ -399,6 +402,7 @@ class MaterializeDerived : public PlanNode {
   ~MaterializeDerived() override = default;
 
   TABLE *tmp_table{nullptr};
+  bool batch_output_requested{false};
   std::vector<std::unique_ptr<PlanNode>> inner_plans;  // UNION
 
   bool has_union{false};          // is UNION
@@ -429,6 +433,13 @@ class Stream : public PlanNode {
  * @brief The MySQLNative node is used to encapsulate original MySQL AccessPaths that are not currently handled by the
  * Rapid engine.
  */
+class RefLookup : public PlanNode {
+ public:
+  AccessPath *ToAccessPath(THD *thd) override;
+  Type type() const override { return Type::REF_LOOKUP; }
+  std::string ToString(int indent = 0) const override { return std::string(indent, ' ') + "→ Batch lookup"; }
+};
+
 class MySQLNative : public PlanNode {
  public:
   MySQLNative() = default;

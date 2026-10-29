@@ -142,8 +142,8 @@ class VectorizedWindowIterator final : public RowIterator {
    * is bounded by kBatchRows regardless of partition size.
    */
   struct ArgColumn {
-    explicit ArgColumn(std::pmr::memory_resource *resource)
-        : ints(resource), reals(resource), decimals(resource), null_bits(resource) {}
+    explicit ArgColumn(ResMgmt::BoundedMemoryResource *resource)
+        : ints(resource), reals(resource), decimals(resource), null_bits(*resource) {}
     Item *item{nullptr};
     ValueKind kind{ValueKind::kNone};
     /// COUNT() only needs to know whether the argument was NULL.
@@ -155,12 +155,12 @@ class VectorizedWindowIterator final : public RowIterator {
     std::pmr::vector<double> reals;
     std::pmr::vector<my_decimal> decimals;
     /// Bit array, bit set == NULL, laid out as Utils::SIMD expects.
-    std::pmr::vector<uint8_t> null_bits;
+    bit_array_t null_bits;
     size_t rows{0};
     size_t null_count{0};
 
     void Clear();
-    void Reserve(size_t rows);
+    bool Reserve(size_t rows);
     void AppendNull();
   };
 
@@ -273,7 +273,7 @@ class VectorizedWindowIterator final : public RowIterator {
   std::pmr::vector<uchar> m_records;
   /// One bit per buffered row: set when the row opens a new ORDER BY peer
   /// group (or a new partition). Same layout as ArgColumn::null_bits.
-  std::pmr::vector<uint8_t> m_new_peer;
+  bit_array_t m_new_peer;
   size_t m_rows{0};
   /// Rows of the current partition ingested so far. Unlike m_rows this is not
   /// reset by a drain, so it is what tells a partition change apart from the

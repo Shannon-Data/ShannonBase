@@ -1,0 +1,85 @@
+# End-to-end batch transport through lookup, sort, projection and materialize.
+--source include/have_debug.inc
+--source include/elide_costs.inc
+CREATE DATABASE rapid_pipeline;
+USE rapid_pipeline;
+SET use_secondary_engine=OFF;
+CREATE TABLE t (id INT PRIMARY KEY, k INT, v INT, s VARCHAR(20), KEY(k)) SECONDARY_ENGINE=rapid;
+SET cte_max_recursion_depth=6000;
+INSERT INTO t WITH RECURSIVE seq AS
+ (SELECT 1 n UNION ALL SELECT n+1 FROM seq WHERE n<5000)
+ SELECT n,IF(MOD(n,19)=0,NULL,MOD(n,17)),IF(MOD(n,13)=0,NULL,n-2500),CONCAT('s',MOD(n,11)) FROM seq;
+SET cte_max_recursion_depth=DEFAULT;
+ANALYZE TABLE t;
+ALTER TABLE t SECONDARY_LOAD;
+SET use_secondary_engine=FORCED;
+SET optimizer_switch='hypergraph_optimizer=on';
+
+--echo # A multi-row REF feeds aggregate chunks without widening its range.
+--replace_regex $elide_costs_and_rows
+EXPLAIN FORMAT=TREE SELECT SUM(v),COUNT(v) FROM t FORCE INDEX(k) WHERE k=1;
+--let $ref_before = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_ref_batch_rows_total', Value, 1)
+SELECT SUM(v),COUNT(v) FROM t FORCE INDEX(k) WHERE k=1;
+--let $ref_after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_ref_batch_rows_total', Value, 1)
+--let $ref_used = `SELECT $ref_after > $ref_before`
+if ($ref_used == 0) {
+  --die REF did not deliver batches
+}
+--echo # REF batch output (1 expected): $ref_used
+--let $assert_query = SELECT SUM(v),COUNT(v) FROM t FORCE INDEX(k) WHERE k=1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_query = SELECT SUM(v),COUNT(v) FROM t FORCE INDEX(k) WHERE k=1 OR k IS NULL
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+
+--echo # Sort/TopN -> LIMIT -> projection -> columnar materialization -> aggregate.
+--replace_regex $elide_costs_and_rows
+EXPLAIN FORMAT=TREE SELECT /*+ NO_MERGE(d) */ SUM(d.v),COUNT(d.k)
+FROM (SELECT v,k FROM t ORDER BY k,id LIMIT 2049) d;
+--let $sort_before = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_sort_batch_rows_total', Value, 1)
+--let $stream_before = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_stream_batch_rows_total', Value, 1)
+--let $mat_before = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_materialize_batch_rows_total', Value, 1)
+SELECT /*+ NO_MERGE(d) */ SUM(d.v),COUNT(d.k) FROM (SELECT v,k FROM t ORDER BY k,id LIMIT 2049) d;
+--let $sort_after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_sort_batch_rows_total', Value, 1)
+--let $stream_after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_stream_batch_rows_total', Value, 1)
+--let $mat_after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_materialize_batch_rows_total', Value, 1)
+--disable_query_log
+--eval SELECT $sort_after > $sort_before AS sort_batches, $stream_after > $stream_before AS stream_batches, $mat_after > $mat_before AS materialize_batches
+--enable_query_log
+--let $pipeline_used = `SELECT $sort_after > $sort_before AND $stream_after > $stream_before AND $mat_after > $mat_before`
+if ($pipeline_used == 0) {
+  --die Sort, projection and materialization must all deliver batches
+}
+--echo # all three batch edges used (1 expected): $pipeline_used
+--let $assert_query = SELECT /*+ NO_MERGE(d) */ SUM(d.v),COUNT(d.k) FROM (SELECT v,k FROM t ORDER BY k,id LIMIT 2049) d
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_query = SELECT /*+ NO_MERGE(d) */ SUM(d.v),COUNT(d.k) FROM (SELECT v,k FROM t ORDER BY k,id LIMIT 29 OFFSET 1023) d
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+
+--echo # Both sort and columnar materialization spill under bounded grants.
+SET SESSION debug='+d,rapid_sort_tiny_budget,rapid_materialize_tiny_cache';
+--let $assert_query = SELECT /*+ NO_MERGE(d) */ SUM(d.v),COUNT(d.k) FROM (SELECT v,k FROM t ORDER BY k,id LIMIT 2049) d
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+SET SESSION debug='-d,rapid_sort_tiny_budget,rapid_materialize_tiny_cache';
+
+--echo # An unencoded string temp-table layout keeps the native aggregate gate.
+--replace_regex $elide_costs_and_rows
+EXPLAIN FORMAT=TREE SELECT /*+ NO_MERGE(d) */ COUNT(d.s) FROM (SELECT s FROM t LIMIT 33) d;
+--let $assert_query = SELECT /*+ NO_MERGE(d) */ COUNT(d.s) FROM (SELECT s FROM t LIMIT 33) d
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+
+--echo # SQL retains deduplication; the completed result is drained before probing.
+SET SESSION tmp_table_size=1024;
+SET SESSION max_heap_table_size=16384;
+SET SESSION internal_tmp_mem_storage_engine=MEMORY;
+--let $assert_query = SELECT /*+ NO_MERGE(d) NO_JOIN_INDEX(d) */ COUNT(*),SUM(d.v) FROM t JOIN (SELECT DISTINCT k,v FROM t) d ON d.k=t.k WHERE t.id<=20
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_query = SELECT /*+ NO_MERGE(d) */ SUM(d.v) FROM (SELECT DISTINCT v FROM t) d
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+
+--echo # Repeated execution resets limits and discards retained lookahead.
+PREPARE pipeline_stmt FROM 'SELECT /*+ NO_MERGE(d) */ SUM(d.v) FROM (SELECT v,k FROM t ORDER BY k,id LIMIT 31 OFFSET 1023) d';
+EXECUTE pipeline_stmt;
+EXECUTE pipeline_stmt;
+DEALLOCATE PREPARE pipeline_stmt;
+SET use_secondary_engine=OFF;
+DROP DATABASE rapid_pipeline;

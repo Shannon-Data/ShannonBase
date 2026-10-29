@@ -53,14 +53,11 @@ namespace {
 // budget refusal must not escape into the SQL executor as a C++ exception.
 template <class Allocate>
 bool AllocateJoinAux(Allocate allocate) {
-  try {
-    DBUG_EXECUTE_IF("rapid_join_aux_bad_alloc", { throw std::bad_alloc(); });
-    allocate();
-    return false;
-  } catch (const std::bad_alloc &) {
-    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid hash join auxiliary memory exhausted");
-    return true;
-  }
+  bool injected_failure{false};
+  DBUG_EXECUTE_IF("rapid_join_aux_bad_alloc", { injected_failure = true; });
+  if (!injected_failure && TryAllocation(allocate)) return false;
+  my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid hash join auxiliary memory exhausted");
+  return true;
 }
 
 inline size_t RetainedBuildLimit(size_t requested, size_t grant) {
@@ -185,8 +182,14 @@ bool VectorizedHashJoinIterator::TryGrowBuildBudget() {
   const size_t current = m_memory_reservation.bytes();
   if (current == 0) return false;
   const size_t want = current > SIZE_MAX / 2 ? current : current * 2;
-  const size_t granted =
-      ResMgmt::grow_query_memory(m_memory_reservation, ResMgmt::QueryMemoryOperator::kHashJoin, want, this);
+  size_t granted = current;
+  // The governor may allocate STL metadata while collecting eviction victims.
+  // Preserve any partial grant obtained before that metadata allocation failed.
+  if (!TryAllocation([&] {
+        granted = ResMgmt::grow_query_memory(m_memory_reservation, ResMgmt::QueryMemoryOperator::kHashJoin, want, this);
+      })) {
+    granted = m_memory_reservation.bytes();
+  }
   if (granted <= current) return false;
   // Grow every child budget, including spill file workspace, inside the
   // already-acquired parent grant. Existing spill-file leases remain valid.
@@ -236,7 +239,7 @@ void VectorizedHashJoinIterator::PublishBloomStats() {
   m_stats.bloom_adaptively_disabled = false;
 }
 
-bool VectorizedHashJoinIterator::Init() try {
+bool VectorizedHashJoinIterator::Init() {
   m_evict_requested = false;
   m_build_growth_exhausted = false;
   m_cardinality.Reset();
@@ -382,22 +385,28 @@ bool VectorizedHashJoinIterator::Init() try {
     auto *eq = condition.join_condition();
     if (eq->compare_type() == STRING_RESULT || eq->compare_type() == ROW_RESULT) {
       const auto *cs = eq->compare_collation();
-      if (condition.max_character_length() > UINT32_MAX / cs->mbmaxlen) throw std::bad_alloc();
+      if (condition.max_character_length() > UINT32_MAX / cs->mbmaxlen) {
+        my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid hash join key exceeds its memory budget");
+        return true;
+      }
       part = std::max(part, size_t(cs->coll->strnxfrmlen(cs, condition.max_character_length() * cs->mbmaxlen)) + 8);
     }
-    if (part > UINT32_MAX - key_bytes) throw std::bad_alloc();
+    if (part > UINT32_MAX - key_bytes) {
+      my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid hash join key exceeds its memory budget");
+      return true;
+    }
     key_bytes += part;
   }
-  PrepareBudgetedString(&m_join_key_buffer, &m_join_key_storage, key_bytes);
+  if (!PrepareBudgetedString(&m_join_key_buffer, &m_join_key_storage, key_bytes)) {
+    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid hash join key exceeds its memory budget");
+    return true;
+  }
 
   m_state = State::BUILDING_HASH_TABLE;
   m_curr_probe_size = 0;
   ResetProbeCursor();
 
   return false;
-} catch (const std::bad_alloc &) {
-  my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid hash join auxiliary memory exhausted");
-  return true;
 }
 
 bool VectorizedHashJoinIterator::PrepareInputWorkspace() {
@@ -465,19 +474,25 @@ bool VectorizedHashJoinIterator::InitializeColumnChunks(const pack_rows::TableCo
       out.emplace_back(field, capacity, field->pack_length(), memory);
     else
       out.emplace_back(field, capacity, memory);
+    // A refused buffer would silently drop the column from the batch layout.
+    return !out.back().failed();
   };
 
   if (input_layout && tables.tables().size() == 1) {
     const pack_rows::Table &packed_table = tables.tables()[0];
     TABLE *table = packed_table.table;
-    chunks.reserve(table->s->fields);
+    if (!TryReserve(chunks, table->s->fields))
+      return AllocationError("Rapid hash join input descriptors allocation failed");
     for (uint field_idx = 0; field_idx < table->s->fields; ++field_idx) {
       Field *field = table->field[field_idx];
       bool required = bitmap_is_set(table->read_set, field_idx);
       for (const pack_rows::Column &column : packed_table.columns) required = required || column.field == field;
-      if (required && !field->is_flag_set(NOT_SECONDARY_FLAG))
-        make_chunk(chunks, field);
-      else
+      if (required && !field->is_flag_set(NOT_SECONDARY_FLAG)) {
+        if (!make_chunk(chunks, field)) {
+          my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid hash join auxiliary memory exhausted");
+          return true;
+        }
+      } else
         chunks.emplace_back(nullptr, 0);
     }
     return false;
@@ -485,11 +500,14 @@ bool VectorizedHashJoinIterator::InitializeColumnChunks(const pack_rows::TableCo
 
   size_t column_count = 0;
   for (const auto &table : tables.tables()) column_count += table.columns.size();
-  chunks.reserve(column_count);
+  if (!TryReserve(chunks, column_count)) return AllocationError("Rapid hash join column descriptors allocation failed");
 
   for (const pack_rows::Table &table : tables.tables()) {
     for (const pack_rows::Column &column : table.columns) {
-      make_chunk(chunks, column.field);
+      if (!make_chunk(chunks, column.field)) {
+        my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid hash join auxiliary memory exhausted");
+        return true;
+      }
     }
   }
 
@@ -567,14 +585,14 @@ bool VectorizedHashJoinIterator::EnsureBuildCapacity(size_t required_rows) {
   // can switch to the partitioned external join instead of failing.
   if (!growth_fits(new_capacity)) return SignalBuildOverflow();
 
-  try {
-    for (ColumnChunk &chunk : m_build_columns) {
-      if (chunk.valid() && !chunk.grow(new_capacity)) return SignalBuildOverflow();
+  // A refused column growth is an allocation failure, not a sizing limit: the
+  // spill path cannot help because the retained columns are what must grow.
+  for (ColumnChunk &chunk : m_build_columns) {
+    if (chunk.valid() && !chunk.grow(new_capacity)) {
+      my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid hash join auxiliary memory exhausted");
+      m_build_error = true;
+      return true;
     }
-  } catch (const std::bad_alloc &) {
-    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid vectorized hash join could not grow build columns");
-    m_build_error = true;
-    return true;
   }
 
   UpdateBuildMemoryPeak();
@@ -605,15 +623,24 @@ std::unique_ptr<VectorizedHashJoinIterator::SpillFile> VectorizedHashJoinIterato
   // are charged separately through m_aux_memory.
   // Reserve before allocating the object so even a rejected run cannot exceed
   // the workspace transiently. All nested partitions share this same budget.
-  constexpr size_t bytes = sizeof(SpillFile) + sizeof(std::FILE) + 4096;
-  auto memory = m_spill_memory.reserve(nullptr, bytes, bytes);
+  // sizeof(SpillFile) already includes its owned 4096-byte stdio buffer.
+  // Charging that buffer twice exhausted the workspace while retaining many
+  // ordered runs, even though the actual buffers still fit the grant.
+  constexpr size_t bytes = sizeof(SpillFile) + sizeof(std::FILE) + 64;
+  ResMgmt::MemoryBudget::Reservation memory;
+  if (!TryAllocation([&] { memory = m_spill_memory.reserve(nullptr, bytes, bytes); })) {
+    AllocationError("Rapid hash join spill reservation metadata allocation failed");
+    return nullptr;
+  }
   if (!memory) {
     // A missing run is the failure signal every caller checks for;
     // unwinding an exception out of here would abort the server instead.
     my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid hash join exhausted its spill workspace");
     return nullptr;
   }
-  return std::make_unique<SpillFile>(std::move(memory));
+  auto file = std::unique_ptr<SpillFile>(new (std::nothrow) SpillFile(std::move(memory)));
+  if (!file) AllocationError("Rapid hash join spill descriptor allocation failed");
+  return file;
 }
 
 VectorizedHashJoinIterator::SpillFile::~SpillFile() { Utils::Util::close_spill_file(file); }
@@ -751,7 +778,6 @@ bool VectorizedHashJoinIterator::EnsureHashCapacity(size_t required_slots, size_
   const size_t limit = m_build_memory.limit();
   const size_t used = CurrentBuildMemoryUsage();
   const size_t slot_bytes = m_hash_slots.capacity() * sizeof(HashSlot);
-  const size_t key_bytes = m_hash_key_arena.capacity();
   if (limit <= used) {
     if (overflowed != nullptr) {
       *overflowed = true;
@@ -768,9 +794,21 @@ bool VectorizedHashJoinIterator::EnsureHashCapacity(size_t required_slots, size_
 
   // A reserve() allocates the replacement while the old buffer is still
   // charged, so both count against the budget right now.
-  const size_t max_slots = (limit - used) / sizeof(HashSlot);
   size_t new_slots = m_hash_slots.capacity();
-  if (required_slots > new_slots) new_slots = grow(new_slots, required_slots, max_slots);
+  const bool grow_slots = required_slots > new_slots;
+  const bool grow_keys = required_keys > m_hash_key_arena.capacity();
+  if (grow_slots) {
+    // Slot growth must leave room for the key of the same row. Taking every
+    // available byte for spare slots can make even the first key fail under a
+    // small grant, including when processing a spilled partition blockwise.
+    const size_t key_growth = grow_keys ? required_keys : 0;
+    const size_t after_releasing_slots = used - slot_bytes;
+    const size_t max_slots = key_growth > limit - after_releasing_slots
+                                 ? 0
+                                 : std::min((limit - used) / sizeof(HashSlot),
+                                            (limit - after_releasing_slots - key_growth) / sizeof(HashSlot));
+    new_slots = grow(new_slots, required_slots, max_slots);
+  }
   if (new_slots < required_slots) {
     if (overflowed != nullptr) {
       *overflowed = true;
@@ -782,16 +820,11 @@ bool VectorizedHashJoinIterator::EnsureHashCapacity(size_t required_slots, size_
   // The slot buffer is replaced by now, so only the old key buffer overlaps
   // the key growth.
   const size_t used_after_slots = used - slot_bytes + new_slots * sizeof(HashSlot);
-  if (limit <= used_after_slots + key_bytes) {
-    if (overflowed != nullptr) {
-      *overflowed = true;
-      return false;
-    }
-    return ReportBuildMemoryLimit();
-  }
-  const size_t max_keys = limit - used_after_slots - key_bytes;
+  // used_after_slots already includes the old key buffer, which remains live
+  // while reserve() allocates its replacement. Do not charge it twice.
+  const size_t max_keys = limit - used_after_slots;
   size_t new_keys = m_hash_key_arena.capacity();
-  if (required_keys > new_keys) new_keys = grow(new_keys, required_keys, max_keys);
+  if (grow_keys) new_keys = grow(new_keys, required_keys, max_keys);
   if (new_keys < required_keys) {
     if (overflowed != nullptr) {
       *overflowed = true;
@@ -800,14 +833,15 @@ bool VectorizedHashJoinIterator::EnsureHashCapacity(size_t required_slots, size_
     return ReportBuildMemoryLimit();
   }
 
-  try {
-    if (new_slots > m_hash_slots.capacity()) m_hash_slots.reserve(new_slots);
-    if (new_keys > m_hash_key_arena.capacity()) m_hash_key_arena.reserve(new_keys);
-  } catch (const std::bad_alloc &) {
-    // Both reserve() calls leave the vector untouched when they throw, so the
-    // table is still valid: spill now instead of failing the statement. The
-    // budget accounting and the resource's own counter can disagree slightly
-    // (allocation rounding), and a statement must not die for that.
+  // A refused reserve leaves both vectors untouched, so the table is still
+  // valid: spill now instead of failing the statement. The budget accounting
+  // and the resource's own counter can disagree slightly (allocation rounding),
+  // and a statement must not die for that.
+  if (!TryReserve(m_hash_slots, new_slots) || !TryReserve(m_hash_key_arena, new_keys)) {
+    if (m_build_memory.last_failure() == ResMgmt::AllocationFailure::kPoolExhausted) {
+      m_build_error = true;
+      return AllocationError("Rapid hash join memory pool exhausted");
+    }
     if (overflowed != nullptr) {
       *overflowed = true;
       return false;
@@ -830,7 +864,9 @@ bool VectorizedHashJoinIterator::SupportsDirectBatchInput(const pack_rows::Table
   return true;
 }
 
-int VectorizedHashJoinIterator::Read() try {
+int VectorizedHashJoinIterator::Read() { return ReadImpl(); }
+
+int VectorizedHashJoinIterator::ReadImpl() {
   while (true) {
     if (m_state == State::BUILDING_HASH_TABLE) {
       if (BuildHashTable()) return 1;
@@ -903,9 +939,6 @@ int VectorizedHashJoinIterator::Read() try {
     }
     return 0;
   }
-} catch (const std::bad_alloc &) {
-  my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid hash join auxiliary memory exhausted");
-  return 1;
 }
 
 bool VectorizedHashJoinIterator::ResetHashTable(double expected_rows) {
@@ -931,13 +964,13 @@ bool VectorizedHashJoinIterator::ResetHashTable(double expected_rows) {
   while (m_hash_table_size <= desired / 2) m_hash_table_size <<= 1;
 
   if (m_hash_table_size > std::numeric_limits<size_t>::max() / (2 * sizeof(size_t))) return true;
-  try {
-    m_hash_buckets.assign(m_hash_table_size, kInvalidHashSlot);
-    m_hash_bucket_tails.assign(m_hash_table_size, kInvalidHashSlot);
-  } catch (const std::bad_alloc &) {
+  // Reserve first: a refused reserve leaves the table untouched.
+  if (!TryReserve(m_hash_buckets, m_hash_table_size) || !TryReserve(m_hash_bucket_tails, m_hash_table_size)) {
     my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid vectorized hash join could not allocate hash buckets");
     return true;
   }
+  m_hash_buckets.assign(m_hash_table_size, kInvalidHashSlot);
+  m_hash_bucket_tails.assign(m_hash_table_size, kInvalidHashSlot);
   return false;
 }
 
@@ -971,12 +1004,9 @@ void VectorizedHashJoinIterator::GrowHashTableIfNeeded() {
   // unreachable, so the join silently returned too few rows.
   std::pmr::vector<size_t> new_buckets(&m_build_memory);
   std::pmr::vector<size_t> new_tails(&m_build_memory);
-  try {
-    new_buckets.assign(new_size, kInvalidHashSlot);
-    new_tails.assign(new_size, kInvalidHashSlot);
-  } catch (const std::bad_alloc &) {
-    return;
-  }
+  if (!TryReserve(new_buckets, new_size) || !TryReserve(new_tails, new_size)) return;
+  new_buckets.assign(new_size, kInvalidHashSlot);
+  new_tails.assign(new_size, kInvalidHashSlot);
   m_hash_buckets.swap(new_buckets);
   m_hash_bucket_tails.swap(new_tails);
   m_hash_table_size = new_size;
@@ -2300,8 +2330,37 @@ void VectorizedHashJoinIterator::UnlockRow() {
   }
 }
 
+bool VectorizedHashJoinIterator::SupportsBatchRead() const {
+  if (m_columns_hold_row_images) return false;
+  // pack_rows snapshots read_set_internal, whereas schema-wide batch consumers
+  // construct their requests from read_set. Optimizer-proven constant fields
+  // (e.g. a.v under WHERE a.v IS NULL) may exist only in the latter. They are
+  // not retained join columns, so preserve them through the scalar SQL path.
+  const auto complete = [](const pack_rows::TableCollection &tables) {
+    for (const auto &entry : tables.tables()) {
+      TABLE *table = entry.table;
+      for (uint i = 0; i < table->s->fields; ++i) {
+        if (!bitmap_is_set(table->read_set, i) || table->field[i]->is_flag_set(NOT_SECONDARY_FLAG)) continue;
+        bool retained = false;
+        for (const auto &column : entry.columns) retained |= column.field == table->field[i];
+        if (!retained) return false;
+      }
+    }
+    return true;
+  };
+  return complete(m_build_input_tables) && complete(m_probe_input_tables);
+}
+
 int VectorizedHashJoinIterator::ReadBatch(std::pmr::vector<ColumnChunk> &col_chunks, size_t capacity,
-                                          size_t &rows_read) try {
+                                          size_t &rows_read) {
+  const int result = ReadBatchImpl(col_chunks, capacity, rows_read);
+  if (result != 0 && result != HA_ERR_END_OF_FILE && !thd()->is_error() && !thd()->killed)
+    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid hash join could not preserve its batch input or output layout");
+  return result;
+}
+
+int VectorizedHashJoinIterator::ReadBatchImpl(std::pmr::vector<ColumnChunk> &col_chunks, size_t capacity,
+                                              size_t &rows_read) {
   rows_read = 0;
   capacity = std::min(capacity, m_batch_size);
 
@@ -2475,20 +2534,19 @@ int VectorizedHashJoinIterator::ReadBatch(std::pmr::vector<ColumnChunk> &col_chu
     return HA_ERR_END_OF_FILE;
   }
   return 0;
-} catch (const std::bad_alloc &) {
-  my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid hash join auxiliary memory exhausted");
-  return 1;
 }
 
 bool VectorizedHashJoinIterator::PushbackBatchTail(const std::pmr::vector<ColumnChunk> &chunks, size_t from_row,
-                                                   size_t total_rows) try {
+                                                   size_t total_rows) {
+  return PushbackBatchTailImpl(chunks, from_row, total_rows);
+}
+
+bool VectorizedHashJoinIterator::PushbackBatchTailImpl(const std::pmr::vector<ColumnChunk> &chunks, size_t from_row,
+                                                       size_t total_rows) {
   assert(from_row <= total_rows);
   if (from_row < total_rows) m_cardinality.Invalidate();
   return PushbackBatchTailShared(chunks, from_row, total_rows, &m_lookahead_chunks, &m_lookahead_start,
                                  &m_lookahead_count, &m_stats.bytes_copied, &m_aux_memory);
-} catch (const std::bad_alloc &) {
-  my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid hash join auxiliary memory exhausted");
-  return true;
 }
 }  // namespace Executor
 }  // namespace ShannonBase

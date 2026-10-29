@@ -4,7 +4,7 @@
 #include <limits>
 
 #include "storage/rapid_engine/cost/cost.h"
-using ShannonBase::Optimizer::AggregateOrderEstimator;
+using AggregateOrderEstimator = ShannonBase::Optimizer::RpdCostEstimator::AggregateOrderEstimator;
 
 TEST(RapidAggregateOrder, ScaleAndBudgetChangeTheChoice) {
   // Identical shape, projection and cost rates. Scaling the data crosses the

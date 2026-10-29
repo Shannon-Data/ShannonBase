@@ -36,9 +36,9 @@ SET debug='+d,rapid_legacy_join_width_cost';
 EXPLAIN FORMAT=TREE SELECT COUNT(*),SUM(b.v) FROM a JOIN b ON a.k=b.k;
 EXPLAIN
 -> Vectorized aggregate: count(0), sum(b.v)  (...)
-    -> Vectorized inner hash join (a.k = b.k)  (...)
+    -> Vectorized nested loop inner join  (...)
         -> Vectorized table scan on b in secondary engine Rapid  (...)
-        -> Hash
+        -> Filter: (a.k = b.k)  (...)
             -> Vectorized table scan on a in secondary engine Rapid  (...)
 
 Warnings:

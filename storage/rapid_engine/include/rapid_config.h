@@ -70,6 +70,7 @@ struct SHANNON_ALIGNAS RpdEngineConfig {
   ulonglong window_spill_size_total{16ULL * 1024 * 1024 * 1024};
   ulonglong window_spill_size_max{8ULL * 1024 * 1024 * 1024};
   ulonglong sort_spill_size_max{8ULL * 1024 * 1024 * 1024};
+  ulonglong materialize_spill_size_max{8ULL * 1024 * 1024 * 1024};
 
   // Active execution limits; source commit callbacks never reserve these.
   ResMgmt::IsolationMode resource_isolation{ResMgmt::IsolationMode::OFF};

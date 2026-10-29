@@ -279,7 +279,9 @@ int32 Dictionary::id(uint64 strid, String &ret_val) {
   return 0;
 }
 
-int64 Dictionary::id(const std::string &str) {
+int64 Dictionary::id(const std::string &str) { return find_id(str); }
+
+int64 Dictionary::find_id(std::string_view str) const {
   // Still locked: the reverse index is a plain unordered_multimap that store()
   // mutates. This is a per-query constant lookup, not a per-cell one.
   std::shared_lock lock(m_dict_mutex);

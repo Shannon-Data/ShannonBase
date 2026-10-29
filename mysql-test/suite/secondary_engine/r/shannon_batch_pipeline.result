@@ -1,0 +1,76 @@
+CREATE DATABASE rapid_pipeline;
+USE rapid_pipeline;
+SET use_secondary_engine=OFF;
+CREATE TABLE t (id INT PRIMARY KEY, k INT, v INT, s VARCHAR(20), KEY(k)) SECONDARY_ENGINE=rapid;
+SET cte_max_recursion_depth=6000;
+INSERT INTO t WITH RECURSIVE seq AS
+(SELECT 1 n UNION ALL SELECT n+1 FROM seq WHERE n<5000)
+SELECT n,IF(MOD(n,19)=0,NULL,MOD(n,17)),IF(MOD(n,13)=0,NULL,n-2500),CONCAT('s',MOD(n,11)) FROM seq;
+SET cte_max_recursion_depth=DEFAULT;
+ANALYZE TABLE t;
+Table	Op	Msg_type	Msg_text
+rapid_pipeline.t	analyze	status	OK
+ALTER TABLE t SECONDARY_LOAD;
+SET use_secondary_engine=FORCED;
+SET optimizer_switch='hypergraph_optimizer=on';
+Warnings:
+Warning	1287	The hypergraph optimizer is highly experimental and is meant for testing only. Do not enable it unless you are a MySQL developer.
+# A multi-row REF feeds aggregate chunks without widening its range.
+EXPLAIN FORMAT=TREE SELECT SUM(v),COUNT(v) FROM t FORCE INDEX(k) WHERE k=1;
+EXPLAIN
+-> Vectorized aggregate: sum(t.v), count(t.v)  (...)
+    -> Vectorized index lookup on t using k (k=1) in secondary engine Rapid  (...)
+
+Warnings:
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+SELECT SUM(v),COUNT(v) FROM t FORCE INDEX(k) WHERE k=1;
+SUM(v)	COUNT(v)
+1598	259
+# REF batch output (1 expected): 1
+# Sort/TopN -> LIMIT -> projection -> columnar materialization -> aggregate.
+EXPLAIN FORMAT=TREE SELECT /*+ NO_MERGE(d) */ SUM(d.v),COUNT(d.k)
+FROM (SELECT v,k FROM t ORDER BY k,id LIMIT 2049) d;
+EXPLAIN
+-> Vectorized aggregate: sum(d.v), count(d.k)  (...)
+    -> Table scan on d  (...)
+        -> Vectorized materialize  (...)
+            -> Sort: t.k, t.id, limit input to 2049 row(s) per chunk
+                -> Vectorized table scan on t in secondary engine Rapid  (...)
+
+Warnings:
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+SELECT /*+ NO_MERGE(d) */ SUM(d.v),COUNT(d.k) FROM (SELECT v,k FROM t ORDER BY k,id LIMIT 2049) d;
+SUM(d.v)	COUNT(d.k)
+-154935	1786
+sort_batches	stream_batches	materialize_batches
+1	1	1
+# all three batch edges used (1 expected): 1
+# Both sort and columnar materialization spill under bounded grants.
+SET SESSION debug='+d,rapid_sort_tiny_budget,rapid_materialize_tiny_cache';
+SET SESSION debug='-d,rapid_sort_tiny_budget,rapid_materialize_tiny_cache';
+# An unencoded string temp-table layout keeps the native aggregate gate.
+EXPLAIN FORMAT=TREE SELECT /*+ NO_MERGE(d) */ COUNT(d.s) FROM (SELECT s FROM t LIMIT 33) d;
+EXPLAIN
+-> Aggregate: count(d.s)  (...)
+    -> Table scan on d  (...)
+        -> Materialize  (...)
+            -> Limit: 33 row(s)  (...)
+                -> Vectorized table scan on t in secondary engine Rapid  (...)
+
+Warnings:
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+# SQL retains deduplication; the completed result is drained before probing.
+SET SESSION tmp_table_size=1024;
+SET SESSION max_heap_table_size=16384;
+SET SESSION internal_tmp_mem_storage_engine=MEMORY;
+# Repeated execution resets limits and discards retained lookahead.
+PREPARE pipeline_stmt FROM 'SELECT /*+ NO_MERGE(d) */ SUM(d.v) FROM (SELECT v,k FROM t ORDER BY k,id LIMIT 31 OFFSET 1023) d';
+EXECUTE pipeline_stmt;
+SUM(d.v)
+38890
+EXECUTE pipeline_stmt;
+SUM(d.v)
+38890
+DEALLOCATE PREPARE pipeline_stmt;
+SET use_secondary_engine=OFF;
+DROP DATABASE rapid_pipeline;

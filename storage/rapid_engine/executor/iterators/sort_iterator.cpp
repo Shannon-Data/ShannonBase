@@ -27,6 +27,7 @@
 */
 
 #include "storage/rapid_engine/executor/iterators/sort_iterator.h"
+#include "scope_guard.h"
 
 #include <algorithm>
 #include <cstring>
@@ -43,8 +44,10 @@
 #include "sql/table.h"
 
 #include "storage/rapid_engine/imcs/imcs.h"
+#include "storage/rapid_engine/imcs/table.h"
 #include "storage/rapid_engine/include/rapid_config.h"
 #include "storage/rapid_engine/monitor/rapid_monitor.h"
+#include "storage/rapid_engine/optimizer/utils.h"
 #include "storage/rapid_engine/resource_management/io_scheduler.h"
 #include "storage/rapid_engine/utils/utils.h"
 
@@ -76,7 +79,6 @@ size_t KeyPartWidth(const Field *field) {
   }
   return field->pack_length();
 }
-
 }  // namespace
 
 bool VectorizedSortIterator::CanVectorize(const Filesort *filesort, bool unwrap_rollup,
@@ -89,8 +91,10 @@ bool VectorizedSortIterator::CanVectorize(const Filesort *filesort, bool unwrap_
   for (uint i = 0; i < filesort->sort_order_length(); ++i) {
     const Item *item = filesort->sortorder[i].item;
     if (item == nullptr) return false;
+
     item = const_cast<Item *>(item)->real_item();
     if (item->type() != Item::FIELD_ITEM) return false;
+
     const Field *field = down_cast<const Item_field *>(item)->field;
     if (field == nullptr || field->table == nullptr ||
         std::find(filesort->tables.begin(), filesort->tables.end(), field->table) == filesort->tables.end())
@@ -121,7 +125,7 @@ VectorizedSortIterator::VectorizedSortIterator(THD *thd, Filesort *filesort,
 
 VectorizedSortIterator::~VectorizedSortIterator() = default;
 
-void VectorizedSortIterator::ResetState() {
+bool VectorizedSortIterator::ResetState() {
   decltype(m_runs)(&m_aux_memory).swap(m_runs);
   m_spool.reset();
   m_manifest.reset();
@@ -130,7 +134,9 @@ void VectorizedSortIterator::ResetState() {
   m_last_run = SIZE_MAX;
   std::pmr::vector<uchar>(&m_sort_memory).swap(m_keys);
   std::pmr::vector<uchar>(&m_sort_memory).swap(m_payload);
-  std::pmr::vector<size_t>(1, 0, &m_sort_memory).swap(m_payload_offsets);
+  std::pmr::vector<size_t>(&m_sort_memory).swap(m_payload_offsets);
+  if (!TryReserve(m_payload_offsets, 1)) return AllocationError("Rapid sort payload offsets allocation failed");
+  m_payload_offsets.push_back(0);
   std::pmr::vector<uint32_t>(&m_sort_memory).swap(m_order);
   decltype(m_topn_payload)(&m_sort_memory).swap(m_topn_payload);
   decltype(m_chunks)(&m_aux_memory).swap(m_chunks);
@@ -142,6 +148,11 @@ void VectorizedSortIterator::ResetState() {
   m_row_buffer.set(static_cast<char *>(nullptr), 0, &my_charset_bin);
   decltype(m_row_storage)(&m_aux_memory).swap(m_row_storage);
   m_next = 0;
+  m_emitted = 0;
+  decltype(m_output_tail)(&m_aux_memory).swap(m_output_tail);
+  decltype(m_output_columns)(&m_aux_memory).swap(m_output_columns);
+  m_output_tail_start = m_output_tail_count = 0;
+  return false;
 }
 
 // NULL sorts first ascending and last descending: the marker byte is 0 for
@@ -158,8 +169,10 @@ void VectorizedSortIterator::EncodeKey(uchar *to) const {
       if (written < kp.width) memset(to + written, 0, kp.width - written);
     }
     to += kp.width;
-    if (kp.reverse)
+
+    if (kp.reverse) {
       for (uchar *p = start; p < to; ++p) *p = static_cast<uchar>(~*p);
+    }
   }
 }
 
@@ -167,91 +180,156 @@ bool VectorizedSortIterator::CanUseTopN() const {
   if (m_limit == HA_POS_ERROR || m_limit > kMaxTopNRows) return false;
   if (m_limit == 0) return true;
   if (m_tables.has_blob_column()) return false;
+
   const size_t row_upper_bound =
       m_batch_source != nullptr ? m_row_width : pack_rows::ComputeRowSizeUpperBound(m_tables);
   const size_t fixed = 2 * m_key_width + 2 * sizeof(std::string) + 3 * sizeof(uint32_t) + 64;
   if (row_upper_bound > std::numeric_limits<size_t>::max() / 2 - fixed) return false;
+
   const size_t slot_upper_bound = fixed + 2 * row_upper_bound;
   return static_cast<size_t>(m_limit) <= (m_memory_budget / 2) / slot_upper_bound;
 }
 
 // Sorts the buffered rows' indices by key; ties keep input order.
-void VectorizedSortIterator::SortBuffered() {
+bool VectorizedSortIterator::SortBuffered() {
   const size_t rows = m_payload_offsets.size() - 1;
   const size_t width = m_key_width;
   const uchar *keys = m_keys.data();
+  if (!TryReserve(m_order, rows)) return AllocationError("Rapid sort order buffer allocation failed");
   m_order.resize(rows);
   std::iota(m_order.begin(), m_order.end(), 0u);
   std::sort(m_order.begin(), m_order.end(), [keys, width](uint32_t a, uint32_t b) {
     const int c = memcmp(keys + size_t{a} * width, keys + size_t{b} * width, width);
     return c < 0 || (c == 0 && a < b);
   });
+  return false;
 }
 
-// Batch input: a single-table child that can hand over column chunks, and
-// every column the query reads has a fixed-width chunk image. String payloads
-// remain dictionary codes until the sort key or output Field needs a value.
+// Chunk indices span every input table. Field indices alone alias columns
+// from different join inputs and cannot describe a multi-table batch.
+size_t VectorizedSortIterator::ChunkIndex(const Field *field) const {
+  for (const auto &column : m_payload_fields) {
+    if (column.field == field) return column.chunk_index;
+  }
+  return SIZE_MAX;
+}
+
+bool VectorizedSortIterator::CanVectorizeBatches(const Filesort *filesort) {
+  if (filesort == nullptr) return false;
+  for (TABLE *table : filesort->tables) {
+    // Null-complemented table flags require their own retained representation.
+    if (table == nullptr || table->is_nullable() || table->read_set == nullptr) return false;
+
+    for (uint i = 0; i < table->s->fields; ++i) {
+      if (!bitmap_is_set(table->read_set, i)) continue;
+
+      Field *field = table->field[i];
+      if (field->is_flag_set(NOT_SECONDARY_FLAG) || Utils::IsOffPageField(field)) return false;
+      if (Utils::Util::is_string(field->type())) {
+        auto *source = Optimizer::Utils::rpd_lookup_func()(table);
+        if (source == nullptr || i >= source->meta().fields.size() || !source->meta().fields[i].dictionary)
+          return false;
+      } else if (Utils::Util::normalized_length(field) != field->pack_length()) {
+        return false;
+      }
+    }
+  }
+  return !filesort->tables.empty();
+}
+
 bool VectorizedSortIterator::SetupBatch() {
-  DBUG_EXECUTE_IF("rapid_sort_aux_bad_alloc", { throw std::bad_alloc(); });
   m_batch_source = nullptr;
-  if (m_tables.tables().size() != 1) return false;
   auto *batch = dynamic_cast<BatchReadable *>(m_source->real_iterator());
   if (batch == nullptr || !batch->SupportsBatchRead()) return false;
-  TABLE *table = m_tables.tables()[0].table;
-  if (table->is_nullable()) return false;
 
   m_payload_fields.clear();
   m_batch_dictionaries.clear();
-  m_batch_dictionaries.resize(table->s->fields);
+  m_chunks.clear();
   m_row_width = 0;
-  for (const pack_rows::Column &column : m_tables.tables()[0].columns) {
-    Field *field = column.field;
-    if (field->is_flag_set(NOT_SECONDARY_FLAG) || Utils::IsOffPageField(field) || field->is_flag_set(BLOB_FLAG))
+
+  size_t index{0};
+  for (const auto &input : m_tables.tables()) {
+    TABLE *table = input.table;
+    if (table->is_nullable()) return false;
+    if (!TryReserve(m_batch_dictionaries, index + table->s->fields) ||
+        !TryGrow(m_payload_fields, m_payload_fields.size() + input.columns.size())) {
+      AllocationError("Rapid sort batch schema allocation failed");
       return false;
-    size_t image_width = field->pack_length();
-    if (Utils::Util::is_string(field->type())) {
-      auto dictionary = batch->Dictionary(field);
-      if (dictionary == nullptr || field->field_index() >= m_batch_dictionaries.size()) return false;
-      m_batch_dictionaries[field->field_index()] = std::move(dictionary);
-      image_width = sizeof(uint32_t);
     }
-    m_payload_fields.push_back({field, m_row_width, image_width});
-    m_row_width += 1 + image_width;
+    m_batch_dictionaries.resize(index + table->s->fields);
+    for (const auto &column : input.columns) {
+      Field *field = column.field;
+      if (field->is_flag_set(NOT_SECONDARY_FLAG) || Utils::IsOffPageField(field)) return false;
+
+      size_t image_width = field->pack_length();
+      if (Utils::Util::is_string(field->type())) {
+        auto dictionary = batch->Dictionary(field);
+        if (dictionary == nullptr) return false;
+        m_batch_dictionaries[index + field->field_index()] = std::move(dictionary);
+        image_width = sizeof(uint32_t);
+      } else if (image_width != Utils::Util::normalized_length(field)) {
+        return false;
+      }
+      m_payload_fields.push_back({field, m_row_width, image_width, index + field->field_index()});
+      m_row_width += 1 + image_width;
+    }
+    index += table->s->fields;
   }
-  for (const KeyPart &kp : m_key_parts) {
-    if (!bitmap_is_set(table->read_set, kp.field->field_index())) return false;
-    if (Utils::Util::is_string(kp.field->type()) && (kp.field->field_index() >= m_batch_dictionaries.size() ||
-                                                     m_batch_dictionaries[kp.field->field_index()] == nullptr))
-      return false;
+
+  for (const KeyPart &key : m_key_parts) {
+    if (ChunkIndex(key.field) == SIZE_MAX) return false;
   }
 
   if (m_key_width > SIZE_MAX - m_row_width || m_key_width + m_row_width == 0) return false;
+
   m_batch_capacity = std::min(kBatchRows, (m_memory_budget / 4) / (m_key_width + m_row_width));
   if (m_batch_capacity == 0) return false;
-  m_chunks.clear();
-  m_chunks.reserve(table->s->fields);
-  for (uint i = 0; i < table->s->fields; ++i) {
-    Field *field = table->field[i];
-    if (bitmap_is_set(table->read_set, i) && !field->is_flag_set(NOT_SECONDARY_FLAG))
-      m_chunks.emplace_back(field, m_batch_capacity, &m_aux_memory);
-    else
-      m_chunks.emplace_back(nullptr, 0);
+
+  if (!TryReserve(m_chunks, index)) {
+    AllocationError("Rapid sort input descriptors allocation failed");
+    return false;
   }
-  for (const PayloadField &pf : m_payload_fields)
-    if (Utils::Util::is_string(pf.field->type()) && m_chunks[pf.field->field_index()].width() != sizeof(uint32_t))
-      return false;
+  for (const auto &input : m_tables.tables()) {
+    TABLE *table = input.table;
+    for (uint i = 0; i < table->s->fields; ++i) {
+      Field *field = table->field[i];
+      if (bitmap_is_set(table->read_set, i) && !field->is_flag_set(NOT_SECONDARY_FLAG)) {
+        m_chunks.emplace_back(field, m_batch_capacity, &m_aux_memory);
+        // A refused buffer cannot be told apart from an unread field later.
+        if (m_chunks.back().failed()) {
+          AllocationError("Rapid sort input column allocation failed");
+          return false;
+        }
+      } else
+        m_chunks.emplace_back(nullptr, 0);
+    }
+  }
+  for (const auto &column : m_payload_fields) {
+    if (m_chunks[column.chunk_index].width() != column.width) return false;
+  }
   m_batch_source = batch;
   return true;
 }
 
+std::shared_ptr<Compress::Dictionary> VectorizedSortIterator::Dictionary(const Field *field) const {
+  if (m_batch_source == nullptr) return {};
+
+  const size_t index = ChunkIndex(field);
+  return index < m_batch_dictionaries.size() ? m_batch_dictionaries[index] : nullptr;
+}
+
 bool VectorizedSortIterator::RestoreDictionaryField(Field *field, uint32_t code) {
-  if (field == nullptr || field->field_index() >= m_batch_dictionaries.size()) return true;
-  const auto &dictionary = m_batch_dictionaries[field->field_index()];
+  const auto dictionary = Dictionary(field);
   if (dictionary == nullptr) return true;
+
   std::string_view value = dictionary->get_view(code);
   if (value.data() == nullptr) {
     // Compressed entries need a decode buffer; an existing empty entry has a
     // non-null data pointer, so it stays on the zero-copy path.
+    if (!TryReserve(m_dictionary_decode_scratch, field->field_length + 1)) {
+      AllocationError("Rapid sort dictionary_decode_scratch allocation failed");
+      return true;
+    }
     m_dictionary_decode_scratch.resize(field->field_length + 1);
     const auto length = dictionary->get(code, m_dictionary_decode_scratch.data(), m_dictionary_decode_scratch.size());
     if (!length.has_value()) {
@@ -260,6 +338,7 @@ bool VectorizedSortIterator::RestoreDictionaryField(Field *field, uint32_t code)
     }
     value = std::string_view(m_dictionary_decode_scratch.data(), *length);
   }
+
   field->set_notnull();
   if (field->real_type() == MYSQL_TYPE_VARCHAR && value.size() <= field->field_length) {
     // This value was stored in the same column before Rapid encoded it. The
@@ -275,6 +354,7 @@ bool VectorizedSortIterator::RestoreDictionaryField(Field *field, uint32_t code)
     memcpy(to + length_bytes, value.data(), value.size());
     return false;
   }
+
   Utils::ColumnMapGuard write_guard(field->table, Utils::ColumnMapGuard::TYPE::WRITE);
   field->store(value.data(), value.size(), field->charset());
   return false;
@@ -282,11 +362,15 @@ bool VectorizedSortIterator::RestoreDictionaryField(Field *field, uint32_t code)
 
 bool VectorizedSortIterator::EncodeDictionaryVarstringKey(const KeyPart &key_part, uint32_t code, uchar *to) {
   Field *field = key_part.field;
-  if (field == nullptr || field->field_index() >= m_batch_dictionaries.size()) return true;
-  const auto &dictionary = m_batch_dictionaries[field->field_index()];
+  const auto dictionary = Dictionary(field);
   if (dictionary == nullptr) return true;
+
   std::string_view decoded = dictionary->get_view(code);
   if (decoded.data() == nullptr) {
+    if (!TryReserve(m_dictionary_decode_scratch, field->field_length + 1)) {
+      AllocationError("Rapid sort dictionary_decode_scratch allocation failed");
+      return true;
+    }
     m_dictionary_decode_scratch.resize(field->field_length + 1);
     const auto decoded_length =
         dictionary->get(code, m_dictionary_decode_scratch.data(), m_dictionary_decode_scratch.size());
@@ -296,6 +380,7 @@ bool VectorizedSortIterator::EncodeDictionaryVarstringKey(const KeyPart &key_par
     }
     decoded = std::string_view(m_dictionary_decode_scratch.data(), *decoded_length);
   }
+
   const CHARSET_INFO *charset = field->charset();
   const auto *value = pointer_cast<const uchar *>(decoded.data());
   const size_t prefix_length = my_charpos(charset, value, value + decoded.size(), field->char_length());
@@ -312,10 +397,15 @@ bool VectorizedSortIterator::EncodeDictionaryVarstringKey(const KeyPart &key_par
 // already byte-comparable; anything else goes through Field::make_sort_key.
 bool VectorizedSortIterator::EncodeBatchKeys(size_t rows) {
   const size_t width = m_key_width;
+  if (!TryReserve(m_block_keys, rows * width)) {
+    AllocationError("Rapid sort block_keys allocation failed");
+    return true;
+  }
   m_block_keys.resize(rows * width);
-  size_t offset = 0;
+
+  size_t offset{0};
   for (const KeyPart &kp : m_key_parts) {
-    const ColumnChunk &chunk = m_chunks[kp.field->field_index()];
+    const ColumnChunk &chunk = m_chunks[ChunkIndex(kp.field)];
     const enum_field_types type = kp.field->real_type();
     const bool is_unsigned = kp.field->is_flag_set(UNSIGNED_FLAG);
     for (size_t r = 0; r < rows; ++r) {
@@ -378,23 +468,32 @@ long VectorizedSortIterator::FetchBlock() {
     thd()->send_kill_message();
     return -1;
   }
+
   if (m_batch_source == nullptr) {
     const int err = m_source->Read();
     if (err == -1) return 0;
     if (err != 0) return -1;
+
+    if (!TryReserve(m_block_keys, m_key_width)) {
+      AllocationError("Rapid sort block_keys allocation failed");
+      return -1;
+    }
     m_block_keys.resize(m_key_width);
     EncodeKey(m_block_keys.data());
     if (m_examined_rows != nullptr) ++*m_examined_rows;
     return 1;
   }
+
   if (m_batch_eof) return 0;
+
   for (ColumnChunk &chunk : m_chunks) chunk.clear();
-  size_t rows = 0;
+  size_t rows{0};
   const int err = m_batch_source->ReadBatch(m_chunks, m_batch_capacity, rows);
   if (err == HA_ERR_END_OF_FILE)
     m_batch_eof = true;
   else if (err != 0)
     return -1;
+
   if (rows == 0) return 0;
   if (EncodeBatchKeys(rows)) return -1;
   if (m_examined_rows != nullptr) *m_examined_rows += rows;
@@ -409,14 +508,17 @@ const uchar *VectorizedSortIterator::BlockPayload(size_t row, size_t *length) {
       my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid sort row exceeds its input memory budget");
       return nullptr;
     }
-    PrepareBudgetedString(&m_row_buffer, &m_row_storage, pack_rows::ComputeRowSizeUpperBound(m_tables));
+
+    if (!PrepareBudgetedString(&m_row_buffer, &m_row_storage, pack_rows::ComputeRowSizeUpperBound(m_tables)))
+      return nullptr;
+
     if (pack_rows::StoreFromTableBuffers(m_tables, &m_row_buffer)) return nullptr;
     *length = m_row_buffer.length();
     return pointer_cast<const uchar *>(m_row_buffer.ptr());
   }
   m_row_image.resize(m_row_width);
   for (const PayloadField &pf : m_payload_fields) {
-    const ColumnChunk &chunk = m_chunks[pf.field->field_index()];
+    const ColumnChunk &chunk = m_chunks[pf.chunk_index];
     uchar *to = m_row_image.data() + pf.offset;
     to[0] = chunk.nullable_fast(row) ? 1 : 0;
     if (to[0] == 0) memcpy(to + 1, chunk.data_fast(row), pf.width);
@@ -467,31 +569,30 @@ bool VectorizedSortIterator::Sink() {
       // If the bounded allocator refuses growth, the existing run remains
       // complete and can be spilled before retrying this same input row.
       auto reserve_row = [&]() -> bool {
-        auto grow = [](auto &buffer, size_t required) {
-          if (required <= buffer.capacity()) return;
+        auto grow = [](auto &buffer, size_t required) -> bool {
+          if (required <= buffer.capacity()) return true;
           size_t capacity = buffer.capacity();
           if (capacity <= SIZE_MAX / 2) capacity *= 2;
-          buffer.reserve(std::max(required, capacity));
+          return TryReserve(buffer, std::max(required, capacity));
         };
+
         if (m_keys.size() > SIZE_MAX - m_key_width || m_payload.size() > SIZE_MAX - length ||
             m_payload_offsets.size() == SIZE_MAX)
           return false;
-        try {
-          grow(m_keys, m_keys.size() + m_key_width);
-          grow(m_payload, m_payload.size() + length);
-          grow(m_payload_offsets, m_payload_offsets.size() + 1);
-          grow(m_order, m_payload_offsets.size());
-        } catch (const std::bad_alloc &) {
-          return false;
-        }
-        return true;
+
+        return grow(m_keys, m_keys.size() + m_key_width) && grow(m_payload, m_payload.size() + length) &&
+               grow(m_payload_offsets, m_payload_offsets.size() + 1) && grow(m_order, m_payload_offsets.size());
       };
       if (!reserve_row()) {
+        if (m_sort_memory.last_failure() == ResMgmt::AllocationFailure::kPoolExhausted)
+          return AllocationError("Rapid sort memory pool exhausted");
         if (m_payload_offsets.size() <= 1) {
           my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid sort row exceeds its memory budget");
           return true;
         }
+
         if (SpillRun()) return true;
+
         if (!reserve_row()) {
           my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid sort row exceeds its memory budget");
           return true;
@@ -504,7 +605,8 @@ bool VectorizedSortIterator::Sink() {
   }
   RapidMonitor::rapid_counter_vectorized_sort_rows(total);
   if (m_spool_run_count != 0) return (m_payload_offsets.size() > 1 && SpillRun()) || StartMerge();
-  SortBuffered();
+
+  if (SortBuffered()) return true;
   return false;
 }
 
@@ -514,6 +616,9 @@ bool VectorizedSortIterator::SinkTopN() {
   const size_t limit = static_cast<size_t>(m_limit);
   const size_t width = m_key_width;
   std::pmr::vector<uint32_t> heap(&m_sort_memory);
+  if (!TryReserve(heap, limit) || !TryReserve(m_keys, limit * width) || !TryReserve(m_topn_payload, limit) ||
+      !TryReserve(m_order, limit))
+    return AllocationError("Rapid sort top-N slots allocation failed");
   auto slot_key = [this, width](uint32_t slot) { return m_keys.data() + size_t{slot} * width; };
   auto worse = [&](uint32_t a, uint32_t b) {
     const int c = memcmp(slot_key(a), slot_key(b), width);
@@ -547,6 +652,8 @@ bool VectorizedSortIterator::SinkTopN() {
       const uchar *payload = BlockPayload(r, &length);
       if (payload == nullptr) return true;
       memcpy(m_keys.data() + size_t{slot} * width, key, width);
+      if (!TryReserve(m_topn_payload[slot], length))
+        return AllocationError("Rapid sort top-N payload allocation failed");
       m_topn_payload[slot].assign(pointer_cast<const char *>(payload), length);
       heap.push_back(slot);
       std::push_heap(heap.begin(), heap.end(), worse);
@@ -572,12 +679,19 @@ VectorizedSortIterator::SpillStream VectorizedSortIterator::OpenSpill(const char
     }
     ~Owner() { Utils::Util::close_spill_file(file); }
   };
-  auto owner =
-      std::allocate_shared<Owner>(std::pmr::polymorphic_allocator<Owner>(&m_aux_memory), &m_aux_memory, prefix);
+  std::shared_ptr<Owner> owner;
+  if (!TryAllocation([&] {
+        owner =
+            std::allocate_shared<Owner>(std::pmr::polymorphic_allocator<Owner>(&m_aux_memory), &m_aux_memory, prefix);
+      })) {
+    AllocationError("Rapid sort spill descriptor allocation failed");
+    return {};
+  }
   if (!owner->file) {
     my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid sort could not create a spill file");
     return {};
   }
+
   return SpillStream(owner, owner->file);
 }
 
@@ -586,6 +700,7 @@ bool VectorizedSortIterator::WriteRunRecord(Run *run, const uchar *key, const uc
     my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Injected Rapid sort spill write failure");
     return true;
   });
+
   if (thd()->killed) {
     thd()->send_kill_message();
     return true;
@@ -596,15 +711,18 @@ bool VectorizedSortIterator::WriteRunRecord(Run *run, const uchar *key, const uc
     my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid sort row exceeds the bounded merge memory budget");
     return true;
   }
+
   const uint64_t bytes = m_key_width + sizeof(uint32_t) + length;
   const uint64_t limit = shannon_rpd_engine_cfg.sort_spill_size_max;
   if (bytes > limit || m_live_spill_bytes > limit - bytes) {
     my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid sort exceeded rapid_sort_spill_size_max");
     return true;
   }
+
   const uint32_t packed_length = static_cast<uint32_t>(length);
   ResMgmt::SpillIoScope io(thd(), run->file.get());
   if (!io) return true;
+
   if (fwrite(key, 1, m_key_width, run->file.get()) != m_key_width ||
       fwrite(&packed_length, sizeof(packed_length), 1, run->file.get()) != 1 ||
       (length && fwrite(payload, 1, length, run->file.get()) != length)) {
@@ -643,10 +761,11 @@ bool VectorizedSortIterator::ReadDescriptor(FILE *manifest, const SpillStream &f
 }
 
 bool VectorizedSortIterator::SpillRun() {
-  SortBuffered();
+  if (SortBuffered()) return true;
   if (!m_spool) m_spool = OpenSpill("rapid_sort");
   if (!m_manifest) m_manifest = OpenSpill("rapid_sort_manifest");
   if (!m_spool || !m_manifest) return true;
+
   Run run(&m_aux_memory);
   run.file = m_spool;
   const auto offset = ftello(m_spool.get());
@@ -654,20 +773,25 @@ bool VectorizedSortIterator::SpillRun() {
     my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid sort could not locate its spill write position");
     return true;
   }
+
   run.offset = static_cast<uint64_t>(offset);
   for (const uint32_t idx : m_order) {
     if (WriteRunRecord(&run, m_keys.data() + size_t{idx} * m_key_width, m_payload.data() + m_payload_offsets[idx],
                        m_payload_offsets[idx + 1] - m_payload_offsets[idx]))
       return true;
   }
+
   if (WriteDescriptor(m_manifest.get(), run)) return true;
+
   ++m_spool_run_count;
   m_spool_bytes = m_live_spill_bytes;
   RapidMonitor::rapid_counter_vectorized_sort_spill_rows(m_order.size());
   // clear() retained capacity and triggered another spill immediately.
   std::pmr::vector<uchar>(&m_sort_memory).swap(m_keys);
   std::pmr::vector<uchar>(&m_sort_memory).swap(m_payload);
-  std::pmr::vector<size_t>(1, 0, &m_sort_memory).swap(m_payload_offsets);
+  std::pmr::vector<size_t>(&m_sort_memory).swap(m_payload_offsets);
+  if (!TryReserve(m_payload_offsets, 1)) return AllocationError("Rapid sort payload offsets allocation failed");
+  m_payload_offsets.push_back(0);
   std::pmr::vector<uint32_t>(&m_sort_memory).swap(m_order);
   return false;
 }
@@ -681,14 +805,17 @@ bool VectorizedSortIterator::ReadRunBytes(Run *run, void *data, size_t length) {
     }
     if (run->read_pos == run->read_size) {
       if (run->read_offset >= run->end_offset) return true;
+
       const size_t bytes =
           static_cast<size_t>(std::min<uint64_t>(run->read_buffer.size(), run->end_offset - run->read_offset));
       // Each head has its own read-ahead buffer and offset. pread avoids
       // thrashing a shared stdio buffer as the merge switches between runs.
       ResMgmt::SpillIoScope io(thd(), run->file.get());
       if (!io) return true;
+
       if (my_pread(fileno(run->file.get()), run->read_buffer.data(), bytes, run->read_offset, MYF(0)) != bytes)
         return true;
+
       run->read_offset += bytes;
       run->read_pos = 0;
       run->read_size = bytes;
@@ -709,13 +836,19 @@ bool VectorizedSortIterator::AdvanceRun(Run *run) {
     std::pmr::string(&m_aux_memory).swap(run->payload);
     return false;
   }
-  uint32_t length = 0;
+
+  uint32_t length{0};
+  if (!TryReserve(run->key, m_key_width)) return AllocationError("Rapid sort merge key allocation failed");
   run->key.resize(m_key_width);
   if (ReadRunBytes(run, run->key.data(), m_key_width) || ReadRunBytes(run, &length, sizeof(length))) return true;
+
   const size_t head_limit = m_memory_budget / (4 * kMaxOpenRuns);
   if (m_key_width > head_limit || length > head_limit - m_key_width) return true;
+
+  if (!TryReserve(run->payload, length)) return AllocationError("Rapid sort merge payload allocation failed");
   run->payload.resize(length);
   if (ReadRunBytes(run, run->payload.data(), length)) return true;
+
   --run->remaining;
   return false;
 }
@@ -725,16 +858,19 @@ bool VectorizedSortIterator::MergePass() {
   auto manifest = OpenSpill("rapid_sort_manifest");
   if (!output || !manifest || fflush(m_spool.get()) || fflush(m_manifest.get()) || fseek(m_manifest.get(), 0, SEEK_SET))
     return true;
+
   const uint64_t before = m_live_spill_bytes;
-  uint64_t next_runs = 0;
+  uint64_t next_runs{0};
   for (uint64_t first = 0; first < m_spool_run_count; first += MergeFanIn()) {
     const size_t count = static_cast<size_t>(std::min<uint64_t>(MergeFanIn(), m_spool_run_count - first));
     std::pmr::vector<Run> inputs(&m_aux_memory);
-    inputs.reserve(count);
+    if (!TryReserve(inputs, count)) return AllocationError("Rapid sort merge inputs allocation failed");
+
     for (size_t i = 0; i < count; ++i) inputs.emplace_back(&m_aux_memory);
     for (auto &input : inputs) {
       if (ReadDescriptor(m_manifest.get(), m_spool, &input) || AdvanceRun(&input)) return true;
     }
+
     Run merged(&m_aux_memory);
     merged.file = output;
     const auto offset = ftello(output.get());
@@ -780,12 +916,16 @@ bool VectorizedSortIterator::StartMerge() {
       return true;
     }
   }
+
   if (fflush(m_spool.get()) || fflush(m_manifest.get()) || fseek(m_manifest.get(), 0, SEEK_SET)) {
     my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid sort could not prepare its spill files for reading");
     return true;
   }
+
   m_runs.clear();
-  m_runs.reserve(static_cast<size_t>(m_spool_run_count));
+  if (!TryReserve(m_runs, static_cast<size_t>(m_spool_run_count)) ||
+      !TryReserve(m_merge_heap, static_cast<size_t>(m_spool_run_count)))
+    return AllocationError("Rapid sort merge heads allocation failed");
   for (size_t i = 0; i < m_spool_run_count; ++i) m_runs.emplace_back(&m_aux_memory);
   for (size_t i = 0; i < m_runs.size(); ++i) {
     if (ReadDescriptor(m_manifest.get(), m_spool, &m_runs[i]) || AdvanceRun(&m_runs[i])) {
@@ -794,6 +934,7 @@ bool VectorizedSortIterator::StartMerge() {
     }
     if (!m_runs[i].key.empty()) m_merge_heap.push_back(i);
   }
+
   m_manifest.reset();
   m_spool.reset();
   const size_t width = m_key_width;
@@ -806,12 +947,13 @@ bool VectorizedSortIterator::StartMerge() {
 
 // The emitted run is advanced only on the next call: its payload buffer backs
 // the fields just loaded, BLOB pointers included.
-int VectorizedSortIterator::ReadMerged() {
+int VectorizedSortIterator::ReadMerged(const uchar **row) {
   const size_t width = m_key_width;
   auto later = [this, width](size_t a, size_t b) {
     const int c = memcmp(m_runs[a].key.data(), m_runs[b].key.data(), width);
     return c > 0 || (c == 0 && a > b);
   };
+
   if (m_last_run != SIZE_MAX) {
     Run &run = m_runs[m_last_run];
     if (AdvanceRun(&run)) {
@@ -831,21 +973,30 @@ int VectorizedSortIterator::ReadMerged() {
   std::pop_heap(m_merge_heap.begin(), m_merge_heap.end(), later);
   const size_t top = m_merge_heap.back();
   m_merge_heap.pop_back();
-  if (LoadRow(pointer_cast<const uchar *>(m_runs[top].payload.data()))) return 1;
+  *row = pointer_cast<const uchar *>(m_runs[top].payload.data());
   m_last_run = top;
   return 0;
 }
 
-bool VectorizedSortIterator::Init() try {
+bool VectorizedSortIterator::Init() { return InitImpl(); }
+
+bool VectorizedSortIterator::InitImpl() {
   if (!m_memory_reservation) {
     my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid query memory reservation exhausted");
     return true;
   }
+
   DBUG_EXECUTE_IF("rapid_iterator_bad_alloc", {
     my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid iterator allocation failure");
     return true;
   });
-  ResetState();
+
+  DBUG_EXECUTE_IF("rapid_sort_aux_bad_alloc", {
+    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid sort auxiliary memory exhausted");
+    return true;
+  });
+
+  if (ResetState()) return true;
   if (m_key_parts.empty()) {
     for (uint i = 0; i < m_filesort->sort_order_length(); ++i) {
       const st_sort_field &sf = m_filesort->sortorder[i];
@@ -855,6 +1006,8 @@ bool VectorizedSortIterator::Init() try {
       kp.reverse = sf.reverse;
       kp.maybe_null = kp.field->is_nullable() || kp.field->table->is_nullable();
       m_key_width += kp.width + (kp.maybe_null ? 1 : 0);
+      if (!TryGrow(m_key_parts, m_key_parts.size() + 1))
+        return AllocationError("Rapid sort key descriptors allocation failed");
       m_key_parts.push_back(kp);
     }
   }
@@ -864,32 +1017,131 @@ bool VectorizedSortIterator::Init() try {
     my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid sort row exceeds its input memory budget");
     return true;
   }
-  PrepareBudgetedString(&m_row_buffer, &m_row_storage, input_bytes);
+
+  if (!PrepareBudgetedString(&m_row_buffer, &m_row_storage, input_bytes)) {
+    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid sort row exceeds its input memory budget");
+    return true;
+  }
+
   if (m_source->Init()) return true;
 
   m_batch_eof = false;
   SetupBatch();
+  if (thd()->is_error()) return true;
+  if (!TryReserve(m_row_image, m_row_width)) return AllocationError("Rapid sort row image allocation failed");
   m_limit = m_filesort->limit;
 
   if (CanUseTopN()) return SinkTopN();
   return Sink();
-} catch (const std::bad_alloc &) {
-  my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid sort auxiliary memory exhausted");
-  return true;
 }
 
-int VectorizedSortIterator::Read() try {
-  if (!m_runs.empty()) return ReadMerged();
+int VectorizedSortIterator::NextPayload(const uchar **row) {
+  if (m_emitted >= m_limit) return -1;
+
+  if (!m_runs.empty()) {
+    const int result = ReadMerged(row);
+    if (result == 0) ++m_emitted;
+    return result;
+  }
+
   if (m_next >= m_order.size()) return -1;
 
-  const uint32_t idx = m_order[m_next++];
-  const uchar *row = m_topn_payload.empty() ? m_payload.data() + m_payload_offsets[idx]
-                                            : pointer_cast<const uchar *>(m_topn_payload[idx].data());
-  if (LoadRow(row)) return 1;
+  const uint32_t index = m_order[m_next++];
+  *row = m_topn_payload.empty() ? m_payload.data() + m_payload_offsets[index]
+                                : pointer_cast<const uchar *>(m_topn_payload[index].data());
+  ++m_emitted;
   return 0;
-} catch (const std::bad_alloc &) {
-  my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid sort auxiliary memory exhausted");
-  return 1;
+}
+
+bool VectorizedSortIterator::LoadTailRow() {
+  if (!TryReserve(m_row_image, m_row_width)) return AllocationError("Rapid sort tail row image allocation failed");
+  m_row_image.resize(m_row_width);
+  for (const auto &field : m_payload_fields) {
+    const ColumnChunk *source = nullptr;
+    for (const auto &chunk : m_output_tail)
+      if (chunk.valid() && chunk.source_field() == field.field) source = &chunk;
+    if (source == nullptr) return true;
+    uchar *to = m_row_image.data() + field.offset;
+    to[0] = source->nullable_fast(m_output_tail_start);
+    if (to[0] == 0) memcpy(to + 1, source->data_fast(m_output_tail_start), field.width);
+  }
+  ++m_output_tail_start;
+  --m_output_tail_count;
+  return LoadRow(m_row_image.data());
+}
+
+int VectorizedSortIterator::Read() {
+  if (m_output_tail_count != 0) return LoadTailRow() ? 1 : 0;
+  const uchar *row = nullptr;
+  const int result = NextPayload(&row);
+  return result == 0 ? (LoadRow(row) ? 1 : 0) : result;
+}
+
+int VectorizedSortIterator::ReadBatch(std::pmr::vector<ColumnChunk> &chunks, size_t capacity, size_t &rows) {
+  return ReadBatchImpl(chunks, capacity, rows);
+}
+
+int VectorizedSortIterator::ReadBatchImpl(std::pmr::vector<ColumnChunk> &chunks, size_t capacity, size_t &rows) {
+  rows = 0;
+  auto report_batches = create_scope_guard([&] {
+    if (rows != 0)
+      RapidMonitor::rapid_counters.query_vectorized_sort_batch_rows_total.fetch_add(rows, std::memory_order_relaxed);
+  });
+  if (!SupportsBatchRead()) {
+    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid sort cannot expose packed SQL rows as column chunks");
+    return 1;
+  }
+
+  capacity = std::min(capacity, kBatchRows);
+  m_output_columns.clear();
+  if (!TryReserve(m_output_columns, chunks.size())) {
+    AllocationError("Rapid sort output schema allocation failed");
+    return 1;
+  }
+  for (const auto &chunk : chunks) {
+    const PayloadField *column = nullptr;
+    if (chunk.valid()) {
+      for (const auto &field : m_payload_fields)
+        if (field.field == chunk.source_field()) column = &field;
+      if (column == nullptr || column->width != chunk.width()) {
+        my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid sort batch schema does not match retained columns");
+        return 1;
+      }
+    }
+    m_output_columns.push_back(column);
+  }
+
+  while (rows < capacity) {
+    if (thd()->killed) {
+      thd()->send_kill_message();
+      return 1;
+    }
+    if (m_output_tail_count != 0) {
+      if (chunks.size() != m_output_tail.size()) return 1;
+      for (size_t i = 0; i < chunks.size(); ++i)
+        if (chunks[i].valid() && !chunks[i].append_from(m_output_tail[i], m_output_tail_start)) return 1;
+      ++m_output_tail_start;
+      --m_output_tail_count;
+    } else {
+      const uchar *row = nullptr;
+      const int result = NextPayload(&row);
+      if (result != 0) return result == -1 ? HA_ERR_END_OF_FILE : result;
+      for (size_t i = 0; i < chunks.size(); ++i) {
+        auto &chunk = chunks[i];
+        if (!chunk.valid()) continue;
+        const PayloadField *column = m_output_columns[i];
+        const uchar *value = row + column->offset;
+        if (!chunk.add(value + 1, column->width, value[0] != 0)) return 1;
+      }
+    }
+    ++rows;
+  }
+  return 0;
+}
+
+bool VectorizedSortIterator::PushbackBatchTail(const std::pmr::vector<ColumnChunk> &chunks, size_t from, size_t total) {
+  return PushbackBatchTailShared(chunks, from, total, &m_output_tail, &m_output_tail_start, &m_output_tail_count,
+                                 nullptr, &m_aux_memory);
 }
 
 void VectorizedSortIterator::SetNullRowFlag(bool is_null_row) {

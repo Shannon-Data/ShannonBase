@@ -35,6 +35,8 @@
 #include <limits>
 #include <memory>
 #include <memory_resource>
+#include <new>
+#include <string>
 #include <vector>
 #include "include/my_inttypes.h"
 #include "sql-common/my_decimal.h"
@@ -67,6 +69,53 @@ namespace Executor {
 namespace Batch {
 using SelectionVector = std::vector<uint32_t>;
 }  // namespace Batch
+
+// The single STL allocation boundary. std::pmr containers must receive a
+// throwing allocator (returning nullptr is undefined behavior). Keep exception
+// conversion at individual container/object allocations, never around an
+// operator body: callers name the failed buffer and choose spill or hard error.
+// Bounded resources retain the reason independently of this STL adapter.
+template <typename Allocate>
+inline bool TryAllocation(Allocate &&allocate) noexcept {
+  try {
+    allocate();
+    return true;
+  } catch (const std::bad_alloc &) {
+    return false;
+  }
+}
+
+template <typename Buffer>
+inline bool TryReserve(Buffer &buffer, size_t capacity) noexcept {
+  if (capacity <= buffer.capacity()) return true;
+  if (capacity > buffer.max_size()) return false;
+  return TryAllocation([&] { buffer.reserve(capacity); });
+}
+
+// Retained append-only state needs geometric growth, rather than reserve(size+1)
+// on every row. Charge both old and new buffers through the original allocator.
+template <typename Buffer>
+inline bool TryGrow(Buffer &buffer, size_t required) noexcept {
+  if (required <= buffer.capacity()) return true;
+  const size_t old = buffer.capacity();
+  const size_t grown = old > buffer.max_size() / 2 ? buffer.max_size() : std::max<size_t>(1, old * 2);
+  return TryReserve(buffer, std::max(required, grown));
+}
+
+template <typename Container, typename... Args>
+inline bool TryEmplace(Container &container, Args &&...args) noexcept {
+  return TryAllocation([&] { container.emplace(std::forward<Args>(args)...); });
+}
+
+template <typename Container, typename... Args>
+inline bool TryEmplaceAt(Container &container, typename Container::iterator *result, Args &&...args) noexcept {
+  return TryAllocation([&] { *result = container.emplace(std::forward<Args>(args)...); });
+}
+
+inline bool AllocationError(const char *buffer) {
+  my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), buffer);
+  return true;
+}
 
 namespace Kernels {
 inline Utils::SIMD::SIMDType RuntimeSimdType() { return Utils::SIMD::simd_support(); }
@@ -146,11 +195,13 @@ class CardinalityObservation {
 
 using filter_func_t = std::function<bool(const uchar *)>;
 
-inline void PrepareBudgetedString(String *value, std::pmr::vector<char> *buffer, size_t bytes) {
-  if (bytes > UINT32_MAX - 16) throw std::bad_alloc();
+inline bool PrepareBudgetedString(String *value, std::pmr::vector<char> *buffer, size_t bytes) {
+  if (bytes > UINT32_MAX - 16) return false;
+  if (!TryReserve(*buffer, bytes + 16)) return false;
   buffer->resize(bytes + 16);
   value->set(buffer->data(), buffer->size(), &my_charset_bin);
   value->length(0);
+  return true;
 }
 
 class ColumnChunk {
@@ -185,6 +236,8 @@ class ColumnChunk {
   ColumnChunk &operator=(ColumnChunk &&other) noexcept;
 
   inline bool valid() const { return m_source_fld && (m_cols_buffer.get() != nullptr); }
+  // An empty chunk is valid input; a failed one must stop the operator.
+  inline bool failed() const { return m_source_fld != nullptr && m_cols_buffer.get() == nullptr; }
   // set the row-indexth is null.
   inline void set_null(size_t index) {
     assert(m_null_mask.get());
@@ -281,7 +334,9 @@ class ColumnChunk {
   // execution detail and must not be constrained by optimizer estimates.
   bool grow(size_t new_capacity);
 
-  void reset(Field *mysql_fld, size_t chunk_size);
+  // Rebinds the chunk. Returns false when its backing buffers could not be allocated;
+  // the chunk is then invalid, not throwing.
+  bool reset(Field *mysql_fld, size_t chunk_size);
 
   size_t compact();
 
@@ -307,7 +362,7 @@ class ColumnChunk {
   inline ShannonBase::bit_array_t *get_null_mask() const { return m_null_mask.get(); }
 
  private:
-  inline void initialize_buffers();
+  bool initialize_buffers();
 
   void copy_from(const ColumnChunk &other);
 

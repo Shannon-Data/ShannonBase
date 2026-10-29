@@ -1095,6 +1095,9 @@ The following options may be given as the first argument:
  Initiates a garbage collection cycle when the difference
  between the current SystemChange Number (SCN) and the
  last recorded GC SCN exceeds this threshold value.
+ --rapid-materialize-spill-size-max[=#] 
+ Maximum live temporary column spool bytes per Rapid
+ materialization.
  --rapid-max-purger-timeout[=#] 
  GC maintenance loop interval, in seconds. Bounds how long
  reclaimable row versions may accumulate before the
@@ -2030,6 +2033,7 @@ range-optimizer-max-mem-size 8388608
 rapid-async-column-threshold 16
 rapid-change-propagation-mode CAPTURE
 rapid-gc-interval-scn 1000000
+rapid-materialize-spill-size-max 8589934592
 rapid-max-purger-timeout 30
 rapid-memory-size-max 2147483648
 rapid-min-versions-for-purge 10

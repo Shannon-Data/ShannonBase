@@ -4,7 +4,7 @@
 #include <limits>
 #include "storage/rapid_engine/cost/cost.h"
 
-using ShannonBase::Optimizer::ColumnarJoinCostEstimator;
+using ColumnarJoinCostEstimator = ShannonBase::Optimizer::RpdCostEstimator::ColumnarJoinCostEstimator;
 
 TEST(RapidColumnarJoinWork, WiderBuildCanSpillDespiteFewerRows) {
   const auto narrow = ColumnarJoinCostEstimator::estimate(1000, 900, 8, 9);
@@ -43,7 +43,7 @@ TEST(RapidColumnarJoinWork, EmptyAndUnknownEstimates) {
   }
 }
 
-using ShannonBase::Optimizer::AggregatePlacementCost;
+using AggregatePlacementCost = ShannonBase::Optimizer::RpdCostEstimator::AggregatePlacementCost;
 
 TEST(RapidAggregatePlacement, SelectiveJoinRemovesRowsBeforeGrouping) {
   for (bool build : {false, true}) {

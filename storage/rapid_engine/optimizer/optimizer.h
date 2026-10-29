@@ -81,6 +81,8 @@ class CostEstimator;
 class CardinalityEstimator;
 
 struct TranslateState {
+  // Demand on the output edge, propagated by batch-capable consumers only.
+  bool batch_requested{false};
   // Set of tables covered by the current AccessPath node
   table_map state_map{0};
 

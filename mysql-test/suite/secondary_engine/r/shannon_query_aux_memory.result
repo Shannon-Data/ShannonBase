@@ -489,7 +489,7 @@ SET DEBUG_SYNC='now WAIT_FOR rapid_reservation_b_ready';
 # Two live queries hold their operator grants; a third must refuse.
 SELECT pkey,SUM(bval) AS total,COUNT(*) AS n FROM p JOIN b ON pkey=bkey
 GROUP BY pkey ORDER BY pkey DESC LIMIT 5;
-ERROR HY000: Rapid hash join auxiliary memory exhausted
+ERROR HY000: Rapid LIMIT could not preserve its batch input
 SET DEBUG_SYNC='now SIGNAL rapid_reservation_continue_a';
 pkey	total	n
 400	800	1

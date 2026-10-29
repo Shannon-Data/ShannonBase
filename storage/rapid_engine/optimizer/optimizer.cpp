@@ -24,6 +24,7 @@
    The fundmental code for imcs optimizer.
 */
 #include "storage/rapid_engine/optimizer/optimizer.h"
+#include "storage/rapid_engine/executor/iterators/nested_loop_iterator.h"
 
 #include <algorithm>
 #include <iomanip>
@@ -33,6 +34,7 @@
 #include "scope_guard.h"            // create_scope_guard
 #include "sql-common/my_decimal.h"  // my_decimal2string
 #include "sql/field.h"
+#include "sql/filesort.h"
 #include "sql/iterators/basic_row_iterators.h"
 #include "sql/iterators/hash_join_iterator.h"  //HashJoinIterator
 #include "sql/iterators/timing_iterator.h"
@@ -60,6 +62,9 @@
 #include "storage/rapid_engine/utils/utils.h"
 
 #include "storage/rapid_engine/executor/iterators/aggregate_iterator.h"
+#include "storage/rapid_engine/executor/iterators/materialize_iterator.h"
+#include "storage/rapid_engine/executor/iterators/sort_iterator.h"
+#include "storage/rapid_engine/executor/iterators/stream_iterator.h"
 #include "storage/rapid_engine/handler/ha_shannon_rapid.h"
 #include "storage/rapid_engine/imcs/imcs.h"
 #include "storage/rapid_engine/optimizer/path/access_path.h"
@@ -226,7 +231,8 @@ bool PreferOrderedAggregate(THD *thd, const JOIN *join, const AccessPath *input)
   // WriteHashSpillRow stores a tag, key/blob lengths, encoded key and row.
   const double spill_row_bytes = row_bytes + kSpillRecordTagBytes + kSpillLengthFieldBytes +
                                  std::max<size_t>(field->pack_length(), kSpillKeyFloorBytes);
-  const auto work = AggregateOrderEstimator::estimate(rows, groups, spill_row_bytes, group_bytes, budget);
+  const auto work =
+      RpdCostEstimator::AggregateOrderEstimator::estimate(rows, groups, spill_row_bytes, group_bytes, budget);
   // io_factor() prices compressed IMCS memory reads (0.125 by default), not
   // spill files. These records are uncompressed and written/read on disk.
   const double spill_byte_cost =
@@ -960,6 +966,52 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
       return false;
     } break;
     case AccessPath::NESTED_LOOP_JOIN: {
+      const auto &nlj = path->nested_loop_join();
+      const table_map nlj_outer_tables = Utils::get_tablescovered(nlj.outer);
+      auto ref_keys_supplied_by_outer = [&](const Index_lookup *ref) {
+        if (ref == nullptr) return false;
+        for (uint i = 0; i < ref->key_parts; ++i) {
+          const Item *item = ref->items[i];
+          if (item == nullptr) return false;
+          const table_map used = const_cast<Item *>(item)->used_tables();
+          if (used & (OUTER_REF_TABLE_BIT | RAND_TABLE_BIT)) return false;
+          if (used & ~nlj_outer_tables) return false;
+        }
+        return true;
+      };
+      const Index_lookup *lookup = nullptr;
+      if (nlj.inner->type == AccessPath::REF) lookup = nlj.inner->ref().ref;
+      if (nlj.inner->type == AccessPath::EQ_REF) lookup = nlj.inner->eq_ref().ref;
+      // Transport pricing cannot preempt an already cheaper hash-join candidate.
+      bool prefer_hash = thd->lex->using_hypergraph_optimizer() && lookup != nullptr &&
+                         ref_keys_supplied_by_outer(lookup) &&
+                         WideningLookupPays(thd, nlj.inner, nlj.outer->num_output_rows());
+      DBUG_EXECUTE_IF("rapid_force_vectorized_nlj", { prefer_hash = false; });
+      if (!prefer_hash && Executor::SelectVectorizedNestedLoop(thd, path, state->batch_requested)) {
+        TranslateState outer, inner;
+        if (translate_access_path(&outer, thd, nlj.outer, join) || translate_access_path(&inner, thd, nlj.inner, join))
+          return true;
+        if (!outer.plan_node || !inner.plan_node) {
+          make_native_plan(state, path);
+          return false;
+        }
+        auto node = std::make_unique<NestLoopJoin>();
+        node->original_path = path;
+        node->batch_output_requested = state->batch_requested;
+        node->estimated_rows = SafeRowEstimate(path->num_output_rows());
+        node->cost = path->cost();
+        if (thd->lex->using_hypergraph_optimizer()) {
+          node->source_join_predicate = nlj.join_predicate;
+          node->already_expanded_predicates = nlj.already_expanded_predicates;
+          node->equijoin_predicates = nlj.equijoin_predicates;
+        }
+        node->pfs_batch_mode = nlj.pfs_batch_mode;
+        node->children.push_back(std::move(outer.plan_node));
+        node->children.push_back(std::move(inner.plan_node));
+        state->state_map = outer.state_map | inner.state_map;
+        state->plan_node = std::move(node);
+        return false;
+      }
       /*
        * nested_loop_join().join_predicate is written only by the hypergraph
        * optimizer (sql/join_optimizer/join_optimizer.cc). The legacy executor
@@ -981,7 +1033,6 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
         make_native_plan(state, path);
         return false;
       }
-      auto &nlj = path->nested_loop_join();
       // Hash Join requires a full scan of the build (inner) side.
       // Point lookups (REF / EQ_REF) return only matching rows and must be
       // widened to an index or table scan.
@@ -1016,19 +1067,6 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
       // was charged the lookup loop, so widening can only make it cheaper.
       bool keep_point_lookup = false;
       const double nlj_outer_rows = (nlj.outer != nullptr) ? nlj.outer->num_output_rows() : -1.0;
-
-      const table_map nlj_outer_tables = Utils::get_tablescovered(nlj.outer);
-      auto ref_keys_supplied_by_outer = [&](const Index_lookup *ref) {
-        if (ref == nullptr) return false;
-        for (uint i = 0; i < ref->key_parts; ++i) {
-          const Item *item = ref->items[i];
-          if (item == nullptr) return false;
-          const table_map used = const_cast<Item *>(item)->used_tables();
-          if (used & (OUTER_REF_TABLE_BIT | RAND_TABLE_BIT)) return false;
-          if (used & ~nlj_outer_tables) return false;
-        }
-        return true;
-      };
 
       switch (inner_child->type) {
         case AccessPath::REF: {
@@ -1242,6 +1280,7 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
       }
 
       TranslateState outer_state, inner_state;
+      outer_state.batch_requested = inner_state.batch_requested = true;
       if (translate_access_path(&outer_state, thd, hj.outer, join)) return true;
       if (translate_access_path(&inner_state, thd, hj.inner, join)) return true;
 
@@ -1313,6 +1352,8 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
       auto &limit_ap = path->limit_offset();
 
       TranslateState child_state;
+      child_state.batch_requested =
+          state->batch_requested && !limit_ap.count_all_rows && !limit_ap.reject_multiple_rows;
       if (translate_access_path(&child_state, thd, limit_ap.child, join)) {
         return true;
       }
@@ -1372,6 +1413,7 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
         return false;
       }
       TranslateState child_state;
+      child_state.batch_requested = state->batch_requested;
       if (translate_access_path(&child_state, thd, f.child, join)) return true;
 
       auto node = std::make_unique<Filter>();
@@ -1400,6 +1442,7 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
                                       : nullptr;
       const bool prefer_ordered_scan = ordered_input != nullptr;
       TranslateState child_state;
+      child_state.batch_requested = true;
       if (translate_access_path(&child_state, thd, ordered_input ? ordered_input : tta.subquery_path, join))
         return true;
       if (prefer_ordered_scan && child_state.plan_node && child_state.plan_node->type() == PlanNode::Type::SCAN)
@@ -1531,6 +1574,7 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
         aggregate_child = aggregate_child->sort().child;
       }
       TranslateState child_state;
+      child_state.batch_requested = true;
       if (translate_access_path(&child_state, thd, aggregate_child, join)) return true;
       if (prefer_ordered_scan && child_state.plan_node && child_state.plan_node->type() == PlanNode::Type::SCAN)
         static_cast<ScanTable *>(child_state.plan_node.get())->has_required_order = true;
@@ -1586,7 +1630,12 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
 
       ORDER *group_order = join ? join->group_list.order : nullptr;
       if (group_order == nullptr && join && join->query_block) group_order = join->query_block->group_list.first;
-      if (group_order != nullptr) {
+      if (!thd->lex->using_hypergraph_optimizer() && join != nullptr && !join->group_fields.is_empty()) {
+        // Legacy GROUP BY can already name a later output slice. Cached Items
+        // describe this aggregate's physical input; retain their reversed order.
+        for (const Cached_item &cached : join->group_fields) node->group_by.push_back(cached.get_item());
+        std::reverse(node->group_by.begin(), node->group_by.end());
+      } else if (group_order != nullptr) {
         for (ORDER *group = group_order; group; group = group->next) {
           if (!group->item || !*group->item) continue;
           // Keep the ROLLUP wrapper: LocalAgg::ToAccessPath()/PrepareAggregateFields()
@@ -1681,8 +1730,14 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
     } break;
     case AccessPath::SORT: {
       auto &sort_ap = path->sort();
+      // Hypergraph finalization only fills this bitmap for rowid sorts.
+      // Addon-field sorts retain their rows and require no handler rowids;
+      // initialize the otherwise unspecified member before testing it below.
+      if (sort_ap.filesort != nullptr && sort_ap.filesort->using_addon_fields()) sort_ap.tables_to_get_rowid_for = 0;
 
       TranslateState child_state;
+      child_state.batch_requested = Executor::VectorizedSortIterator::CanVectorize(
+          sort_ap.filesort, sort_ap.unwrap_rollup, sort_ap.tables_to_get_rowid_for);
       if (translate_access_path(&child_state, thd, sort_ap.child, join)) {
         return true;
       }
@@ -1717,7 +1772,18 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
       state->state_map = child_state.state_map;
       return false;
     } break;
+    case AccessPath::REF:
+    case AccessPath::REF_OR_NULL:
     case AccessPath::EQ_REF: {
+      if (state->batch_requested && Executor::SelectVectorizedLookup(thd, path)) {
+        auto node = std::make_unique<RefLookup>();
+        node->original_path = path;
+        node->cost = path->cost();
+        node->estimated_rows = SafeRowEstimate(path->num_output_rows());
+        state->plan_node = std::move(node);
+        state->state_map = Utils::get_tablescovered(path);
+        return false;
+      }
       // Normally an EQ_REF inner is rewritten to an INDEX_SCAN by the enclosing
       // join before it reaches here. It can still arrive directly (e.g. as a
       // join's outer/probe input, or a wrapper's child), and returning success
@@ -1744,6 +1810,20 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
       // 2. Subquery materialization
       // 3. Window function materialization
       auto &mat = path->materialize();
+      if (state->batch_requested && Executor::VectorizedMaterializeIterator::CanVectorize(path) &&
+          !thd->lex->using_hypergraph_optimizer()) {
+        // Keep SQL's operand bindings intact. Only the completed result is
+        // cached as Rapid columns before a consumer can initialize a probe.
+        auto node = std::make_unique<MaterializeDerived>();
+        node->original_path = path;
+        node->tmp_table = mat.param->table;
+        node->batch_output_requested = true;
+        node->cost = path->cost();
+        node->estimated_rows = SafeRowEstimate(path->num_output_rows());
+        state->plan_node = std::move(node);
+        state->state_map = Utils::get_tablescovered(path);
+        return false;
+      }
       bool is_cte = (mat.param->cte != nullptr);
       bool is_derived = (!is_cte && mat.param->unit != nullptr);
       if (is_cte) {
@@ -1818,6 +1898,7 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
         }
 
         auto derived_node = std::make_unique<MaterializeDerived>();
+        derived_node->batch_output_requested = state->batch_requested;
         derived_node->original_path = path;
         derived_node->tmp_table = tmp_table;
 
@@ -1879,6 +1960,8 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
       // t_med.grp = a.grp) and mark the outer correlation column as referenced.
       const auto &stream = path->stream();
       TranslateState child_state;
+      child_state.batch_requested =
+          Executor::VectorizedStreamIterator::CanVectorize(stream.temp_table_param, stream.table, stream.provide_rowid);
       if (translate_access_path(&child_state, thd, stream.child, stream.join)) return true;
 
       // A correlated block must re-run per outer row, and its predicates read

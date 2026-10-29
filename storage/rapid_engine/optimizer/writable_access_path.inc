@@ -60,6 +60,10 @@ struct RapidAggregateParameters {
   AggregateStrategy strategy{AggregateStrategy::STREAMING};
   ORDER *hash_output_order{nullptr};
 };
+
+struct RapidNestedLoopParameters {
+  size_t memory_budget{0};
+};
 }  // namespace Optimizer
 }  // namespace ShannonBase
 #endif  //__SHANNONBASE_WRITABLE_ACCESS_PATH_H__

@@ -132,7 +132,7 @@ bool VectorizedTableScanIterator::Init() {
   // Allocate row buffer for batch processing. to store data in mysql format in column format.
   CacheActiveFields();
 
-  PreallocateColumnChunks();
+  if (PreallocateColumnChunks()) return true;
 
   m_curr_batch_size = 0;
   m_curr_row_in_batch = 0;
@@ -211,7 +211,7 @@ Imcs::Imcu *VectorizedTableScanIterator::LocateImcuForRow(row_id_t global_row_id
   return find_in_snapshot();
 }
 
-void VectorizedTableScanIterator::PreallocateColumnChunks() {
+bool VectorizedTableScanIterator::PreallocateColumnChunks() {
   if (m_col_chunks.size() != static_cast<size_t>(table()->s->fields)) {
     m_col_chunks.assign(table()->s->fields, ShannonBase::Executor::ColumnChunk(nullptr, 0));
   }
@@ -225,6 +225,11 @@ void VectorizedTableScanIterator::PreallocateColumnChunks() {
         std::find(m_projected_columns.begin(), m_projected_columns.end(), ind) != m_projected_columns.end();
     if ((bitmap_is_set(table()->read_set, ind) || explicitly_projected) && !field->is_flag_set(NOT_SECONDARY_FLAG)) {
       m_col_chunks[ind] = ShannonBase::Executor::ColumnChunk(field, initial_capacity);
+      // A refused buffer cannot be told apart from an unprojected field later.
+      if (m_col_chunks[ind].failed()) {
+        my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid table scan auxiliary memory exhausted");
+        return true;
+      }
       valid_fields++;
     }
   }
@@ -234,9 +239,14 @@ void VectorizedTableScanIterator::PreallocateColumnChunks() {
       auto idx = field->field_index();
       if (idx < m_col_chunks.size()) {
         m_col_chunks[idx] = ShannonBase::Executor::ColumnChunk(field, initial_capacity);
+        if (m_col_chunks[idx].failed()) {
+          my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid table scan auxiliary memory exhausted");
+          return true;
+        }
       }
     }
   }
+  return false;
 }
 
 void VectorizedTableScanIterator::UpdatePerformanceMetrics(std::chrono::high_resolution_clock::time_point start_time) {

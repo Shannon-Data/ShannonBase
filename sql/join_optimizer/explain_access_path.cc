@@ -489,7 +489,7 @@ static unique_ptr<Json_object> ExplainMaterializeAccessPath(
     error |= AddMemberToObject<Json_boolean>(obj, "temp_table", true);
     str = "Temporary table";
   } else {
-    str = "Materialize";
+    str = path->vectorized ? "Vectorized materialize" : "Materialize";
   }
   const bool union_dedup = param->table->is_union_or_table() && doing_dedup;
   if (union_dedup ||
@@ -1170,7 +1170,7 @@ static unique_ptr<Json_object> SetObjectMembers(
       const TABLE &table = *path->ref().table;
       const KEY &key = table.key_info[path->ref().ref->key];
       error |= SetIndexInfoInObject(
-          &description, "index_lookup", nullptr, table, key, "lookup",
+          &description, "index_lookup", path->vectorized ? "Vectorized" : nullptr, table, key, "lookup",
           RefToString(*path->ref().ref, key, /*include_nulls=*/false),
           /*ranges=*/nullptr, nullptr, path->ref().reverse,
           table.file->pushed_idx_cond, obj);
@@ -1181,7 +1181,7 @@ static unique_ptr<Json_object> SetObjectMembers(
       const TABLE &table = *path->ref_or_null().table;
       const KEY &key = table.key_info[path->ref_or_null().ref->key];
       error |= SetIndexInfoInObject(
-          &description, "index_lookup", nullptr, table, key, "lookup",
+          &description, "index_lookup", path->vectorized ? "Vectorized" : nullptr, table, key, "lookup",
           RefToString(*path->ref_or_null().ref, key, /*include_nulls=*/true),
           /*ranges=*/nullptr, nullptr, false, table.file->pushed_idx_cond, obj);
       error |= AddChildrenFromPushedCondition(table, children);
@@ -1191,7 +1191,7 @@ static unique_ptr<Json_object> SetObjectMembers(
       const TABLE &table = *path->eq_ref().table;
       const KEY &key = table.key_info[path->eq_ref().ref->key];
       error |= SetIndexInfoInObject(
-          &description, "index_lookup", "Single-row", table, key, "lookup",
+          &description, "index_lookup", path->vectorized ? "Vectorized single-row" : "Single-row", table, key, "lookup",
           RefToString(*path->eq_ref().ref, key, /*include_nulls=*/false),
           /*ranges=*/nullptr, nullptr, false, table.file->pushed_idx_cond, obj);
       error |= AddChildrenFromPushedCondition(table, children);
@@ -1377,7 +1377,7 @@ static unique_ptr<Json_object> SetObjectMembers(
       error |= AddMemberToObject<Json_string>(obj, "join_type", join_type);
       error |=
           AddMemberToObject<Json_string>(obj, "join_algorithm", "nested_loop");
-      description = "Nested loop " + join_type;
+      description = (path->vectorized ? "Vectorized nested loop " : "Nested loop ") + join_type;
       children->push_back({path->nested_loop_join().outer});
       children->push_back({path->nested_loop_join().inner});
       break;
@@ -1637,7 +1637,7 @@ static unique_ptr<Json_object> SetObjectMembers(
     }
     case AccessPath::STREAM:
       error |= AddMemberToObject<Json_string>(obj, "access_type", "stream");
-      description = "Stream results";
+      description = path->vectorized ? "Vectorized stream results" : "Stream results";
       children->push_back({path->stream().child});
       break;
     case AccessPath::MATERIALIZE:

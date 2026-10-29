@@ -662,7 +662,7 @@ EXPLAIN FORMAT=TREE SELECT a.id, b.max_val
 FROM t_small a,
 LATERAL (SELECT MAX(val) AS max_val FROM t_med WHERE t_med.grp = a.grp) b;
 EXPLAIN
--> Nested loop inner join
+-> Nested loop inner join  (rows=10)
     -> Vectorized table scan on a in secondary engine Rapid  (rows=10)
     -> Stream results  (rows=1)
         -> Aggregate:   (rows=1)
@@ -694,7 +694,7 @@ FROM t_small a,
 LATERAL (SELECT AVG(val) AS avg_val, MIN(val) AS min_val
 FROM t_med WHERE t_med.grp = a.grp) b;
 EXPLAIN
--> Nested loop inner join
+-> Nested loop inner join  (rows=10)
     -> Vectorized table scan on a in secondary engine Rapid  (rows=10)
     -> Stream results  (rows=1)
         -> Aggregate:   (rows=1)
