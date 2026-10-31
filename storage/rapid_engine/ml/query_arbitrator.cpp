@@ -30,6 +30,7 @@
 
 #include <cmath>
 
+#include "ml/infra_component/ort_runtime.h"
 #include "sql/item.h"
 #include "sql/log.h"
 #include "sql/sql_class.h"
@@ -105,6 +106,8 @@ bool Query_arbitrator::load_model(const std::string &model_path) {
     m_session_options = std::make_unique<Ort::SessionOptions>();
     m_session_options->SetIntraOpNumThreads(1);
     m_session_options->SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_EXTENDED);
+
+    OrtRuntime::execute(*m_session_options, "QueryArbitrator", OrtRuntime::file_size(model_path));
 
     // Load the ONNX model
 #ifdef SHANNON_WIN_PLATFORM

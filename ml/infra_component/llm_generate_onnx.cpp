@@ -25,6 +25,7 @@
 */
 
 #include "ml/infra_component/llm_generate_onnx.h"
+#include "ml/infra_component/ort_runtime.h"
 #include "my_rapidjson_size_t.h"
 
 #include <filesystem>
@@ -141,6 +142,8 @@ bool TextGenerator::InitializeONNX() {
 
   m_sessionOptions->EnableMemPattern();
   m_sessionOptions->EnableCpuMemArena();
+
+  OrtRuntime::execute(*m_sessionOptions, "TextGenerator", OrtRuntime::file_size(m_modelPath));
 #ifdef SHANNON_WIN_PLATFORM
   int len = MultiByteToWideChar(CP_UTF8, 0, model_path.c_str(), -1, nullptr, 0);
   std::wstring wmodel_path(len, L'\0');
