@@ -69,7 +69,6 @@ class VectorizedSortIterator final : public RowIterator, public BatchReadable {
   /// A LIMIT up to this many rows is kept in a bounded heap.
   static constexpr size_t kMaxTopNRows = 1 << 20;
   /// Rows per batch read from a batch-capable child.
-  static constexpr size_t kBatchRows = 1024;
 
   /// Whether this operator can run the sort; false keeps SortingIterator.
   /// Decided when the plan is built, so EXPLAIN shows what runs.
@@ -190,6 +189,7 @@ class VectorizedSortIterator final : public RowIterator, public BatchReadable {
   bool m_batch_eof{false};
   size_t m_batch_capacity{1};
   std::pmr::vector<ColumnChunk> m_chunks{&m_aux_memory};
+  std::pmr::vector<uint32_t> m_input_selection{&m_aux_memory};
   std::pmr::vector<PayloadField> m_payload_fields{&m_aux_memory};
   std::pmr::vector<std::shared_ptr<Compress::Dictionary>> m_batch_dictionaries{&m_aux_memory};
   std::pmr::string m_dictionary_decode_scratch{&m_aux_memory};

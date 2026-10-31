@@ -66,10 +66,12 @@ WHERE VARIABLE_NAME IN ('rapid_mempool_capacity_bytes', 'rapid_mempool_used_byte
 'rapid_gc_total_runs', 'rapid_compact_total_runs',
 'rapid_query_offload_total',
 'rapid_query_offload_fallback_total',
+'rapid_query_vectorized_aggregate_scalar_decimal_values_total',
+'rapid_query_vectorized_aggregate_scaled_values_total',
 'rapid_active_transactions',
 'rapid_transaction_commits_total');
 present_metrics
-12
+14
 #
 # 6. On a server with nothing loaded the counters start at zero.
 #

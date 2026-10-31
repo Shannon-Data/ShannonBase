@@ -279,6 +279,10 @@ VectorizedAggregateIterator::HashStatsReportGuard::~HashStatsReportGuard() {
   RapidMonitor::rapid_counter_vectorized_aggregate_hash_stats(
       stats->hash_batch_input_rows, stats->hash_row_materializations, stats->dict_code_cache_hits,
       stats->dict_code_cache_misses, stats->hash_memory_peak_bytes);
+  RapidMonitor::rapid_counters.query_vectorized_aggregate_scaled_values_total.fetch_add(stats->hash_scaled_values,
+                                                                                        std::memory_order_relaxed);
+  RapidMonitor::rapid_counters.query_vectorized_aggregate_scalar_decimal_values_total.fetch_add(
+      stats->hash_scalar_decimal_values, std::memory_order_relaxed);
 }
 
 VectorizedAggregateIterator::~VectorizedAggregateIterator() { ResMgmt::unregister_evictable(this); }
@@ -406,6 +410,8 @@ bool VectorizedAggregateIterator::InitImpl() {
   m_evict_requested = false;
   m_evict_target = 0;
   m_hash_growth_exhausted = false;
+  m_scaled_aggregate = true;
+  DBUG_EXECUTE_IF("rapid_disable_scaled_aggregate", { m_scaled_aggregate = false; });
   if (!m_memory_reservation) {
     my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid query memory reservation exhausted");
     return true;
@@ -894,13 +900,14 @@ bool VectorizedAggregateIterator::WriteHashSpillState(HashSpillFile *file, const
     return true;
 
   for (const HashAggregateState &state : group.aggregates) {
+    my_decimal total;
+    if (state.decimal_value && state.decimal_sum.Get(&total)) return true;
     const uint8_t has_value = state.has_value ? 1 : 0;
     const uint8_t decimal_value = state.decimal_value ? 1 : 0;
     if (WriteHashSpillRaw(file, &state.count, sizeof(state.count)) ||
         WriteHashSpillRaw(file, &has_value, sizeof(has_value)) ||
         WriteHashSpillRaw(file, &decimal_value, sizeof(decimal_value)) ||
-        WriteHashSpillRaw(file, &state.real_sum, sizeof(state.real_sum)) ||
-        WriteHashSpillDecimal(file, state.decimal_sum) ||
+        WriteHashSpillRaw(file, &state.real_sum, sizeof(state.real_sum)) || WriteHashSpillDecimal(file, total) ||
         WriteHashSpillBlob(file, state.extremum.data(), state.extremum.size()))
       return true;
   }
@@ -1130,7 +1137,7 @@ int VectorizedAggregateIterator::LoadHashSpillState(const SpillGroupState &state
     target.has_value = source.has_value;
     target.decimal_value = source.decimal_value;
     target.real_sum = source.real_sum;
-    target.decimal_sum = source.decimal_sum;
+    target.decimal_sum.Set(source.decimal_sum);
     if (!TryReserve(target.extremum, source.extremum.size())) {
       rollback();
       return HashMemoryLimitExceeded();
@@ -1488,7 +1495,11 @@ int VectorizedAggregateIterator::BuildHashGroupsBatch() {
       m_expression_chunk_scratch.emplace_back(std::move(m_batch_col_chunks.back()));
       m_batch_col_chunks.pop_back();
     }
-    const int result = m_batch_source->ReadBatch(m_batch_col_chunks, m_vectorizer.opt_batch_size, rows);
+    m_hash_batch_selection.clear();
+    const int result = HasExpressionAggregate()
+                           ? m_batch_source->ReadBatch(m_batch_col_chunks, m_vectorizer.opt_batch_size, rows)
+                           : m_batch_source->ReadSelectedBatch(m_batch_col_chunks, m_vectorizer.opt_batch_size, rows,
+                                                               m_hash_batch_selection);
     while (!m_expression_chunk_scratch.empty()) {
       m_batch_col_chunks.emplace_back(std::move(m_expression_chunk_scratch.back()));
       m_expression_chunk_scratch.pop_back();
@@ -1504,7 +1515,8 @@ int VectorizedAggregateIterator::BuildHashGroupsBatch() {
       return 1;
     }
 
-    for (size_t row = 0; row < rows; ++row) {
+    for (size_t logical = 0; logical < rows; ++logical) {
+      const size_t row = m_hash_batch_selection.empty() ? logical : m_hash_batch_selection[logical];
       if (m_hash_spilled) {
         // Spill format intentionally stays row-compatible so recursive rebuild
         // reuses the exact scalar semantics. Spill is the exceptional path.
@@ -2147,14 +2159,9 @@ int VectorizedAggregateIterator::UpdateHashGroup(HashGroupState *group) {
         case MYSQL_TYPE_NEWDECIMAL: {
           my_decimal value;
           field->val_decimal(&value);
-          if (!state.decimal_value) {
-            my_decimal2decimal(&value, &state.decimal_sum);
-            state.decimal_value = true;
-          } else {
-            my_decimal result;
-            if (my_decimal_add(E_DEC_FATAL_ERROR, &result, &state.decimal_sum, &value) > 1) return 1;
-            state.decimal_sum = result;
-          }
+          if (state.decimal_sum.Add(value)) return 1;
+          state.decimal_value = true;
+          ++m_stats.hash_scalar_decimal_values;
         } break;
         case MYSQL_TYPE_FLOAT:
         case MYSQL_TYPE_DOUBLE:
@@ -2191,17 +2198,10 @@ int VectorizedAggregateIterator::UpdateHashGroupFromBatch(HashGroupState *group,
     return HashMemoryLimitExceeded();
   }
 
-  auto add_decimal = [](HashAggregateState *state, const my_decimal &value) -> bool {
-    if (!state->decimal_value) {
-      my_decimal2decimal(&value, &state->decimal_sum);
-      state->decimal_value = true;
-      return false;
-    }
-
-    my_decimal result;
-    if (my_decimal_add(E_DEC_FATAL_ERROR, &result, &state->decimal_sum, &value) > 1) return true;
-    state->decimal_sum = result;
-    return false;
+  auto add_decimal = [&](HashAggregateState *state, const my_decimal &value) -> bool {
+    ++m_stats.hash_scalar_decimal_values;
+    state->decimal_value = true;
+    return state->decimal_sum.Add(value);
   };
 
   {
@@ -2251,16 +2251,21 @@ int VectorizedAggregateIterator::UpdateHashGroupFromBatch(HashGroupState *group,
       ++state.count;
 
       // AVG accumulates exactly like SUM -- the count is tracked separately just
-      // above and handed to Item_sum_avg together with the sum, so integer and
-      // decimal inputs go through the same exact my_decimal accumulation instead
-      // of a lossy double. Per-row association order is preserved for FP; there
-      // is no horizontal reduction here.
+      // above and handed to Item_sum_avg together with the exact sum. Integer
+      // and decimal values stay scaled until a wide value or overflow requires
+      // arbitrary precision. Floating-point association order is unchanged.
 
       switch (field->type()) {
         case MYSQL_TYPE_LONG: {
           if (field->is_unsigned() || chunk.width() != sizeof(int32_t)) return 1;
           int32_t value;
           std::memcpy(&value, chunk.data_fast(row_idx), sizeof(value));
+          if (m_scaled_aggregate && state.decimal_sum.scaled()) {
+            if (state.decimal_sum.AddScaled(value, 0)) return 1;
+            state.decimal_value = true;
+            ++m_stats.hash_scaled_values;
+            break;
+          }
           my_decimal decimal;
           longlong2decimal(static_cast<longlong>(value), &decimal);
           if (add_decimal(&state, decimal)) return 1;
@@ -2269,11 +2274,27 @@ int VectorizedAggregateIterator::UpdateHashGroupFromBatch(HashGroupState *group,
           if (field->is_unsigned() || chunk.width() != sizeof(int64_t)) return 1;
           int64_t value;
           std::memcpy(&value, chunk.data_fast(row_idx), sizeof(value));
+          if (m_scaled_aggregate && state.decimal_sum.scaled()) {
+            if (state.decimal_sum.AddScaled(value, 0)) return 1;
+            state.decimal_value = true;
+            ++m_stats.hash_scaled_values;
+            break;
+          }
           my_decimal decimal;
           longlong2decimal(static_cast<longlong>(value), &decimal);
           if (add_decimal(&state, decimal)) return 1;
         } break;
         case MYSQL_TYPE_NEWDECIMAL: {
+          const auto *decimal_field = static_cast<const Field_new_decimal *>(field);
+          __int128 scaled;
+          if (m_scaled_aggregate && state.decimal_sum.scaled() &&
+              Utils::DecodePackedDecimal128(chunk.data_fast(row_idx), chunk.width(), decimal_field->precision,
+                                            field->decimals(), &scaled)) {
+            if (state.decimal_sum.AddScaled(scaled, field->decimals())) return 1;
+            state.decimal_value = true;
+            ++m_stats.hash_scaled_values;
+            break;
+          }
           // Expression fields are synthetic and have no entry in the table
           // field map. Their aggregate chunk is already resolved above.
           if (RestoreFieldFromChunk(field, chunk, row_idx)) return 1;
@@ -2310,6 +2331,8 @@ int VectorizedAggregateIterator::MaterializeHashGroup(const HashGroupState &grou
   for (size_t index = 0; index < m_vectorizer.aggregate_infos.size(); ++index) {
     const auto &info = m_vectorizer.aggregate_infos[index];
     const HashAggregateState &state = group.aggregates[index];
+    my_decimal total;
+    if (state.decimal_value && state.decimal_sum.Get(&total)) return kFatalError;
     Item_sum *item = info.item;
     item->clear();
 
@@ -2321,7 +2344,7 @@ int VectorizedAggregateIterator::MaterializeHashGroup(const HashGroupState &grou
         if (!state.has_value) break;
         Item_sum_sum *sum = down_cast<Item_sum_sum *>(item);
         if (state.decimal_value) {
-          if (m_vectorizer.Sum(sum, info.source_field, state.decimal_sum)) return kFatalError;
+          if (m_vectorizer.Sum(sum, info.source_field, total)) return kFatalError;
         } else if (m_vectorizer.Sum(sum, info.source_field, state.real_sum)) {
           return kFatalError;
         }
@@ -2336,7 +2359,7 @@ int VectorizedAggregateIterator::MaterializeHashGroup(const HashGroupState &grou
         // the Field round-trip truncated those to the source column's scale.
         Item_sum_avg *avg = down_cast<Item_sum_avg *>(item);
         if (state.decimal_value) {
-          if (m_vectorizer.Sum(avg, info.source_field, state.decimal_sum)) return kFatalError;
+          if (m_vectorizer.Sum(avg, info.source_field, total)) return kFatalError;
         } else if (m_vectorizer.Sum(avg, info.source_field, state.real_sum)) {
           return kFatalError;
         }

@@ -77,6 +77,7 @@ namespace Executor {
  */
 class VectorizedTableScanIterator final : public TableRowIterator, public BatchReadable {
  public:
+  bool PreservesBatchNullRows() const override { return true; }
   VectorizedTableScanIterator(THD *thd, TABLE *mtable, double expected_rows, ha_rows *examined_rows,
                               std::unique_ptr<Imcs::Predicate> predicate = nullptr,
                               const std::vector<uint32_t> &projection = {}, ha_rows limit = HA_POS_ERROR,

@@ -334,9 +334,9 @@ T max_generic(const T *data, const uint8_t *null_mask, size_t row_count) {
   return found ? val : std::numeric_limits<T>::lowest();
 }
 
-template <typename T>
+template <typename T, typename Allocator>
 size_t filter_generic(const T *data, const uint8_t *null_mask, size_t row_count, std::function<bool(T)> predicate,
-                      std::vector<size_t> &out) {
+                      std::vector<size_t, Allocator> &out) {
   size_t cnt = 0;
   for (size_t i = 0; i < row_count; ++i)
     if (!is_null(null_mask, i) && predicate(data[i])) {
@@ -1360,8 +1360,9 @@ inline size_t count_non_null_neon(const uint8_t *null_mask, size_t row_count) {
 // Filter (SSE2 int32 equality specialization)
 // ============================================================================
 
+template <typename Allocator>
 inline size_t filter_sse2_int32_eq(const int32_t *data, const uint8_t *null_mask, size_t row_count, int32_t value,
-                                   std::vector<size_t> &out) {
+                                   std::vector<size_t, Allocator> &out) {
 #if defined(SHANNON_X86_PLATFORM) && (defined(__SSE2__) || defined(SHANNON_SSE_VECT_SUPPORTED))
   size_t cnt = 0;
   size_t i = 0;
@@ -1414,9 +1415,10 @@ inline bool compare_scalar(T lhs, T rhs, CompareOp op) {
   return false;
 }
 
+template <typename Allocator>
 SHANNON_TARGET_AVX2 inline size_t filter_avx2_int32_compare(const int32_t *data, const uint8_t *null_mask,
                                                             size_t row_count, int32_t value, CompareOp op,
-                                                            std::vector<size_t> &out) {
+                                                            std::vector<size_t, Allocator> &out) {
 #if defined(SHANNON_X86_PLATFORM) && (defined(__AVX2__) || defined(SHANNON_RUNTIME_AVX2))
   size_t cnt = 0;
   size_t i = 0;
@@ -1466,9 +1468,10 @@ SHANNON_TARGET_AVX2 inline size_t filter_avx2_int32_compare(const int32_t *data,
 #endif
 }
 
+template <typename Allocator>
 SHANNON_TARGET_AVX2 inline size_t filter_avx2_int64_compare(const int64_t *data, const uint8_t *null_mask,
                                                             size_t row_count, int64_t value, CompareOp op,
-                                                            std::vector<size_t> &out) {
+                                                            std::vector<size_t, Allocator> &out) {
 #if defined(SHANNON_X86_PLATFORM) && (defined(__AVX2__) || defined(SHANNON_RUNTIME_AVX2))
   size_t cnt = 0;
   size_t i = 0;
@@ -1693,16 +1696,18 @@ inline size_t filter_eq_int32(const int32_t *data, const uint8_t *null_mask, siz
   }
 }
 
+template <typename Allocator>
 inline size_t filter_compare_int32(const int32_t *data, const uint8_t *null_mask, size_t row_count, int32_t value,
-                                   CompareOp op, std::vector<size_t> &out) {
+                                   CompareOp op, std::vector<size_t, Allocator> &out) {
   if (simd_support() == SIMDType::AVX2) return filter_avx2_int32_compare(data, null_mask, row_count, value, op, out);
   if (op == CompareOp::EQ) return filter_sse2_int32_eq(data, null_mask, row_count, value, out);
   return filter_generic<int32_t>(
       data, null_mask, row_count, [value, op](int32_t v) { return compare_scalar(v, value, op); }, out);
 }
 
+template <typename Allocator>
 inline size_t filter_compare_int64(const int64_t *data, const uint8_t *null_mask, size_t row_count, int64_t value,
-                                   CompareOp op, std::vector<size_t> &out) {
+                                   CompareOp op, std::vector<size_t, Allocator> &out) {
   if (simd_support() == SIMDType::AVX2) return filter_avx2_int64_compare(data, null_mask, row_count, value, op, out);
   return filter_generic<int64_t>(
       data, null_mask, row_count, [value, op](int64_t v) { return compare_scalar(v, value, op); }, out);

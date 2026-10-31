@@ -129,9 +129,9 @@ size_t filter_sse4(const T *data, const uint8_t *null_mask, size_t row_count, st
 template <typename T>
 size_t filter_neon(const T *data, const uint8_t *null_mask, size_t row_count, std::function<bool(T)> predicate,
                    std::vector<size_t> &output_indices);
-template <typename T>
+template <typename T, typename Allocator>
 size_t filter_generic(const T *data, const uint8_t *null_mask, size_t row_count, std::function<bool(T)> predicate,
-                      std::vector<size_t> &output_indices);
+                      std::vector<size_t, Allocator> &output_indices);
 
 // ============================================================================
 // High-level Interface
@@ -153,10 +153,12 @@ template <typename T>
 size_t filter(const T *data, const uint8_t *null_mask, size_t row_count, std::function<bool(T)> predicate,
               std::vector<size_t> &output_indices);
 
+template <typename Allocator>
 size_t filter_compare_int32(const int32_t *data, const uint8_t *null_mask, size_t row_count, int32_t value,
-                            CompareOp op, std::vector<size_t> &output_indices);
+                            CompareOp op, std::vector<size_t, Allocator> &output_indices);
+template <typename Allocator>
 size_t filter_compare_int64(const int64_t *data, const uint8_t *null_mask, size_t row_count, int64_t value,
-                            CompareOp op, std::vector<size_t> &output_indices);
+                            CompareOp op, std::vector<size_t, Allocator> &output_indices);
 
 }  // namespace SIMD
 }  // namespace Utils

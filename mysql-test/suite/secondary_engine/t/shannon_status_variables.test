@@ -68,6 +68,8 @@ SELECT COUNT(*) AS present_metrics
                          'rapid_gc_total_runs', 'rapid_compact_total_runs',
                          'rapid_query_offload_total',
                          'rapid_query_offload_fallback_total',
+                         'rapid_query_vectorized_aggregate_scalar_decimal_values_total',
+                         'rapid_query_vectorized_aggregate_scaled_values_total',
                          'rapid_active_transactions',
                          'rapid_transaction_commits_total');
 

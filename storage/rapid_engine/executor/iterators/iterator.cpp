@@ -43,9 +43,42 @@
 #include "sql/sql_class.h"
 #include "sql/table.h"  // TABLE
 #include "storage/rapid_engine/compress/dictionary/dictionary.h"
+#include "storage/rapid_engine/utils/decimal64.h"
+
+#if defined(SHANNON_POSIX_PLATFORM)
+#include <unistd.h>
+#endif
 
 namespace ShannonBase {
 namespace Executor {
+const BatchHardware &ExecutionBatchHardware() {
+  static const BatchHardware hardware = [] {
+    BatchHardware result;
+#if defined(SHANNON_POSIX_PLATFORM) && defined(_SC_LEVEL1_DCACHE_LINESIZE)
+    const long line = sysconf(_SC_LEVEL1_DCACHE_LINESIZE);
+    if (line > 0) result.cache_line_bytes = static_cast<size_t>(line);
+#endif
+#if defined(SHANNON_POSIX_PLATFORM) && defined(_SC_LEVEL2_CACHE_SIZE)
+    const long l2 = sysconf(_SC_LEVEL2_CACHE_SIZE);
+    if (l2 > 0) result.l2_bytes = static_cast<size_t>(l2);
+#endif
+    switch (Utils::SIMD::simd_support()) {
+      case Utils::SIMD::SIMDType::AVX2:
+      case Utils::SIMD::SIMDType::AVX:
+        result.simd_bytes = 32;
+        break;
+      case Utils::SIMD::SIMDType::NONE:
+        result.simd_bytes = sizeof(uint64_t);
+        break;
+      default:
+        result.simd_bytes = 16;
+        break;
+    }
+    return result;
+  }();
+  return hardware;
+}
+
 void CardinalityObservation::Finish(THD *thd, const char *operator_name, size_t rows) {
   if (m_finished || m_invalid) return;
   m_finished = true;
@@ -350,22 +383,22 @@ bool ColumnChunk::append_from(const ColumnChunk &source, size_t source_row) {
   return add(is_null ? nullptr : source.data_fast(source_row), is_null ? 0 : source.width(), is_null);
 }
 
-bool ColumnChunk::gather_in_place(const std::vector<uint32_t> &selection, size_t *bytes_moved) {
-  if (!valid()) return selection.empty();
+bool ColumnChunk::GatherRows(const uint32_t *selection, size_t count, size_t *bytes_moved) {
+  if (!valid()) return count == 0;
   const size_t old_size = m_current_size;
-  if (selection.size() > old_size) return false;
+  if (count > old_size) return false;
 
   if (bytes_moved != nullptr) *bytes_moved = 0;
-  bool identity = selection.size() == old_size;
-  for (size_t i = 0; identity && i < selection.size(); ++i) identity = selection[i] == i;
+  bool identity = count == old_size;
+  for (size_t i = 0; identity && i < count; ++i) identity = selection[i] == i;
   if (identity) return true;
 
-  for (size_t i = 0; i < selection.size(); ++i) {
+  for (size_t i = 0; i < count; ++i) {
     if (selection[i] >= old_size) return false;
     if (i != 0 && selection[i - 1] >= selection[i]) return false;
   }
 
-  for (size_t dst = 0; dst < selection.size(); ++dst) {
+  for (size_t dst = 0; dst < count; ++dst) {
     const size_t src = selection[dst];
     const bool is_null = nullable_fast(src);
     if (is_null) {
@@ -379,7 +412,7 @@ bool ColumnChunk::gather_in_place(const std::vector<uint32_t> &selection, size_t
       if (bytes_moved != nullptr) *bytes_moved += m_field_width;
     }
   }
-  m_current_size = selection.size();
+  m_current_size = count;
   return true;
 }
 
@@ -547,7 +580,8 @@ static bool extract_decimal_for_simd_safe(const ColumnChunk &chunk, size_t row_c
   if (!can_use_int64_for_decimal(source_field)) return false;
 
   data_buffer.resize(row_count, 0);
-  uint scale = get_decimal_scale(source_field);
+  const uint precision = get_decimal_precision(source_field);
+  const uint scale = get_decimal_scale(source_field);
 
   for (size_t i = 0; i < row_count; ++i) {
     if (chunk.nullable(i)) {
@@ -555,36 +589,7 @@ static bool extract_decimal_for_simd_safe(const ColumnChunk &chunk, size_t row_c
       continue;
     }
 
-    source_field->set_notnull();
-    const uchar *row_data = chunk.data(i);
-    size_t data_len = chunk.width();
-    source_field->pack(const_cast<uchar *>(source_field->data_ptr()), row_data, data_len);
-    my_decimal dec;
-    source_field->val_decimal(&dec);
-
-    // Convert using MySQL API
-    longlong result_val = 0;
-
-    if (scale == 0) {
-      // Direct conversion
-      int ret = decimal2longlong(&dec, &result_val);
-      if (ret > E_DEC_TRUNCATED) return false;  // Overflow or fatal error, fallback to scalar
-      data_buffer[i] = static_cast<int64_t>(result_val);
-    } else {
-      // Scale and convert
-      my_decimal scaled_dec;
-      my_decimal scale_factor_dec;
-      int64_t scale_factor = get_scale_factor(scale);
-      if (scale_factor == 0) return false;  // not representable -> scalar fallback
-      longlong2decimal(scale_factor, &scale_factor_dec);
-
-      int mul_ret = decimal_mul(&dec, &scale_factor_dec, &scaled_dec);
-      if (mul_ret > E_DEC_TRUNCATED) return false;  // Overflow detected
-
-      int conv_ret = decimal2longlong(&scaled_dec, &result_val);
-      if (conv_ret > E_DEC_TRUNCATED) return false;  // Conversion error
-      data_buffer[i] = static_cast<int64_t>(result_val);
-    }
+    if (!Utils::DecodePackedDecimal64(chunk.data(i), chunk.width(), precision, scale, &data_buffer[i])) return false;
   }
 
   return true;
@@ -909,20 +914,43 @@ double ColumnChunkOper::Average<my_decimal>(const ColumnChunk &chunk, size_t row
 
 VectorizedFilterIterator::VectorizedFilterIterator(THD *thd, unique_ptr_destroy_only<RowIterator> source,
                                                    Item *condition, double estimated_rows)
-    : RowIterator(thd), m_source(std::move(source)), m_condition(condition), m_cardinality(estimated_rows) {}
+    : RowIterator(thd),
+      m_reservation(
+          ResMgmt::reserve_query_memory(thd, ResMgmt::QueryMemoryOperator::kBatchTransport,
+                                        std::min<size_t>(Utils::Util::hash_join_memory_budget(thd), 256 * 1024))),
+      m_memory(m_reservation.bytes()),
+      m_source(std::move(source)),
+      m_condition(condition),
+      m_condition_fields(&m_memory),
+      m_condition_chunk_map(&m_memory),
+      m_condition_decode(&m_memory),
+      m_selection(&m_memory),
+      m_input_selection(&m_memory),
+      m_null_tables(&m_memory),
+      m_batch_nulls(&m_memory),
+      m_lookahead_nulls(&m_memory),
+      m_simd_selection(&m_memory),
+      m_lookahead_chunks(&m_memory),
+      m_cardinality(estimated_rows) {}
 
-void VectorizedFilterIterator::CollectConditionFields() {
+bool VectorizedFilterIterator::CollectConditionFields() {
   m_condition_fields.clear();
-  if (m_condition == nullptr) return;
-  WalkItem(m_condition, enum_walk::POSTFIX, [this](Item *item) -> bool {
+  if (m_condition == nullptr) return false;
+  bool failed = false;
+  WalkItem(m_condition, enum_walk::POSTFIX, [this, &failed](Item *item) -> bool {
     if (item == nullptr || item->type() != Item::FIELD_ITEM) return false;
     Field *field = down_cast<Item_field *>(item)->field;
     if (field != nullptr &&
         std::find(m_condition_fields.begin(), m_condition_fields.end(), field) == m_condition_fields.end()) {
+      if (!TryGrow(m_condition_fields, m_condition_fields.size() + 1)) {
+        failed = true;
+        return true;
+      }
       m_condition_fields.push_back(field);
     }
     return false;
   });
+  return failed;
 }
 
 void VectorizedFilterIterator::CompileSimplePredicate() {
@@ -992,7 +1020,7 @@ void VectorizedFilterIterator::CompileSimplePredicate() {
   }
 
   const longlong constant_value = constant->val_int();
-  if (constant->null_value || thd()->is_error()) return;
+  if (constant->null_value || constant->unsigned_flag || thd()->is_error()) return;
 
   if (reversed) {
     switch (op) {
@@ -1025,6 +1053,10 @@ bool VectorizedFilterIterator::EvaluateSimplePredicateBatch(const std::pmr::vect
   if (!chunk.valid() || rows > chunk.size()) return false;
 
   m_selection.clear();
+  if (!TryReserve(m_selection, rows) || !TryReserve(m_simd_selection, rows)) {
+    AllocationError("Rapid filter selection allocation failed");
+    return false;
+  }
   Utils::SIMD::CompareOp op;
   switch (m_simple_predicate.op) {
     case SimplePredicateOp::EQ:
@@ -1049,6 +1081,25 @@ bool VectorizedFilterIterator::EvaluateSimplePredicateBatch(const std::pmr::vect
       return false;
   }
 
+  if (!m_input_selection.empty()) {
+    const bool int32 = m_simple_predicate.field->type() == MYSQL_TYPE_LONG && chunk.width() == sizeof(int32_t);
+    const bool int64 = m_simple_predicate.field->type() == MYSQL_TYPE_LONGLONG && chunk.width() == sizeof(int64_t);
+    if (!int32 && !int64) return false;
+    for (uint32_t physical : m_input_selection) {
+      if (chunk.nullable_fast(physical)) continue;
+      int64_t value;
+      if (int32) {
+        int32_t raw;
+        std::memcpy(&raw, chunk.data_fast(physical), sizeof(raw));
+        value = raw;
+      } else
+        std::memcpy(&value, chunk.data_fast(physical), sizeof(value));
+      if (Utils::SIMD::compare_scalar<int64_t>(value, m_simple_predicate.integer_constant, op))
+        m_selection.push_back(physical);
+    }
+    m_stats.scalar_fallback_rows += rows;
+    return true;
+  }
   if (m_simple_predicate.field->type() == MYSQL_TYPE_LONG && chunk.width() == sizeof(int32_t)) {
     if (m_simple_predicate.integer_constant < std::numeric_limits<int32_t>::min() ||
         m_simple_predicate.integer_constant > std::numeric_limits<int32_t>::max())
@@ -1057,14 +1108,14 @@ bool VectorizedFilterIterator::EvaluateSimplePredicateBatch(const std::pmr::vect
     const auto *data = reinterpret_cast<const int32_t *>(chunk.data_fast(0));
     Kernels::FilterCompareInt32(data, chunk.get_null_mask()->data, rows,
                                 static_cast<int32_t>(m_simple_predicate.integer_constant), op, m_simd_selection);
-    m_selection.reserve(m_simd_selection.size());
+    if (!TryReserve(m_selection, m_simd_selection.size())) return false;
     for (size_t row : m_simd_selection) m_selection.push_back(static_cast<uint32_t>(row));
   } else if (m_simple_predicate.field->type() == MYSQL_TYPE_LONGLONG && chunk.width() == sizeof(int64_t)) {
     m_simd_selection.clear();
     const auto *data = reinterpret_cast<const int64_t *>(chunk.data_fast(0));
     Kernels::FilterCompareInt64(data, chunk.get_null_mask()->data, rows,
                                 static_cast<int64_t>(m_simple_predicate.integer_constant), op, m_simd_selection);
-    m_selection.reserve(m_simd_selection.size());
+    if (!TryReserve(m_selection, m_simd_selection.size())) return false;
     for (size_t row : m_simd_selection) m_selection.push_back(static_cast<uint32_t>(row));
   } else {
     return false;
@@ -1079,6 +1130,7 @@ bool VectorizedFilterIterator::EvaluateSimplePredicateBatch(const std::pmr::vect
 
 bool VectorizedFilterIterator::Init() {
   m_cardinality.Reset();
+  m_replayed_row = false;
   DBUG_EXECUTE_IF("rapid_iterator_bad_alloc", {
     my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid iterator allocation failure");
     return true;
@@ -1088,6 +1140,9 @@ bool VectorizedFilterIterator::Init() {
   for (ColumnChunk &chunk : m_lookahead_chunks) chunk.clear();
   m_condition_chunk_map.clear();
   m_selection.clear();
+  m_input_selection.clear();
+  m_batch_nulls.clear();
+  m_lookahead_nulls.clear();
   m_simd_selection.clear();
   m_stats = VectorizedOperatorStats{};
 
@@ -1097,12 +1152,49 @@ bool VectorizedFilterIterator::Init() {
   // Implementing BatchReadable is not the same as being able to serve batches
   // in this execution; see BatchReadable::SupportsBatchRead().
   if (m_batch_source != nullptr && !m_batch_source->SupportsBatchRead()) m_batch_source = nullptr;
-  CollectConditionFields();
+  if (m_batch_source && (!m_reservation || CollectConditionFields()))
+    return AllocationError("Rapid filter condition fields allocation failed");
   CompileSimplePredicate();
   return false;
 }
 
 int VectorizedFilterIterator::Read() {
+  if (m_lookahead_count) {
+    const size_t row = m_lookahead_start;
+    const uint64_t flags = m_lookahead_nulls[row];
+    for (size_t bit = 0; bit < m_null_tables.size(); ++bit) {
+      m_null_tables[bit]->set_found_row();
+      if (flags & (uint64_t{1} << bit)) m_null_tables[bit]->set_null_row();
+    }
+    for (const auto &chunk : m_lookahead_chunks) {
+      if (!chunk.valid()) continue;
+      Field *field = chunk.source_field();
+      if (field->table->has_null_row()) continue;
+      if (chunk.nullable_fast(row)) {
+        field->set_null();
+        continue;
+      }
+      field->set_notnull();
+      auto dictionary = Dictionary(field);
+      if (dictionary) {
+        if (!TryReserve(m_condition_decode, field->pack_length()))
+          return AllocationError("Rapid filter replay decode allocation failed");
+        m_condition_decode.resize(field->pack_length());
+        uint32_t code;
+        std::memcpy(&code, chunk.data_fast(row), sizeof(code));
+        const auto length = dictionary->get(code, m_condition_decode.data(), m_condition_decode.size());
+        Utils::ColumnMapGuard write_guard(field->table, Utils::ColumnMapGuard::TYPE::WRITE);
+        if (!length || field->store(m_condition_decode.data(), *length, field->charset()) != TYPE_OK)
+          return AllocationError("Rapid filter could not decode its replay row");
+      } else
+        std::memcpy(field->field_ptr(), chunk.data_fast(row), chunk.width());
+    }
+    ++m_lookahead_start;
+    --m_lookahead_count;
+    m_replayed_row = true;
+    return 0;
+  }
+  m_replayed_row = false;
   for (;;) {
     const int result = m_source->Read();
     if (result != 0) {
@@ -1128,11 +1220,16 @@ int VectorizedFilterIterator::Read() {
 void VectorizedFilterIterator::SetNullRowFlag(bool is_null_row) { m_source->SetNullRowFlag(is_null_row); }
 void VectorizedFilterIterator::StartPSIBatchMode() { m_source->StartPSIBatchMode(); }
 void VectorizedFilterIterator::EndPSIBatchModeIfStarted() { m_source->EndPSIBatchModeIfStarted(); }
-void VectorizedFilterIterator::UnlockRow() { m_source->UnlockRow(); }
+void VectorizedFilterIterator::UnlockRow() {
+  if (!m_replayed_row) m_source->UnlockRow();
+}
 
 bool VectorizedFilterIterator::BuildConditionChunkMap(const std::pmr::vector<ColumnChunk> &chunks) {
   m_condition_chunk_map.clear();
-  m_condition_chunk_map.reserve(m_condition_fields.size());
+  if (!TryReserve(m_condition_chunk_map, m_condition_fields.size())) {
+    AllocationError("Rapid filter condition map allocation failed");
+    return false;
+  }
   for (Field *field : m_condition_fields) {
     size_t found = std::numeric_limits<size_t>::max();
     for (size_t idx = 0; idx < chunks.size(); ++idx) {
@@ -1142,11 +1239,24 @@ bool VectorizedFilterIterator::BuildConditionChunkMap(const std::pmr::vector<Col
         break;
       }
     }
-    if (found == std::numeric_limits<size_t>::max()) return false;
-
-    // IMCS variable-length payloads may be dictionary ids/VarlenReference rather
-    // than a MySQL Field image. Keep those conditions on the ordinary row path.
-    if (Utils::Util::is_string(field->type()) || Utils::IsOffPageField(field)) return false;
+    if (found == std::numeric_limits<size_t>::max()) {
+      // A parameter from the outer side remains bound in its TABLE buffer.
+      // A missing column of a local table is a projection mismatch, not a parameter.
+      bool local = false;
+      for (const auto &chunk : chunks) local |= chunk.valid() && chunk.table() == field->table;
+      if (local) return false;
+      m_condition_chunk_map.push_back(found);
+      continue;
+    }
+    if (Utils::IsOffPageField(field)) return false;
+    if (Utils::Util::is_string(field->type()) && Dictionary(field)) {
+      if (!TryReserve(m_condition_decode, field->pack_length())) {
+        AllocationError("Rapid filter dictionary decode allocation failed");
+        return false;
+      }
+      if (m_condition_decode.size() < field->pack_length()) m_condition_decode.resize(field->pack_length());
+    } else if (chunks[found].width() != field->pack_length())
+      return false;
     m_condition_chunk_map.push_back(found);
     if (m_simple_predicate.valid && m_simple_predicate.field == field) m_simple_predicate.chunk_idx = found;
   }
@@ -1158,9 +1268,11 @@ bool VectorizedFilterIterator::MaterializeConditionRow(const std::pmr::vector<Co
   // A NULL from an outer join may belong to a NOT NULL marker column. Such
   // fields have no null bit; restore the table-level flag, just as the join's
   // scalar row materializer does. Clear it before materializing each new row.
-  for (Field *field : m_condition_fields) field->table->reset_null_row();
+  for (size_t i = 0; i < m_condition_fields.size(); ++i)
+    if (m_condition_chunk_map[i] != std::numeric_limits<size_t>::max()) m_condition_fields[i]->table->reset_null_row();
   for (size_t i = 0; i < m_condition_fields.size(); ++i) {
     Field *field = m_condition_fields[i];
+    if (m_condition_chunk_map[i] == std::numeric_limits<size_t>::max()) continue;
     const ColumnChunk &chunk = chunks[m_condition_chunk_map[i]];
     if (row >= chunk.size()) return true;
     if (chunk.nullable_fast(row)) {
@@ -1171,7 +1283,15 @@ bool VectorizedFilterIterator::MaterializeConditionRow(const std::pmr::vector<Co
       continue;
     }
     field->set_notnull();
-    field->pack(const_cast<uchar *>(field->data_ptr()), chunk.data_fast(row), chunk.width());
+    auto dictionary = Dictionary(field);
+    if (dictionary) {
+      uint32 code;
+      std::memcpy(&code, chunk.data_fast(row), sizeof(code));
+      const auto length = dictionary->get(code, m_condition_decode.data(), m_condition_decode.size());
+      Utils::ColumnMapGuard write_guard(field->table, Utils::ColumnMapGuard::TYPE::WRITE);
+      if (!length || field->store(m_condition_decode.data(), *length, field->charset()) != TYPE_OK) return true;
+    } else
+      field->pack(const_cast<uchar *>(field->data_ptr()), chunk.data_fast(row), chunk.width());
     m_stats.bytes_copied += chunk.width();
   }
   ++m_stats.row_materializations;
@@ -1182,7 +1302,7 @@ bool VectorizedFilterIterator::DrainLookahead(std::pmr::vector<ColumnChunk> &col
                                               size_t *rows_read) {
   if (rows_read == nullptr || m_lookahead_count == 0) return false;
   const size_t count = std::min(capacity, m_lookahead_count);
-  if (col_chunks.size() != m_lookahead_chunks.size()) return false;
+  if (col_chunks.size() != m_lookahead_chunks.size() || !TryReserve(m_batch_nulls, count)) return false;
   for (size_t col = 0; col < col_chunks.size(); ++col) {
     if (!col_chunks[col].valid()) continue;
     const ColumnChunk &source = m_lookahead_chunks[col];
@@ -1192,6 +1312,9 @@ bool VectorizedFilterIterator::DrainLookahead(std::pmr::vector<ColumnChunk> &col
       if (!source.nullable_fast(m_lookahead_start + row)) m_stats.bytes_copied += source.width();
     }
   }
+  if (!TryReserve(m_batch_nulls, count)) return false;
+  m_batch_nulls.assign(m_lookahead_nulls.begin() + m_lookahead_start,
+                       m_lookahead_nulls.begin() + m_lookahead_start + count);
   m_lookahead_start += count;
   m_lookahead_count -= count;
   if (m_lookahead_count == 0) {
@@ -1221,13 +1344,70 @@ int VectorizedFilterIterator::ReadBatchViaRows(std::pmr::vector<ColumnChunk> &co
       if (!chunk.add(is_null ? nullptr : field->field_ptr(), is_null ? 0 : field->pack_length(), is_null)) return 1;
       if (!is_null) m_stats.bytes_copied += field->pack_length();
     }
+    uint64_t flags = 0;
+    for (size_t bit = 0; bit < m_null_tables.size(); ++bit)
+      if (m_null_tables[bit]->has_null_row()) flags |= uint64_t{1} << bit;
+    m_batch_nulls.push_back(flags);
     ++rows_read;
   }
   return 0;
 }
 
-int VectorizedFilterIterator::ReadBatch(std::pmr::vector<ColumnChunk> &col_chunks, size_t capacity, size_t &rows_read) {
+bool VectorizedFilterIterator::BatchNullRow(TABLE *table, size_t row) const {
+  for (size_t bit = 0; bit < m_null_tables.size(); ++bit)
+    if (m_null_tables[bit] == table) return row < m_batch_nulls.size() && (m_batch_nulls[row] & (uint64_t{1} << bit));
+  return false;
+}
+
+int VectorizedFilterIterator::ReadBatch(std::pmr::vector<ColumnChunk> &chunks, size_t capacity, size_t &rows) {
+  std::pmr::vector<uint32_t> selection(&m_memory);
+  const int result = ReadSelectedBatch(chunks, capacity, rows, selection);
+  if (result != 0 && result != HA_ERR_END_OF_FILE) return result;
+  if (!selection.empty()) {
+    if (!TryReserve(m_selection, selection.size())) return 1;
+    m_selection.assign(selection.begin(), selection.end());
+    for (auto &chunk : chunks) {
+      if (!chunk.valid()) continue;
+      size_t bytes = 0;
+      if (!chunk.gather_in_place(m_selection, &bytes)) return 1;
+      m_stats.bytes_copied += bytes;
+    }
+  }
+  return result;
+}
+
+int VectorizedFilterIterator::ReadSelectedBatch(std::pmr::vector<ColumnChunk> &chunks, size_t capacity, size_t &rows,
+                                                std::pmr::vector<uint32_t> &selection) {
+  const int result = ReadSelectedBatchImpl(chunks, capacity, rows, selection);
+  if (result != 0 && result != HA_ERR_END_OF_FILE && !thd()->is_error() && !thd()->killed)
+    AllocationError("Rapid filter could not preserve its batch input or predicate");
+  return result;
+}
+
+int VectorizedFilterIterator::ReadSelectedBatchImpl(std::pmr::vector<ColumnChunk> &col_chunks, size_t capacity,
+                                                    size_t &rows_read, std::pmr::vector<uint32_t> &selection) {
+  selection.clear();
   rows_read = 0;
+  if (capacity == 0) return 0;
+  size_t width = 4 * sizeof(uint64_t);
+  for (const auto &chunk : col_chunks)
+    if (chunk.valid()) width += chunk.width() + 1;
+  m_batch_capacity = SelectBatchRows(width, m_reservation.bytes(), 4);
+  if (m_batch_capacity == 0) return AllocationError("Rapid filter batch exceeds its memory budget");
+  capacity = std::min(capacity, m_batch_capacity);
+  m_replayed_row = true;
+  m_batch_nulls.clear();
+  m_null_tables.clear();
+  if (!TryReserve(m_null_tables, std::min<size_t>(64, col_chunks.size())) || !TryReserve(m_batch_nulls, capacity))
+    return 1;
+  for (const auto &chunk : col_chunks) {
+    if (!chunk.valid()) continue;
+    if (std::find(m_null_tables.begin(), m_null_tables.end(), chunk.table()) == m_null_tables.end()) {
+      if (m_null_tables.size() == 64) return 1;
+      m_null_tables.push_back(chunk.table());
+    }
+  }
+  if (m_null_tables.size() > 64) return 1;
   if (capacity == 0) return 0;
   if (m_lookahead_count != 0) {
     if (!DrainLookahead(col_chunks, capacity, &rows_read)) return 1;
@@ -1236,6 +1416,7 @@ int VectorizedFilterIterator::ReadBatch(std::pmr::vector<ColumnChunk> &col_chunk
   }
 
   const bool direct_batch = m_batch_source != nullptr && BuildConditionChunkMap(col_chunks);
+  if (thd()->is_error()) return 1;
   if (!direct_batch) {
     const int result = ReadBatchViaRows(col_chunks, capacity, rows_read);
     if (rows_read != 0) ++m_stats.batches;
@@ -1245,17 +1426,27 @@ int VectorizedFilterIterator::ReadBatch(std::pmr::vector<ColumnChunk> &col_chunk
   for (;;) {
     for (ColumnChunk &chunk : col_chunks) chunk.clear();
     size_t input_rows = 0;
-    const int result = m_batch_source->ReadBatch(col_chunks, capacity, input_rows);
+    const int result = m_batch_source->ReadSelectedBatch(col_chunks, capacity, input_rows, m_input_selection);
     if (result != 0 && result != HA_ERR_END_OF_FILE) return result;
+    if (!m_input_selection.empty()) {
+      if (m_input_selection.size() != input_rows) return 1;
+      for (size_t row = 1; row < input_rows; ++row)
+        if (m_input_selection[row - 1] >= m_input_selection[row]) return 1;
+    }
+    const size_t extent = m_input_selection.empty() ? input_rows : size_t(m_input_selection.back()) + 1;
+    for (const auto &chunk : col_chunks)
+      if (chunk.failed() || (chunk.valid() && chunk.size() < extent)) return 1;
     m_stats.rows_in += input_rows;
     ++m_stats.batches;
 
     const bool used_vector_predicate = EvaluateSimplePredicateBatch(col_chunks, input_rows);
+    if (thd()->is_error()) return 1;
     if (!used_vector_predicate) {
       m_stats.scalar_fallback_rows += input_rows;
       m_selection.clear();
-      m_selection.reserve(input_rows);
-      for (size_t row = 0; row < input_rows; ++row) {
+      if (!TryReserve(m_selection, input_rows)) return 1;
+      for (size_t logical = 0; logical < input_rows; ++logical) {
+        const size_t row = m_input_selection.empty() ? logical : m_input_selection[logical];
         if (MaterializeConditionRow(col_chunks, row)) return 1;
         const bool matched = m_condition == nullptr || (m_condition->val_int() != 0 && !m_condition->null_value);
         if (thd()->is_error()) return 1;
@@ -1264,11 +1455,17 @@ int VectorizedFilterIterator::ReadBatch(std::pmr::vector<ColumnChunk> &col_chunk
     }
 
     if (!m_selection.empty()) {
-      for (ColumnChunk &chunk : col_chunks) {
-        if (!chunk.valid()) continue;
-        size_t bytes_moved = 0;
-        if (!chunk.gather_in_place(m_selection, &bytes_moved)) return 1;
-        m_stats.bytes_copied += bytes_moved;
+      if (!TryReserve(selection, m_selection.size())) return 1;
+      selection.assign(m_selection.begin(), m_selection.end());
+      for (uint32_t physical : m_selection) {
+        const size_t logical = m_input_selection.empty()
+                                   ? physical
+                                   : std::lower_bound(m_input_selection.begin(), m_input_selection.end(), physical) -
+                                         m_input_selection.begin();
+        uint64_t flags = 0;
+        for (size_t bit = 0; bit < m_null_tables.size(); ++bit)
+          if (m_batch_source->BatchNullRow(m_null_tables[bit], logical)) flags |= uint64_t{1} << bit;
+        m_batch_nulls.push_back(flags);
       }
       rows_read = m_selection.size();
       m_stats.rows_out += rows_read;
@@ -1371,9 +1568,20 @@ bool PushbackBatchTailShared(const std::pmr::vector<ColumnChunk> &chunks, size_t
 
 bool VectorizedFilterIterator::PushbackBatchTail(const std::pmr::vector<ColumnChunk> &chunks, size_t from_row,
                                                  size_t total_rows) {
-  if (from_row < total_rows) m_cardinality.Invalidate();
-  return PushbackBatchTailShared(chunks, from_row, total_rows, &m_lookahead_chunks, &m_lookahead_start,
-                                 &m_lookahead_count, &m_stats.bytes_copied);
+  if (from_row >= total_rows) return false;
+  if (total_rows > m_batch_nulls.size()) return true;
+  std::pmr::vector<uint64_t> flags(&m_memory);
+  if (!TryReserve(flags, total_rows - from_row + m_lookahead_count))
+    return AllocationError("Rapid filter lookahead flags allocation failed");
+  flags.insert(flags.end(), m_batch_nulls.begin() + from_row, m_batch_nulls.begin() + total_rows);
+  flags.insert(flags.end(), m_lookahead_nulls.begin() + m_lookahead_start,
+               m_lookahead_nulls.begin() + m_lookahead_start + m_lookahead_count);
+  if (PushbackBatchTailShared(chunks, from_row, total_rows, &m_lookahead_chunks, &m_lookahead_start, &m_lookahead_count,
+                              &m_stats.bytes_copied, &m_memory))
+    return true;
+  m_lookahead_nulls = std::move(flags);
+  m_cardinality.Invalidate();
+  return false;
 }
 
 }  // namespace Executor
