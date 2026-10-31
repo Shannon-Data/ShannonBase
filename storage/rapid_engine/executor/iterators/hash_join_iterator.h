@@ -61,8 +61,10 @@ inline HashJoinGrowth PlanHashJoinGrowth(size_t used, size_t limit, size_t slot_
                                          size_t required_slots, size_t required_keys, size_t slot_width) {
   const size_t max = std::numeric_limits<size_t>::max();
   if (slot_width == 0 || used > limit || slot_capacity > max / slot_width) return {};
+
   const size_t old_slots = slot_capacity * slot_width;
   if (old_slots > used || key_capacity > used - old_slots) return {};
+
   const auto grow = [max](size_t current, size_t required) {
     if (required <= current) return current;
     size_t result = std::max<size_t>(64, current);
@@ -88,8 +90,10 @@ inline HashJoinGrowth PlanHashJoinGrowth(size_t used, size_t limit, size_t slot_
     }
     return {true, slots, keys, peak};
   };
+
   auto plan = attempt(grow(slot_capacity, required_slots), grow(key_capacity, required_keys));
   if (plan.fits) return plan;
+
   return attempt(std::max(slot_capacity, required_slots), std::max(key_capacity, required_keys));
 }
 
@@ -153,7 +157,9 @@ class VectorizedHashJoinIterator final : public RowIterator, public BatchReadabl
     size_t build_memory_peak_bytes{0};
     size_t build_memory_limit_hits{0};
   };
+
   const PerformanceStats &GetPerformanceStats() const { return m_stats; }
+
   VectorizedOperatorStats GetOperatorStats() const {
     VectorizedOperatorStats stats;
     stats.rows_in = m_stats.build_rows + m_stats.probe_rows;
@@ -239,7 +245,7 @@ class VectorizedHashJoinIterator final : public RowIterator, public BatchReadabl
                               size_t capacity, bool input_layout, bool row_image);
   bool SupportsDirectBatchInput(const pack_rows::TableCollection &tables) const;
   bool CopyBatchColumns(const std::pmr::vector<ColumnChunk> &source, size_t rows,
-                        std::pmr::vector<ColumnChunk> &destination);
+                        std::pmr::vector<ColumnChunk> &destination, const std::pmr::vector<uint32_t> &selection);
   bool EnsureBuildCapacity(size_t required_rows);
 
   // The Rapid hash join is deliberately no-spill when probe ordering is part of the physical contract. Keep all
@@ -292,9 +298,16 @@ class VectorizedHashJoinIterator final : public RowIterator, public BatchReadabl
     SpillFile *run{nullptr};
   };
 
-  static constexpr size_t kSpillFanout = 16;
+  // Poll cancellation once per 256 rows/slots without division in hot loops.
+  static constexpr size_t kCancellationCheckInterval = 256;
+  static constexpr size_t kCancellationCheckMask = kCancellationCheckInterval - 1;
+  static_assert((kCancellationCheckInterval & kCancellationCheckMask) == 0);
+  // Low hash bits address buckets; spill partitions use independent high bits.
+  static constexpr unsigned kSpillHashBitOffset = 32;
+  static constexpr unsigned kSpillPartitionBits = 4;
+  static constexpr size_t kSpillFanout = size_t{1} << kSpillPartitionBits;
   size_t m_initial_spill_fanout{kSpillFanout};
-  unsigned m_initial_spill_bits{4};
+  unsigned m_initial_spill_bits{kSpillPartitionBits};
   static constexpr size_t kMaxSpillDepth = 6;
   static constexpr uint64_t kSpillHashSeed = 0x9E3779B97F4A7C15ULL;
 
@@ -403,11 +416,11 @@ class VectorizedHashJoinIterator final : public RowIterator, public BatchReadabl
 
   std::pmr::vector<HashJoinCondition> m_join_conditions{&m_aux_memory};
   bool m_aux_initialization_failed{false};
-  JoinType m_join_type;
-  size_t m_max_memory_available;
-  size_t m_batch_size;
-  bool m_allow_spill_to_disk;
-  bool m_probe_input_batch_mode;
+  JoinType m_join_type{JoinType::INNER};
+  size_t m_max_memory_available{0};
+  size_t m_batch_size{0};
+  bool m_allow_spill_to_disk{false};
+  bool m_probe_input_batch_mode{false};
   table_map m_tables_to_get_rowid_for;
   HashJoinInput m_first_input;
 
@@ -419,6 +432,8 @@ class VectorizedHashJoinIterator final : public RowIterator, public BatchReadabl
   std::pmr::vector<ColumnChunk> m_probe_columns{&m_aux_memory};
   std::pmr::vector<ColumnChunk> m_build_batch_columns{&m_aux_memory};
   std::pmr::vector<ColumnChunk> m_probe_batch_columns{&m_aux_memory};
+  std::pmr::vector<uint32_t> m_build_selection{&m_aux_memory}, m_probe_selection{&m_aux_memory};
+  size_t m_pending_build_rows{0};
 
   // Cache-friendly chained hash table. Buckets and entries are dense arrays; keys live in one byte arena and are
   // addressed by offsets. This removes one heap allocation per build row and pointer-chasing through unique_ptr nodes.
@@ -438,6 +453,7 @@ class VectorizedHashJoinIterator final : public RowIterator, public BatchReadabl
   std::pmr::vector<HashSlot> m_hash_slots{&m_build_memory};
   std::pmr::vector<uchar> m_hash_key_arena{&m_build_memory};
   Optimizer::Utils::RuntimeBloomFilter m_bloom{&m_build_memory};
+
   bool m_bloom_active{false};
   bool m_probe_batch_filtered{false};
   bool m_bloom_pushdown_disabled{false};
@@ -469,8 +485,8 @@ class VectorizedHashJoinIterator final : public RowIterator, public BatchReadabl
   bool m_probe_cursor_found_match{false};
 
   // Batch processing state
-  size_t m_curr_build_size;
-  size_t m_curr_probe_size;
+  size_t m_curr_build_size{0};
+  size_t m_curr_probe_size{0};
   // Set when ReadBuildBatch()/ExtractRowToColumnChunks() hits a real error (e.g. ColumnChunk capacity exceeded because
   // m_estimated_build_rows under-estimated the build side).  Distinguishes "real error" from  "clean EOF" so
   // BuildHashTable() doesn't silently proceed with a partially-built hash table.
@@ -481,8 +497,8 @@ class VectorizedHashJoinIterator final : public RowIterator, public BatchReadabl
   std::pmr::vector<char> m_join_key_storage{&m_aux_memory};
   String m_join_key_buffer;
   // Hash table generation for optimization
-  uint64_t *m_hash_table_gen;
-  uint64_t m_last_hash_table_gen;
+  uint64_t *m_hash_table_gen{nullptr};
+  uint64_t m_last_hash_table_gen{0};
 
   // Estimated build row count (from optimizer), used for dynamic bucket sizing.
   double m_estimated_build_rows{0.0};

@@ -25,7 +25,7 @@ EXPLAIN
 -> Vectorized aggregate: count(0), sum(i.amount), count(i.label)  (...)
     -> Vectorized nested loop inner join  (...)
         -> Vectorized table scan on o in secondary engine Rapid  (...)
-        -> Index lookup on i using k (k=o.id) in secondary engine Rapid  (...)
+        -> Vectorized index lookup on i using k (k=o.id) in secondary engine Rapid  (...)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
@@ -33,6 +33,7 @@ SELECT COUNT(*),SUM(i.amount),COUNT(i.label) FROM o STRAIGHT_JOIN i FORCE INDEX(
 COUNT(*)	SUM(i.amount)	COUNT(i.label)
 1600	1098058	1455
 # aggregate consumed NLJ batches (1 expected): 1
+# NLJ consumed REF batches (1 expected): 1
 # A row-consuming aggregate keeps vectorized scans below the nested loop.
 SET optimizer_switch='hypergraph_optimizer=on';
 Warnings:
@@ -59,7 +60,7 @@ EXPLAIN
 -> Vectorized aggregate: count(0), count(i.id), sum(i.amount), count(i.label)  (...)
     -> Vectorized nested loop left join  (...)
         -> Vectorized table scan on o in secondary engine Rapid  (...)
-        -> Index lookup on i using k (k=o.id) in secondary engine Rapid  (...)
+        -> Vectorized index lookup on i using k (k=o.id) in secondary engine Rapid  (...)
 
 Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one

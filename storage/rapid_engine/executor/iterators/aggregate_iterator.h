@@ -55,6 +55,7 @@
 #include "storage/rapid_engine/include/rapid_arch_inf.h"
 #include "storage/rapid_engine/include/rapid_const.h"
 #include "storage/rapid_engine/include/rapid_types.h"
+#include "storage/rapid_engine/utils/decimal_sum.h"
 /**
  * Usage:
  *
@@ -204,6 +205,8 @@ class VectorizedAggregateIterator final : public RowIterator, public ResMgmt::Ev
     size_t hash_batch_input_rows{0};
     size_t hash_row_input_rows{0};
     size_t hash_batch_direct_rows{0};
+    size_t hash_scaled_values{0};
+    size_t hash_scalar_decimal_values{0};
     size_t hash_row_materializations{0};
     size_t hash_new_group_materializations{0};
     size_t row_materializations{0};
@@ -422,7 +425,7 @@ class VectorizedAggregateIterator final : public RowIterator, public ResMgmt::Ev
     bool has_value{false};
     bool decimal_value{false};
     double real_sum{0.0};
-    my_decimal decimal_sum{};
+    Utils::DecimalSum decimal_sum;
     std::pmr::vector<uchar> extremum;
   };
 
@@ -532,6 +535,7 @@ class VectorizedAggregateIterator final : public RowIterator, public ResMgmt::Ev
   std::optional<HashStatsReportGuard> m_hash_stats_guard;
 
   bool m_hash_spilled{false};
+  bool m_scaled_aggregate{true};
   double m_expected_hash_groups{0};
   size_t m_initial_spill_fanout{kHashSpillFanout};
   uint64_t m_hash_spill_output_read{0};
@@ -539,6 +543,7 @@ class VectorizedAggregateIterator final : public RowIterator, public ResMgmt::Ev
   std::unique_ptr<HashSpillFile> m_hash_spill_output;
 
   std::pmr::vector<ColumnChunk> m_batch_col_chunks{&m_aux_memory};
+  std::pmr::vector<uint32_t> m_hash_batch_selection{&m_aux_memory};
   // Synthetic expression columns belong to this operator, not its child.
   size_t m_source_batch_columns{0};
   std::pmr::vector<ColumnChunk> m_expression_chunk_scratch{&m_aux_memory};

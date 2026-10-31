@@ -841,7 +841,8 @@ unique_ptr_destroy_only<RowIterator> PathGenerator::CreateIteratorFromAccessPath
           const auto *params = static_cast<const RapidNestedLoopParameters *>(path->secondary_engine_data);
           iterator = NewIterator<ShannonBase::Executor::VectorizedNestedLoopIterator>(
               thd, mem_root, std::move(job.children[0]), std::move(job.children[1]), param.join_type,
-              param.pfs_batch_mode, GetUsedTables(path, true), params->memory_budget, path->num_output_rows());
+              param.pfs_batch_mode, GetUsedTables(path, true), GetUsedTables(param.outer, true),
+              GetUsedTables(param.inner, true), params->memory_budget, path->num_output_rows());
           path->secondary_engine_data = nullptr;
         } else {
           iterator = NewIterator<NestedLoopIterator>(thd, mem_root, std::move(job.children[0]),
@@ -1154,10 +1155,11 @@ unique_ptr_destroy_only<RowIterator> PathGenerator::CreateIteratorFromAccessPath
         } else if (join != nullptr) {
           send_records = &join->send_records;
         }
-        if (path->vectorized && !param.count_all_rows && !param.reject_multiple_rows) {
+        const auto input_tables = GetUsedTables(param.child, true);
+        if (path->vectorized && !param.count_all_rows && !param.reject_multiple_rows &&
+            ShannonBase::Executor::VectorizedLimitIterator::CanVectorize(input_tables)) {
           iterator = NewIterator<ShannonBase::Executor::VectorizedLimitIterator>(
-              thd, mem_root, std::move(job.children[0]), param.limit, param.offset, send_records,
-              GetUsedTables(param.child, true),
+              thd, mem_root, std::move(job.children[0]), param.limit, param.offset, send_records, input_tables,
               std::min<size_t>(ShannonBase::Utils::Util::hash_join_memory_budget(thd), 2 * 1024 * 1024));
           break;
         }
@@ -1422,7 +1424,8 @@ unique_ptr_destroy_only<RowIterator> PathGenerator::CreateIteratorFromAccessPath
 
     if (path->vectorized &&
         (path->type == AccessPath::REF || path->type == AccessPath::REF_OR_NULL || path->type == AccessPath::EQ_REF)) {
-      iterator = NewIterator<ShannonBase::Executor::VectorizedRefIterator>(
+      iterator = ShannonBase::Executor::CreateVectorizedLookup(thd, std::move(iterator), path, examined_rows);
+      iterator = NewIterator<ShannonBase::Executor::VectorizedRecordIterator>(
           thd, mem_root, std::move(iterator), GetUsedTables(path, true),
           std::min<size_t>(ShannonBase::Utils::Util::hash_join_memory_budget(thd), 2 * 1024 * 1024),
           path->num_output_rows(), "ref");

@@ -36,18 +36,8 @@
 
 namespace ShannonBase {
 namespace Executor {
-namespace {
-class StreamInput final : public RowIterator {
- public:
-  StreamInput(THD *thd, RowIterator *source) : RowIterator(thd), m_source(source) {}
-  bool Init() override { return m_source->Init(); }
-  int Read() override { return m_source->Read(); }
-  void SetNullRowFlag(bool value) override { m_source->SetNullRowFlag(value); }
-  void UnlockRow() override { m_source->UnlockRow(); }
 
- private:
-  RowIterator *m_source;
-};
+namespace {
 bool SameRepresentation(Field *source, Field *target) {
   return source != nullptr && target != nullptr && source != target && source->real_type() == target->real_type() &&
          source->pack_length() == target->pack_length() && source->decimals() == target->decimals() &&
@@ -57,7 +47,8 @@ bool SameRepresentation(Field *source, Field *target) {
 }
 }  // namespace
 
-bool VectorizedStreamIterator::CanVectorize(const Temp_table_param *param, TABLE *table, bool provide_rowid) {
+namespace detail {
+bool BatchStreamIterator::CanVectorize(const Temp_table_param *param, TABLE *table, bool provide_rowid) {
   if (param == nullptr || table == nullptr || provide_rowid || !param->copy_fields.empty() ||
       param->items_to_copy == nullptr)
     return false;
@@ -90,16 +81,15 @@ bool VectorizedStreamIterator::CanVectorize(const Temp_table_param *param, TABLE
   return true;
 }
 
-VectorizedStreamIterator::VectorizedStreamIterator(THD *thd, unique_ptr_destroy_only<RowIterator> source,
-                                                   Temp_table_param *param, TABLE *table, bool provide_rowid,
-                                                   JOIN *join, int ref_slice,
-                                                   const Prealloced_array<TABLE *, 4> &input_tables, size_t budget)
+BatchStreamIterator::BatchStreamIterator(THD *thd, unique_ptr_destroy_only<RowIterator> source, Temp_table_param *param,
+                                         TABLE *table, bool provide_rowid, JOIN *join, int ref_slice,
+                                         const Prealloced_array<TABLE *, 4> &input_tables, size_t budget)
     : RowIterator(thd),
       m_reservation(ResMgmt::reserve_query_memory(thd, ResMgmt::QueryMemoryOperator::kBatchTransport, budget)),
       m_memory(m_reservation.bytes()),
       m_source(std::move(source)),
-      m_native(thd, NewIterator<StreamInput>(thd, thd->mem_root, m_source.get()), param, table, provide_rowid, join,
-               ref_slice),
+      m_native(thd, NewIterator<detail::BorrowedRows>(thd, thd->mem_root, m_source.get()), param, table, provide_rowid,
+               join, ref_slice),
       m_param(param),
       m_table(table),
       m_join(join),
@@ -107,22 +97,26 @@ VectorizedStreamIterator::VectorizedStreamIterator(THD *thd, unique_ptr_destroy_
       m_provide_rowid(provide_rowid),
       m_input_fields(&m_memory),
       m_input(&m_memory),
-      m_tail(&m_memory),
-      m_bindings(&m_memory),
-      m_decode(&m_memory) {
+      m_bindings(&m_memory) {
   for (TABLE *input : input_tables)
     for (uint i = 0; i < input->s->fields; ++i)
       m_input_fields.push_back(bitmap_is_set(input->read_set, i) ? input->field[i] : nullptr);
 }
 
-int VectorizedStreamIterator::Error() {
+int BatchStreamIterator::Error() {
   my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid stream could not preserve its columnar projection");
   return 1;
 }
 
-bool VectorizedStreamIterator::Init() {
-  m_tail.clear();
-  m_tail_start = m_tail_count = 0;
+bool BatchStreamIterator::SupportsBatchRead() const { return m_batch != nullptr; }
+
+void BatchStreamIterator::SetNullRowFlag(bool value) { m_native.SetNullRowFlag(value); }
+
+void BatchStreamIterator::UnlockRow() { m_source->UnlockRow(); }
+
+void BatchStreamIterator::EndPSIBatchModeIfStarted() { m_source->EndPSIBatchModeIfStarted(); }
+
+bool BatchStreamIterator::Init() {
   m_input.clear();
   m_bindings.clear();
   m_batch = nullptr;
@@ -148,75 +142,32 @@ bool VectorizedStreamIterator::Init() {
     if (!dictionary && Utils::Util::normalized_length(source) != source->pack_length()) return false;
     m_bindings.push_back({source, target, static_cast<size_t>(found - m_input_fields.begin()), std::move(dictionary)});
   }
-  // Reserve the widest decode target so LoadTail never allocates per row.
-  size_t decode_width{0};
-  for (const auto &binding : m_bindings)
-    if (binding.dictionary)
-      decode_width = std::max(decode_width, static_cast<size_t>(binding.source->field_length) + 1);
-  if (m_decode.capacity() < decode_width && !TryReserve(m_decode, decode_width)) return Error();
-  if (m_decode.size() < decode_width) m_decode.resize(decode_width);
+  size_t row_bytes = sizeof(uint32_t);
+  for (const auto &column : m_input)
+    if (column.valid()) row_bytes += column.width() + 1;
+  m_batch_capacity = SelectBatchRows(row_bytes, m_memory.limit() - m_memory.used(), 3);
+  if (m_batch_capacity == 0) return Error();
   m_batch = batch;
   return false;
 }
 
-std::shared_ptr<Compress::Dictionary> VectorizedStreamIterator::Dictionary(const Field *field) const {
+std::shared_ptr<Compress::Dictionary> BatchStreamIterator::Dictionary(const Field *field) const {
   for (const auto &binding : m_bindings)
     if (binding.target == field) return binding.dictionary;
   return {};
 }
 
-bool VectorizedStreamIterator::LoadTail() {
-  m_table->reset_null_row();
-  for (const auto &chunk : m_tail) {
-    if (!chunk.valid()) continue;
-    Field *field = chunk.source_field();
-    if (chunk.nullable_fast(m_tail_start)) {
-      field->set_null();
-      continue;
-    }
-    field->set_notnull();
-    auto dictionary = Dictionary(field);
-    if (dictionary) {
-      uint32_t code;
-      memcpy(&code, chunk.data_fast(m_tail_start), sizeof(code));
-      // Init() reserved the widest decode target, so this never allocates.
-      m_decode.resize(field->field_length + 1);
-      const auto length = dictionary->get(code, m_decode.data(), m_decode.size());
-      if (!length || field->store(m_decode.data(), *length, field->charset()) != TYPE_OK) return true;
-    } else
-      memcpy(field->field_ptr(), chunk.data_fast(m_tail_start), field->pack_length());
-  }
-  ++m_tail_start;
-  --m_tail_count;
-  if (m_output_slice >= 0 && !m_join->ref_items[m_output_slice].is_null()) m_join->set_ref_item_slice(m_output_slice);
-  return false;
-}
+int BatchStreamIterator::Read() { return m_native.Read(); }
 
-int VectorizedStreamIterator::Read() {
-  if (m_tail_count != 0) return LoadTail() ? Error() : 0;
-  return m_native.Read();
-}
-
-int VectorizedStreamIterator::ReadBatch(std::pmr::vector<ColumnChunk> &chunks, size_t capacity, size_t &rows) {
+int BatchStreamIterator::ReadBatch(std::pmr::vector<ColumnChunk> &chunks, size_t capacity, size_t &rows) {
   rows = 0;
   auto report_batches = create_scope_guard([&] {
     if (rows != 0)
       RapidMonitor::rapid_counters.query_vectorized_stream_batch_rows_total.fetch_add(rows, std::memory_order_relaxed);
   });
   if (m_batch == nullptr) return Error();
-  capacity = std::min<size_t>(capacity, 1024);
+  capacity = std::min(capacity, m_batch_capacity);
   if (capacity == 0) return 0;
-  if (m_tail_count != 0) {
-    if (chunks.size() != m_tail.size()) return Error();
-    while (rows < capacity && m_tail_count != 0) {
-      for (size_t i = 0; i < chunks.size(); ++i)
-        if (chunks[i].valid() && !chunks[i].append_from(m_tail[i], m_tail_start)) return Error();
-      ++rows;
-      ++m_tail_start;
-      --m_tail_count;
-    }
-    return 0;
-  }
   m_join->set_ref_item_slice(m_input_slice);
   auto output_slice = create_scope_guard([&] {
     if (m_output_slice >= 0 && !m_join->ref_items[m_output_slice].is_null()) m_join->set_ref_item_slice(m_output_slice);
@@ -225,7 +176,7 @@ int VectorizedStreamIterator::ReadBatch(std::pmr::vector<ColumnChunk> &chunks, s
     chunk.clear();
     if (chunk.valid() && chunk.capacity() < capacity && !chunk.grow(capacity)) return Error();
   }
-  const int result = m_batch->ReadBatch(m_input, capacity, rows);
+  const int result = m_batch->ReadSelectedBatch(m_input, capacity, rows, m_input_selection);
   if (result != 0 && result != HA_ERR_END_OF_FILE) return result;
   for (auto &chunk : chunks) {
     if (!chunk.valid()) continue;
@@ -236,21 +187,44 @@ int VectorizedStreamIterator::ReadBatch(std::pmr::vector<ColumnChunk> &chunks, s
     const auto &input = m_input[binding->index];
     if (chunk.width() != input.width()) return Error();
     for (size_t row = 0; row < rows; ++row) {
-      const bool is_null = input.nullable_fast(row);
-      if (!chunk.add(is_null ? nullptr : input.data_fast(row), is_null ? 0 : input.width(), is_null)) return Error();
+      const size_t physical = m_input_selection.empty() ? row : m_input_selection[row];
+      const bool is_null = input.nullable_fast(physical);
+      if (!chunk.add(is_null ? nullptr : input.data_fast(physical), is_null ? 0 : input.width(), is_null))
+        return Error();
     }
   }
   return result;
 }
 
-bool VectorizedStreamIterator::PushbackBatchTail(const std::pmr::vector<ColumnChunk> &chunks, size_t from,
-                                                 size_t total) {
-  return PushbackBatchTailImpl(chunks, from, total);
+bool BatchStreamIterator::PushbackBatchTail(const std::pmr::vector<ColumnChunk> &, size_t, size_t) { return true; }
+
+bool BatchStreamIterator::PreservesBatchNullRows() const { return true; }
+
+bool BatchStreamIterator::BatchNullRow(TABLE *table, size_t) const {
+  return table == m_table && m_table->has_null_row();
+}
+}  // namespace detail
+
+namespace {
+Prealloced_array<TABLE *, 4> StreamOutputTables(TABLE *table) {
+  Prealloced_array<TABLE *, 4> tables(PSI_NOT_INSTRUMENTED);
+  tables.push_back(table);
+  return tables;
+}
+}  // namespace
+
+bool VectorizedStreamIterator::CanVectorize(const Temp_table_param *param, TABLE *table, bool provide_rowid) {
+  return detail::BatchStreamIterator::CanVectorize(param, table, provide_rowid);
 }
 
-bool VectorizedStreamIterator::PushbackBatchTailImpl(const std::pmr::vector<ColumnChunk> &chunks, size_t from,
-                                                     size_t total) {
-  return PushbackBatchTailShared(chunks, from, total, &m_tail, &m_tail_start, &m_tail_count, nullptr, &m_memory);
-}
+VectorizedStreamIterator::VectorizedStreamIterator(THD *thd, unique_ptr_destroy_only<RowIterator> source,
+                                                   Temp_table_param *param, TABLE *table, bool provide_rowid,
+                                                   JOIN *join, int ref_slice,
+                                                   const Prealloced_array<TABLE *, 4> &input_tables, size_t budget)
+    : VectorizedRecordIterator(
+          thd,
+          NewIterator<detail::BatchStreamIterator>(thd, thd->mem_root, std::move(source), param, table, provide_rowid,
+                                                   join, ref_slice, input_tables, budget / 2),
+          StreamOutputTables(table), budget - budget / 2, -1.0, "stream") {}
 }  // namespace Executor
 }  // namespace ShannonBase

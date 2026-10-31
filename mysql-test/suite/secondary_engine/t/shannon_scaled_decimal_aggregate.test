@@ -1,0 +1,71 @@
+# Copyright (c) 2026, Shannon Data AI and/or its affiliates.
+# Exact fixed-point hash aggregation, promotion, NULLs and native-decimal fallback.
+--source include/have_debug.inc
+--source include/no_ps_protocol.inc
+--disable_query_log
+--disable_result_log
+--disable_warnings
+SET use_secondary_engine=OFF;
+CREATE TABLE scaled_decimal_aggregate (
+ id INT PRIMARY KEY,g INT,d18 DECIMAL(18,4),d38 DECIMAL(38,8),d65 DECIMAL(65,20),v BIGINT
+) SECONDARY_ENGINE=rapid;
+INSERT INTO scaled_decimal_aggregate VALUES
+(1,1,99999999999999.9999,999999999999999999999999999999.99999999,9999999999999999999999999999999999999999.99999999999999999999,9223372036854775807),
+(2,1,99999999999999.9999,999999999999999999999999999999.99999999,9999999999999999999999999999999999999999.99999999999999999999,9223372036854775807),
+(3,1,-99999999999999.9999,-999999999999999999999999999999.99999999,-9999999999999999999999999999999999999999.99999999999999999999,-9223372036854775807),
+(4,2,NULL,NULL,NULL,NULL),(5,2,NULL,NULL,NULL,NULL),
+(6,3,0,0,0,0),(7,3,-0.0001,0.00000001,-0.00000000000000000001,-9223372036854775808);
+ALTER TABLE scaled_decimal_aggregate SECONDARY_LOAD;
+SET secondary_engine_cost_threshold=0;
+--let $mode = 2
+while ($mode) {
+ if ($mode == 2) {
+  SET optimizer_switch='hypergraph_optimizer=off';
+ }
+ if ($mode == 1) {
+  SET optimizer_switch='hypergraph_optimizer=on';
+ }
+ SET use_secondary_engine=FORCED;
+ --let $assert_query = SELECT g,SUM(d18),AVG(d18),SUM(d38),AVG(d38),SUM(d65),AVG(d65),SUM(v),AVG(v) FROM scaled_decimal_aggregate GROUP BY g ORDER BY g
+ --let $assert_ordered = 1
+ --let $assert_queries_off = 1
+ --let $assert_results_off = 1
+ --let $assert_warnings_off = 1
+ --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+ --let $scaled_before = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_aggregate_scaled_values_total', Value, 1)
+ --let $fallback_before = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_aggregate_scalar_decimal_values_total', Value, 1)
+ # Legacy AVG keeps its native temp-table bindings. Exercise hash kernels
+ # separately with SUM-only input, and retain AVG parity coverage above.
+ --let $assert_query = SELECT g,SUM(d18),SUM(d38),SUM(d65),SUM(v) FROM scaled_decimal_aggregate GROUP BY g ORDER BY g
+ --let $assert_ordered = 1
+ --let $assert_queries_off = 1
+ --let $assert_results_off = 1
+ --let $assert_warnings_off = 1
+ --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+ --let $scaled_after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_aggregate_scaled_values_total', Value, 1)
+ --let $fallback_after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_aggregate_scalar_decimal_values_total', Value, 1)
+ --let $scaled_used = `SELECT $scaled_after > $scaled_before`
+ if (!$scaled_used) {
+  --die Default aggregate plan did not execute the scaled-integer kernel (mode=$mode, before=$scaled_before, after=$scaled_after)
+ }
+ --let $fallback_used = `SELECT $fallback_after > $fallback_before`
+ if (!$fallback_used) {
+  --die Wide decimal input did not execute the arbitrary-precision fallback
+ }
+ SET debug='+d,rapid_disable_scaled_aggregate';
+ --let $assert_query = SELECT g,SUM(d18),AVG(d18),SUM(d38),AVG(d38),SUM(d65),AVG(d65),SUM(v),AVG(v) FROM scaled_decimal_aggregate GROUP BY g ORDER BY g
+ --let $assert_ordered = 1
+ --let $assert_queries_off = 1
+ --let $assert_results_off = 1
+ --let $assert_warnings_off = 1
+ --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+ SET debug='-d,rapid_disable_scaled_aggregate';
+ --dec $mode
+}
+SET use_secondary_engine=OFF;
+DROP TABLE scaled_decimal_aggregate;
+--let $assert_warnings_off =
+--enable_warnings
+--enable_result_log
+--enable_query_log
+--echo Exact scaled sums and MySQL fallback verified

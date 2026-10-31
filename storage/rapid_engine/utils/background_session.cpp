@@ -30,7 +30,8 @@
 #include "sql/transaction.h"
 #include "storage/rapid_engine/trx/transaction.h"
 
-namespace ShannonBase::Utils {
+namespace ShannonBase {
+namespace Utils {
 BackgroundSession::BackgroundSession() {
   my_thread_init();
 
@@ -71,5 +72,5 @@ BackgroundSession::~BackgroundSession() {
   m_thd = nullptr;
   my_thread_end();
 }
-
-}  // namespace ShannonBase::Utils
+}  // namespace Utils
+}  // namespace ShannonBase

@@ -1,0 +1,40 @@
+CREATE DATABASE rapid_batch_lookup;
+USE rapid_batch_lookup;
+SET use_secondary_engine=OFF;
+CREATE TABLE o (id INT PRIMARY KEY, k INT) SECONDARY_ENGINE=rapid;
+CREATE TABLE i (id INT PRIMARY KEY, k INT, v INT, s VARCHAR(20), KEY(k), KEY(k,v)) SECONDARY_ENGINE=rapid;
+INSERT INTO o VALUES (1,1),(2,1),(3,2),(4,9),(5,NULL);
+SET cte_max_recursion_depth=2000;
+INSERT INTO i WITH RECURSIVE seq AS
+(SELECT 1 n UNION ALL SELECT n+1 FROM seq WHERE n<1600)
+SELECT n,IF(n<=1300,1,2),IF(MOD(n,7)=0,NULL,n),IF(MOD(n,11)=0,NULL,CONCAT('s',MOD(n,5))) FROM seq;
+INSERT INTO i VALUES (1601,NULL,7,'null-key');
+SET cte_max_recursion_depth=DEFAULT;
+ANALYZE TABLE o,i;
+Table	Op	Msg_type	Msg_text
+rapid_batch_lookup.o	analyze	status	OK
+rapid_batch_lookup.i	analyze	status	OK
+ALTER TABLE o SECONDARY_LOAD;
+ALTER TABLE i SECONDARY_LOAD;
+SET use_secondary_engine=FORCED;
+SET optimizer_switch='hypergraph_optimizer=off';
+SET SESSION debug='+d,rapid_force_vectorized_nlj,rapid_force_vectorized_ref,rapid_require_batch_lookup';
+# Repeated REF keys and a match range spanning multiple batches.
+# Correlated residuals and dictionary strings stay on the batch path.
+# Unmatched and NULL outer keys retain NULL complements.
+# REF_OR_NULL traverses both equality ranges on every Init.
+# A NULL outer key visits the NULL-key range exactly once.
+# EQ_REF supports repeated keys and cache reuse across scalar boundaries.
+# Reverse prefix reads and early LIMIT preserve index ordering.
+SET SESSION debug='-d,rapid_force_vectorized_nlj,rapid_force_vectorized_ref,rapid_require_batch_lookup';
+# Prepared execution restarts both lookup and selection state.
+PREPARE stmt FROM 'SELECT COUNT(*),SUM(i.v) FROM o STRAIGHT_JOIN i FORCE INDEX(k) ON i.k=o.k AND i.v>o.id';
+EXECUTE stmt;
+COUNT(*)	SUM(i.v)
+2484	1823269
+EXECUTE stmt;
+COUNT(*)	SUM(i.v)
+2484	1823269
+DEALLOCATE PREPARE stmt;
+SET use_secondary_engine=OFF;
+DROP DATABASE rapid_batch_lookup;

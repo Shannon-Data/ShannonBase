@@ -21,11 +21,11 @@
 
    Copyright (c) 2026, Shannon Data AI and/or its affiliates.
 */
-#ifndef SHANNON_BACKGROUND_SESSION_H
-#define SHANNON_BACKGROUND_SESSION_H
+#ifndef __SHANNON_BACKGROUND_SESSION_H__
+#define __SHANNON_BACKGROUND_SESSION_H__
 class THD;
-
-namespace ShannonBase::Utils {
+namespace ShannonBase {
+namespace Utils {
 class BackgroundSession {
  public:
   BackgroundSession();
@@ -40,6 +40,6 @@ class BackgroundSession {
  private:
   THD *m_thd{nullptr};
 };
-
-}  // namespace ShannonBase::Utils
+}  // namespace Utils
+}  // namespace ShannonBase
 #endif

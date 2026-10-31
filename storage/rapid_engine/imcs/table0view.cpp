@@ -807,7 +807,7 @@ bool MysqlKeyPartMapLength(const ArtIndexDescriptor &index_desc, uint64_t keypar
 }  // namespace
 
 // index read.
-int RapidCursor::index_read(uchar *buf, const uchar *key, uint key_len, ha_rkey_function find_flag, bool navigation) {
+int RapidCursor::position_index(const uchar *key, uint key_len, ha_rkey_function find_flag, bool *reverse) {
   ut_a(m_active_index != MAX_KEY);
   if (key_len == 0 && key != nullptr) return HA_ERR_WRONG_COMMAND;
 
@@ -875,7 +875,7 @@ int RapidCursor::index_read(uchar *buf, const uchar *key, uint key_len, ha_rkey_
 
   if (!m_index_iter) return HA_ERR_INTERNAL_ERROR;
 
-  bool reverse = false;
+  *reverse = false;
   switch (find_flag) {
     case HA_READ_KEY_EXACT: {  // (=), including a multipart-prefix equality range.
       if (!start_ptr) return HA_ERR_WRONG_COMMAND;
@@ -894,12 +894,12 @@ int RapidCursor::index_read(uchar *buf, const uchar *key, uint key_len, ha_rkey_
     case HA_READ_KEY_OR_PREV: {  // (<=), native ART seek_le().
       if (!start_ptr) return HA_ERR_WRONG_COMMAND;
       m_index_iter->init_reverse_scan(nullptr, 0, false, start_ptr, start_len, true);
-      reverse = true;
+      *reverse = true;
     } break;
 
     case HA_READ_BEFORE_KEY: {  // (<), nullptr means index_last().
       m_index_iter->init_reverse_scan(nullptr, 0, false, start_ptr, start_len, false);
-      reverse = true;
+      *reverse = true;
     } break;
 
     case HA_READ_PREFIX_LAST: {
@@ -907,7 +907,7 @@ int RapidCursor::index_read(uchar *buf, const uchar *key, uint key_len, ha_rkey_
       // [prefix, prefix] plus reverse positioning lands directly on the
       // rightmost physical key/value belonging to the prefix equivalence class.
       m_index_iter->init_reverse_scan(start_ptr, start_len, true, start_ptr, start_len, true);
-      reverse = true;
+      *reverse = true;
     } break;
 
     default:
@@ -917,7 +917,20 @@ int RapidCursor::index_read(uchar *buf, const uchar *key, uint key_len, ha_rkey_
   m_index_exhausted = false;
   m_index_scan_started = true;
   m_scan_state.commit_batch(0);
+  m_scan_state.row_in_batch = 0;
+  return ShannonBase::SHANNON_SUCCESS;
+}
 
+int RapidCursor::index_seek(const uchar *key, uint key_len, bool reverse) {
+  bool direction = false;
+  return position_index(key, key_len, reverse ? HA_READ_PREFIX_LAST : HA_READ_KEY_EXACT, &direction);
+}
+
+int RapidCursor::index_read(uchar * /*buf*/, const uchar *key, uint key_len, ha_rkey_function find_flag,
+                            bool navigation) {
+  bool reverse = false;
+  const int error = position_index(key, key_len, find_flag, &reverse);
+  if (error) return error;
   const uchar *result_key = nullptr;
   uint32_t result_key_len = 0;
   row_id_t rowid = INVALID_ROW_ID;

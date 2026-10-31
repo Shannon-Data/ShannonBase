@@ -25,40 +25,54 @@
 */
 #ifndef __SHANNONBASE_LIMIT_ITERATOR_H__
 #define __SHANNONBASE_LIMIT_ITERATOR_H__
-#include "storage/rapid_engine/executor/iterators/iterator.h"
+#include "sql/iterators/composite_iterators.h"
+#include "storage/rapid_engine/executor/iterators/record_iterator.h"
+
 namespace ShannonBase {
 namespace Executor {
-// The scalar-cardinality and SQL_CALC_FOUND_ROWS variants retain MySQL's
-// iterator. A simple LIMIT/OFFSET never needs to materialize its output rows.
-class VectorizedLimitIterator final : public RowIterator, public BatchReadable {
+namespace detail {
+// Owns LIMIT/OFFSET state once. Row-only input uses MySQL's native implementation.
+class BatchLimitIterator final : public RowIterator, public BatchReadable {
  public:
-  VectorizedLimitIterator(THD *thd, unique_ptr_destroy_only<RowIterator> source, ha_rows limit, ha_rows offset,
-                          ha_rows *skipped, const Prealloced_array<TABLE *, 4> &tables, size_t budget);
+  BatchLimitIterator(THD *thd, unique_ptr_destroy_only<RowIterator> source, ha_rows limit, ha_rows offset,
+                     ha_rows *skipped, const Prealloced_array<TABLE *, 4> &tables, size_t budget);
   bool Init() override;
   int Read() override;
   int ReadBatch(std::pmr::vector<ColumnChunk> &chunks, size_t capacity, size_t &rows) override;
   bool PushbackBatchTail(const std::pmr::vector<ColumnChunk> &chunks, size_t from, size_t total) override;
-  bool SupportsBatchRead() const override { return m_batch != nullptr; }
-  std::shared_ptr<Compress::Dictionary> Dictionary(const Field *field) const override {
-    return m_batch ? m_batch->Dictionary(field) : nullptr;
-  }
-  void SetNullRowFlag(bool value) override { m_source->SetNullRowFlag(value); }
-  void UnlockRow() override { m_source->UnlockRow(); }
-  void EndPSIBatchModeIfStarted() override { m_source->EndPSIBatchModeIfStarted(); }
+  bool SupportsBatchRead() const override;
+  bool PreservesBatchNullRows() const override;
+  bool BatchNullRow(TABLE *table, size_t row) const override;
+  std::shared_ptr<Compress::Dictionary> Dictionary(const Field *field) const override;
+  void SetNullRowFlag(bool value) override;
+  void UnlockRow() override;
+  void EndPSIBatchModeIfStarted() override;
 
  private:
-  inline int Error() {
-    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid LIMIT could not preserve its batch input");
-    return 1;
-  }
+  static constexpr size_t kMaxBatchRows = 1024;
+  int Error();
+
   ResMgmt::MemoryBudget::Reservation m_reservation;
   ResMgmt::BoundedMemoryResource m_memory;
+
   unique_ptr_destroy_only<RowIterator> m_source;
+  bool m_skip_source_init{false};
+  LimitOffsetIterator m_native;
+  pack_rows::TableCollection m_tables;
   BatchReadable *m_batch{nullptr};
-  ha_rows m_limit, m_offset, m_seen{0}, *m_skipped;
-  std::pmr::vector<Field *> m_fields;
+  ha_rows m_limit{HA_POS_ERROR}, m_offset{HA_POS_ERROR}, m_seen{HA_POS_ERROR}, *m_skipped{nullptr};
   std::pmr::vector<ColumnChunk> m_discard;
   bool m_eof{false};
+};
+}  // namespace detail
+
+// Shared record adapter provides Read(), ReadBatch(), dictionaries and lookahead.
+// The LIMIT algorithm itself lives only in the batch core or MySQL's fallback.
+class VectorizedLimitIterator final : public VectorizedRecordIterator {
+ public:
+  static bool CanVectorize(const Prealloced_array<TABLE *, 4> &tables);
+  VectorizedLimitIterator(THD *thd, unique_ptr_destroy_only<RowIterator> source, ha_rows limit, ha_rows offset,
+                          ha_rows *skipped, const Prealloced_array<TABLE *, 4> &tables, size_t budget);
 };
 }  // namespace Executor
 }  // namespace ShannonBase

@@ -28,12 +28,70 @@
 #include "sql/pack_rows.h"
 #include "storage/rapid_engine/executor/iterators/iterator.h"
 class AccessPath;
+struct Index_lookup;
 
 namespace ShannonBase {
+class ha_rapid;
 namespace Executor {
 std::shared_ptr<Compress::Dictionary> RecordDictionary(const Field *field);
 bool CanBatchRecords(TABLE *table);
 bool SelectVectorizedLookup(THD *thd, AccessPath *path);
+unique_ptr_destroy_only<RowIterator> CreateVectorizedLookup(THD *thd, unique_ptr_destroy_only<RowIterator> native,
+                                                            AccessPath *path, ha_rows *examined_rows);
+
+namespace detail {
+// Non-owning native adapter. The owning batch iterator retains the source.
+// skip_init prevents a second Init() after runtime capability negotiation.
+class BorrowedRows final : public RowIterator {
+ public:
+  BorrowedRows(THD *thd, RowIterator *source, bool *skip_init = nullptr);
+  bool Init() override;
+  int Read() override;
+  void SetNullRowFlag(bool value) override;
+  void UnlockRow() override;
+  void StartPSIBatchMode() override;
+  void EndPSIBatchModeIfStarted() override;
+
+ private:
+  RowIterator *m_source;
+  bool *m_skip_init;
+};
+
+// Owns lookup state, not TABLE record images. The native iterator initializes
+// the handler and supplies the fallback for unsupported handler capabilities.
+class VectorizedLookup final : public RowIterator, public BatchReadable {
+ public:
+  VectorizedLookup(THD *thd, unique_ptr_destroy_only<RowIterator> native, TABLE *table, Index_lookup *ref, bool reverse,
+                   bool unique, bool or_null, ha_rows *examined);
+  bool Init() override;
+  bool SupportsBatchRead() const override;
+  bool PreservesBatchNullRows() const override;
+  int Read() override;
+  void SetNullRowFlag(bool value) override;
+  void UnlockRow() override;
+  void EndPSIBatchModeIfStarted() override;
+  std::shared_ptr<Compress::Dictionary> Dictionary(const Field *field) const override;
+  bool PushbackBatchTail(const std::pmr::vector<ColumnChunk> &chunks, size_t from, size_t total) override;
+  int ReadBatch(std::pmr::vector<ColumnChunk> &chunks, size_t capacity, size_t &rows) override;
+
+ private:
+  int Start();
+  int Error(int error);
+  bool SaveCache(const std::pmr::vector<ColumnChunk> &chunks);
+  unique_ptr_destroy_only<RowIterator> m_native;
+  TABLE *m_table;
+  Index_lookup *m_ref;
+  ha_rapid *m_handler;
+  bool m_reverse, m_unique, m_or_null;
+  ha_rows *m_examined;
+  ResMgmt::MemoryBudget::Reservation m_reservation;
+  ResMgmt::BoundedMemoryResource m_memory;
+  std::pmr::vector<uchar> m_key;
+  std::pmr::vector<ColumnChunk> m_cached;
+  bool m_first{true}, m_done{false}, m_null_phase{false}, m_cache_valid{false}, m_cache_disabled{false};
+};
+
+}  // namespace detail
 
 // The record boundary required by SQL lookup iterators. The retained resume
 // image is independent of TABLE buffers overwritten by a batch consumer.
@@ -48,6 +106,9 @@ class VectorizedRecordIterator : public RowIterator, public BatchReadable {
   int ReadBatch(std::pmr::vector<ColumnChunk> &chunks, size_t capacity, size_t &rows) override;
   bool PushbackBatchTail(const std::pmr::vector<ColumnChunk> &chunks, size_t from, size_t total) override;
   std::shared_ptr<Compress::Dictionary> Dictionary(const Field *field) const override;
+  bool BatchNullRow(TABLE *table, size_t row) const override;
+  bool SupportsBatchRead() const override;
+  bool PreservesBatchNullRows() const override { return true; }
   void SetNullRowFlag(bool value) override { m_source->SetNullRowFlag(value); }
   void UnlockRow() override {
     if (!m_replayed_row) m_source->UnlockRow();
@@ -61,8 +122,7 @@ class VectorizedRecordIterator : public RowIterator, public BatchReadable {
     std::shared_ptr<Compress::Dictionary> dictionary;
   };
 
-  /// Rows per batch read; the null-flag buffer is reserved for this size.
-  static constexpr size_t kMaxBatchRows = 1024;
+  size_t m_batch_capacity{0};
 
   const Encoding *FindEncoding(const Field *field) const;
   bool PushbackBatchTailImpl(const std::pmr::vector<ColumnChunk> &chunks, size_t from, size_t total);
@@ -77,6 +137,8 @@ class VectorizedRecordIterator : public RowIterator, public BatchReadable {
   ResMgmt::MemoryBudget::Reservation m_reservation;
   ResMgmt::BoundedMemoryResource m_memory;
   unique_ptr_destroy_only<RowIterator> m_source;
+  BatchReadable *m_batch_source{nullptr};
+  std::pmr::vector<ColumnChunk> m_scalar_chunks;
   const char *m_operator_name{nullptr};
   pack_rows::TableCollection m_tables;
   std::pmr::vector<Encoding> m_encodings;
@@ -88,14 +150,11 @@ class VectorizedRecordIterator : public RowIterator, public BatchReadable {
   String m_resume;
   size_t m_tail_start{0}, m_tail_count{0};
   bool m_have_resume{false}, m_replayed_row{false};
+  bool m_can_encode_rows{false};
   VectorizedOperatorStats m_stats;
   CardinalityObservation m_cardinality;
 };
 
-class VectorizedRefIterator final : public VectorizedRecordIterator {
- public:
-  using VectorizedRecordIterator::VectorizedRecordIterator;
-};
 }  // namespace Executor
 }  // namespace ShannonBase
 #endif

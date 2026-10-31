@@ -2,6 +2,11 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #include <gtest/gtest.h>
 #include <limits>
+#include <array>
+#include <string>
+#include "sql-common/my_decimal.h"
+#include "storage/rapid_engine/utils/decimal64.h"
+#include "storage/rapid_engine/utils/decimal_sum.h"
 
 #include "sql/join_optimizer/access_path.h"
 #include "sql/join_optimizer/cost_model.h"
@@ -12,6 +17,142 @@
 #include "storage/rapid_engine/optimizer/optimizer.h"
 #include "storage/rapid_engine/optimizer/rules/cost_refinement.h"
 using AggregateOrderEstimator = ShannonBase::Optimizer::RpdCostEstimator::AggregateOrderEstimator;
+
+TEST(RapidPackedDecimal, WideDeclaredPrecisionsPreserveExactScaledSums) {
+  for (unsigned precision = 1; precision <= DECIMAL_MAX_PRECISION; ++precision) {
+    for (unsigned scale = 0; scale <= precision && scale <= DECIMAL_MAX_SCALE; ++scale) {
+      ShannonBase::Utils::DecimalSum sum;
+      my_decimal expected;
+      for (int n = 0; n < 32; ++n) {
+        std::string text = std::to_string((n * 1777 + 1) % 100000);
+        if (text.size() > precision) text.resize(precision);
+        if (text.size() <= scale) text.insert(0, scale + 1 - text.size(), '0');
+        if (scale != 0) text.insert(text.size() - scale, 1, '.');
+        if (n % 3 == 0) text.insert(0, 1, '-');
+        my_decimal value, next, actual;
+        ASSERT_EQ(E_DEC_OK, str2my_decimal(E_DEC_FATAL_ERROR, text.data(), text.size(), &my_charset_latin1, &value));
+        std::array<uchar, 64> packed{};
+        ASSERT_EQ(E_DEC_OK, my_decimal2binary(E_DEC_FATAL_ERROR, &value, packed.data(), precision, scale));
+        __int128 scaled;
+        ASSERT_TRUE(ShannonBase::Utils::DecodePackedDecimal128(packed.data(), decimal_bin_size(precision, scale),
+                                                               precision, scale, &scaled));
+        ASSERT_FALSE(sum.AddScaled(scaled, scale));
+        ASSERT_EQ(E_DEC_OK, my_decimal_add(E_DEC_FATAL_ERROR, &next, &expected, &value));
+        expected = next;
+        ASSERT_FALSE(sum.Get(&actual));
+        EXPECT_EQ(0, my_decimal_cmp(&actual, &expected)) << text << " DECIMAL(" << precision << ',' << scale << ')';
+      }
+      ShannonBase::Utils::DecimalSum copy = sum;
+      my_decimal actual;
+      ASSERT_FALSE(copy.Get(&actual));
+      EXPECT_EQ(0, my_decimal_cmp(&actual, &expected));
+    }
+  }
+}
+
+TEST(RapidPackedDecimal, ScaledOverflowPromotesWithoutWrappingOrLosingCancellation) {
+  const auto maximum = static_cast<__int128>((static_cast<unsigned __int128>(1) << 127) - 1);
+  ShannonBase::Utils::DecimalSum sum;
+  ASSERT_FALSE(sum.AddScaled(maximum, 0));
+  ASSERT_FALSE(sum.AddScaled(1, 0));
+  EXPECT_FALSE(sum.scaled());
+  const std::string text = "170141183460469231731687303715884105728";
+  my_decimal expected, actual;
+  ASSERT_EQ(E_DEC_OK, str2my_decimal(E_DEC_FATAL_ERROR, text.data(), text.size(), &my_charset_latin1, &expected));
+  ASSERT_FALSE(sum.Get(&actual));
+  EXPECT_EQ(0, my_decimal_cmp(&actual, &expected));
+  ASSERT_FALSE(sum.AddScaled(-maximum, 0));
+  ASSERT_FALSE(sum.Get(&actual));
+  longlong value{0};
+  ASSERT_EQ(E_DEC_OK, my_decimal2int(E_DEC_FATAL_ERROR, &actual, false, &value));
+  EXPECT_EQ(1, value);
+}
+
+TEST(RapidPackedDecimal, SpillRestoreAndWideFallbackRetainMysqlDecimalRange) {
+  const std::string text(65, '9');
+  my_decimal expected, actual;
+  ASSERT_EQ(E_DEC_OK, str2my_decimal(E_DEC_FATAL_ERROR, text.data(), text.size(), &my_charset_latin1, &expected));
+  std::array<uchar, 64> packed{};
+  ASSERT_EQ(E_DEC_OK, my_decimal2binary(E_DEC_FATAL_ERROR, &expected, packed.data(), 65, 0));
+  __int128 scaled{0};
+  EXPECT_FALSE(ShannonBase::Utils::DecodePackedDecimal128(packed.data(), decimal_bin_size(65, 0), 65, 0, &scaled));
+  ShannonBase::Utils::DecimalSum wide;
+  ASSERT_FALSE(wide.Add(expected));
+  EXPECT_FALSE(wide.scaled());
+  ShannonBase::Utils::DecimalSum restored;
+  ASSERT_FALSE(wide.Get(&actual));
+  restored.Set(actual);
+  EXPECT_FALSE(restored.scaled());
+  ASSERT_FALSE(restored.Get(&actual));
+  EXPECT_EQ(0, my_decimal_cmp(&actual, &expected));
+  restored = wide;
+  ASSERT_FALSE(restored.Get(&actual));
+  EXPECT_EQ(0, my_decimal_cmp(&actual, &expected));
+}
+
+TEST(RapidPackedDecimal, MinimumScaledIntegerAndNegativeOverflowAreExact) {
+  const auto maximum = static_cast<__int128>((static_cast<unsigned __int128>(1) << 127) - 1);
+  const __int128 minimum = -maximum - 1;
+  const std::string minimum_text = "-170141183460469231731687303715884105728";
+  my_decimal expected, actual;
+  ASSERT_EQ(E_DEC_OK, str2my_decimal(E_DEC_FATAL_ERROR, minimum_text.data(), minimum_text.size(),
+                                     &my_charset_latin1, &expected));
+  std::array<uchar, 64> packed{};
+  ASSERT_EQ(E_DEC_OK, my_decimal2binary(E_DEC_FATAL_ERROR, &expected, packed.data(), 39, 0));
+  __int128 decoded{0};
+  ASSERT_TRUE(ShannonBase::Utils::DecodePackedDecimal128(packed.data(), decimal_bin_size(39, 0), 39, 0, &decoded));
+  EXPECT_EQ(minimum, decoded);
+  ShannonBase::Utils::DecimalSum sum;
+  ASSERT_FALSE(sum.AddScaled(minimum, 0));
+  ASSERT_FALSE(sum.Get(&actual));
+  EXPECT_EQ(0, my_decimal_cmp(&actual, &expected));
+  ASSERT_FALSE(sum.AddScaled(-1, 0));
+  EXPECT_FALSE(sum.scaled());
+  const std::string below_minimum = "-170141183460469231731687303715884105729";
+  ASSERT_EQ(E_DEC_OK, str2my_decimal(E_DEC_FATAL_ERROR, below_minimum.data(), below_minimum.size(),
+                                     &my_charset_latin1, &expected));
+  ASSERT_FALSE(sum.Get(&actual));
+  EXPECT_EQ(0, my_decimal_cmp(&actual, &expected));
+}
+
+TEST(RapidPackedDecimal, MatchesMysqlEncodingAtEverySupportedPrecisionAndScale) {
+  int64_t power = 1;
+  for (unsigned precision = 1; precision <= 18; ++precision) {
+    power *= 10;
+    for (unsigned scale = 0; scale <= precision; ++scale) {
+      for (int64_t expected : {int64_t{0}, int64_t{1}, int64_t{-1}, power - 1, 1 - power,
+                               power / 3, -power / 3}) {
+        std::string text = std::to_string(expected < 0 ? -expected : expected);
+        if (text.size() <= scale) text.insert(0, scale + 1 - text.size(), '0');
+        if (scale) text.insert(text.size() - scale, 1, '.');
+        if (expected < 0) text.insert(0, 1, '-');
+        my_decimal value;
+        ASSERT_EQ(E_DEC_OK, str2my_decimal(E_DEC_FATAL_ERROR, text.data(), text.size(), &my_charset_latin1, &value));
+        std::array<uchar, 32> packed{};
+        ASSERT_EQ(E_DEC_OK, my_decimal2binary(E_DEC_FATAL_ERROR, &value, packed.data(), precision, scale));
+        const auto original = packed;
+        int64_t actual = 0;
+        ASSERT_TRUE(ShannonBase::Utils::DecodePackedDecimal64(packed.data(), decimal_bin_size(precision, scale),
+                                                              precision, scale, &actual));
+        EXPECT_EQ(expected, actual) << text << " DECIMAL(" << precision << ',' << scale << ')';
+        EXPECT_EQ(original, packed);
+      }
+    }
+  }
+}
+
+TEST(RapidPackedDecimal, RejectsUnsupportedOrInvalidLayouts) {
+  std::array<uint8_t, 16> bytes{};
+  int64_t out = 123;
+  EXPECT_FALSE(ShannonBase::Utils::DecodePackedDecimal64(nullptr, 1, 1, 0, &out));
+  EXPECT_FALSE(ShannonBase::Utils::DecodePackedDecimal64(bytes.data(), 0, 1, 0, &out));
+  EXPECT_FALSE(ShannonBase::Utils::DecodePackedDecimal64(bytes.data(), 1, 0, 0, &out));
+  EXPECT_FALSE(ShannonBase::Utils::DecodePackedDecimal64(bytes.data(), 9, 19, 0, &out));
+  EXPECT_FALSE(ShannonBase::Utils::DecodePackedDecimal64(bytes.data(), 1, 1, 2, &out));
+  bytes[0] = 0xff;  // Positive single-digit group 127 is not a decimal digit.
+  EXPECT_FALSE(ShannonBase::Utils::DecodePackedDecimal64(bytes.data(), 1, 1, 0, &out));
+  EXPECT_EQ(123, out);
+}
 
 TEST(RapidAggregateOrder, ScaleAndBudgetChangeTheChoice) {
   // Identical shape, projection and cost rates. Scaling the data crosses the
