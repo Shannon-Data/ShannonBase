@@ -302,7 +302,8 @@ class AggregationPushDown : public Rule {
    * @param push_side 0 to push below the join's left child, 1 for its right child
    * @return The join plan, now hosting agg_node in place of join->children[push_side]
    */
-  Plan push_aggregation_to_join_side(Plan agg_node, Plan join, int push_side);
+  Plan push_aggregation_to_join_side(Plan agg_node, Plan join, int push_side, double input_groups, double output_groups,
+                                     double selected_cost);
 
   /**
    * @brief Get tables referenced by an item

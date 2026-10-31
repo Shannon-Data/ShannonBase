@@ -9,3 +9,29 @@ REGEXP_LIKE(TRACE,'"estimated_groups": 4([.]0+)?[[:space:],}]') AS estimates_fou
 FROM information_schema.optimizer_trace;
 uses_imcs_ndv	estimates_four_groups
 1	1
+SELECT JSON_VALID(TRACE) AS valid_rule_trace,
+JSON_SEARCH(TRACE,'one','PredicatePushDown') IS NOT NULL AND
+JSON_SEARCH(TRACE,'one','StorageIndexPrune') IS NOT NULL AND
+JSON_SEARCH(TRACE,'one','ProjectionPruning') IS NOT NULL AND
+JSON_SEARCH(TRACE,'one','TopNPushDown') IS NOT NULL AND
+JSON_SEARCH(TRACE,'one','AggregationPushDown') IS NOT NULL AND
+JSON_SEARCH(TRACE,'one','CostRefinement') IS NOT NULL AS all_active_rules
+FROM information_schema.optimizer_trace;
+valid_rule_trace	all_active_rules
+1	1
+SELECT EXISTS(SELECT 1 FROM JSON_TABLE(TRACE,'$**.decisions[*]'
+COLUMNS(decision VARCHAR(64) PATH '$.decision',pushed INT PATH '$.pushed_predicates')) AS p
+WHERE decision='rapid_predicate_pushdown' AND pushed>0) AS predicate_pushed,
+EXISTS(SELECT 1 FROM JSON_TABLE(TRACE,'$**.decisions[*]'
+COLUMNS(decision VARCHAR(64) PATH '$.decision',pushed INT PATH '$.pushed')) AS l
+WHERE decision='rapid_topn_pushdown' AND pushed=1) AS limit_pushed
+FROM information_schema.optimizer_trace;
+predicate_pushed	limit_pushed
+1	1
+SELECT EXISTS(SELECT 1 FROM JSON_TABLE(TRACE,'$**.decisions[*]'
+COLUMNS(decision VARCHAR(64) PATH '$.decision',residual INT PATH '$.residual_predicates')) AS p
+WHERE decision='rapid_predicate_pushdown' AND residual>0) AS residual_retained,
+JSON_SEARCH(TRACE,'one','semantic_barrier_or_limit_side_effects') IS NOT NULL AS limit_barrier_reported
+FROM information_schema.optimizer_trace;
+residual_retained	limit_barrier_reported
+1	1

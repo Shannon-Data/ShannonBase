@@ -2119,12 +2119,26 @@ bool ModifyMaterializeCost(THD *thd, const JoinHypergraph &graph, AccessPath *pa
   double child_cost = 0;
   for (auto &op : mat.param->m_operands) {
     if (op.subquery_path) {
-      child_rows += op.subquery_path->num_output_rows();
-      child_cost += op.subquery_path->cost();
+      const double rows = op.subquery_path->num_output_rows();
+      const auto input = PathCost(op.subquery_path);
+      // One unknown operand must not become a plausible total after adding a
+      // known operand. Retain the incoming estimate until all work is known.
+      if (!input || !std::isfinite(rows) || rows < 0) return false;
+      child_rows += rows;
+      child_cost += input->total();
     }
   }
+
+  if (!std::isfinite(child_rows) || !std::isfinite(child_cost)) return false;
+
   double write_cost = child_rows * RapidCostConstants::kHashBuildPerRow;
-  double scan_cost = child_rows * RapidCostConstants::kVectorCpuPerRow;
+  // Filling/deduplicating consumes every input row; rescanning consumes only
+  // the materialized output. Do not infer a new logical cardinality for a
+  // different physical alternative.
+  const double output_rows = path->num_output_rows();
+  const double scan_rows =
+      std::isfinite(output_rows) && output_rows >= 0 && output_rows <= child_rows ? output_rows : child_rows;
+  double scan_cost = scan_rows * RapidCostConstants::kVectorCpuPerRow;
   // Producing the subquery and filling the temp table (build_cost) must happen
   // before the first row and is paid once; only the temp-table scan repeats on a
   // re-init. Keep the triple consistent -- init_once_cost <= init_cost <= cost,

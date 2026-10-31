@@ -168,6 +168,53 @@ TEST(RapidCostProfile, NestedLoopPaysForMaterializedBuildOnlyOnce) {
   EXPECT_DOUBLE_EQ(1030, cost->total());
 }
 
+TEST_F(RapidOperatorCost, DeduplicatedMaterializeChargesInputBuildAndOutputRescans) {
+  auto child = CostedInput(1000, 100, 10);
+  MaterializePathParameters param{};
+  param.m_operands = Mem_root_array<MaterializePathParameters::Operand>(&root);
+  MaterializePathParameters::Operand operand{};
+  operand.subquery_path = &child;
+  ASSERT_FALSE(param.m_operands.push_back(operand));
+  AccessPath path;
+  path.type = AccessPath::MATERIALIZE;
+  path.materialize().param = &param;
+  path.parameter_tables = 0;
+  path.set_num_output_rows(4);
+  EXPECT_FALSE(ModifyMaterializeCost(nullptr, graph, &path, nullptr));
+  const double build = 100 + 1000 * RapidCostConstants::kHashBuildPerRow;
+  const double scan = 4 * RapidCostConstants::kVectorCpuPerRow;
+  EXPECT_DOUBLE_EQ(build, path.init_cost());
+  EXPECT_DOUBLE_EQ(build, path.init_once_cost());
+  EXPECT_NEAR(scan, path.rescan_cost(), 1e-10);
+  EXPECT_DOUBLE_EQ(4, path.num_output_rows());
+  param.rematerialize = true;
+  EXPECT_FALSE(ModifyMaterializeCost(nullptr, graph, &path, nullptr));
+  EXPECT_DOUBLE_EQ(0, path.init_once_cost());
+  EXPECT_DOUBLE_EQ(build + scan, path.rescan_cost());
+}
+
+TEST_F(RapidOperatorCost, UnknownMaterializeOperandCannotBeHiddenByKnownRows) {
+  auto unknown = CostedInput(kUnknownRowCount, 100, 10);
+  auto known = CostedInput(1000, 100, 10);
+  MaterializePathParameters param{};
+  param.m_operands = Mem_root_array<MaterializePathParameters::Operand>(&root);
+  for (auto *child : {&unknown, &known}) {
+    MaterializePathParameters::Operand operand{};
+    operand.subquery_path = child;
+    ASSERT_FALSE(param.m_operands.push_back(operand));
+  }
+  AccessPath path;
+  path.type = AccessPath::MATERIALIZE;
+  path.materialize().param = &param;
+  path.set_cost(1234);
+  path.set_init_cost(1200);
+  path.set_init_once_cost(1000);
+  EXPECT_FALSE(ModifyMaterializeCost(nullptr, graph, &path, nullptr));
+  EXPECT_DOUBLE_EQ(1234, path.cost());
+  EXPECT_DOUBLE_EQ(1200, path.init_cost());
+  EXPECT_DOUBLE_EQ(1000, path.init_once_cost());
+}
+
 TEST(RapidCostProfile, InvalidDimensionsAreNotSilentlyNormalized) {
   EXPECT_FALSE(OperatorCost::from(10, 11, 0));
   EXPECT_FALSE(OperatorCost::from(10, 5, 6));
