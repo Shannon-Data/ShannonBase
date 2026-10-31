@@ -31,6 +31,7 @@
 #include <thread>
 
 #include "ml/infra_component/llm_model_detector.h"
+#include "ml/infra_component/ort_runtime.h"
 #include "sql/sql_class.h"
 #include "sql/sql_optimizer.h"
 #include "storage/rapid_engine/include/rapid_const.h"
@@ -64,14 +65,7 @@ void build_onnx(MiniLMEmbedding::Model &m) {
   m.session_options->SetInterOpNumThreads(1);
   m.session_options->SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_EXTENDED);
 
-#ifdef SHANNONBASE_ONNX_CUDA_EP
-  OrtStatusPtr cuda_status = OrtSessionOptionsAppendExecutionProvider_CUDA(*m.session_options, 0);
-  if (cuda_status) {
-    const char *msg = Ort::GetApi().GetErrorMessage(cuda_status);
-    DBUG_PRINT("MiniLM", ("MiniLM: CUDA unavailable (%s), falling back to CPU", msg));
-    Ort::GetApi().ReleaseStatus(cuda_status);
-  }
-#endif
+  OrtRuntime::execute(*m.session_options, "MiniLM", OrtRuntime::file_size(m.model_path));
 
   m.session = std::make_unique<Ort::Session>(*m.env, m.model_path.c_str(), *m.session_options);
 
