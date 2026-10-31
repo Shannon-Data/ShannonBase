@@ -27,6 +27,7 @@
 
 #include "sql/item.h"
 #include "sql/item_cmpfunc.h"
+#include "sql/opt_trace.h"
 #include "sql/sql_class.h"
 
 #include "storage/rapid_engine/cost/cost.h"
@@ -101,7 +102,14 @@ void JoinReOrder::apply(Plan &root) {
   // the class comment in join_reorder.h for the four things reconstruction
   // must preserve before this may rewrite anything. A no-op beats a cost-based
   // rewrite that can change what the query returns.
-  (void)root;
+  if (current_thd && current_thd->opt_trace.is_started()) {
+    Opt_trace_object trace(&current_thd->opt_trace);
+    trace.add_alnum("decision", "rapid_join_reorder")
+        .add("has_plan", root != nullptr)
+        .add("enabled", false)
+        .add("applied", false)
+        .add_alnum("cause", "reconstruction_semantics_not_proven");
+  }
 }
 
 /**
@@ -335,9 +343,17 @@ double JoinReOrder::estimate_join_selectivity(Item_field *left_field, Item_field
  * Reorder joins using dynamic programming (for small queries)
  */
 Plan JoinReOrder::reorder_with_dp(const JoinGraph &graph, Plan &root, double baseline_cost) {
+  Opt_trace_object trace(&current_thd->opt_trace);
+  trace.add_alnum("decision", "rapid_join_reorder_dp")
+      .add("tables", graph.num_tables)
+      .add("baseline_cost", baseline_cost)
+      .add("required_benefit", REORDER_BENEFIT_THRESHOLD);
   auto cost_estimator = CostModelServer::Instance(CostEstimator::Type::RPD_ENG);
   size_t n = graph.num_tables;
-  if (n == 0) return nullptr;
+  if (n == 0) {
+    trace.add_alnum("cause", "no_tables");
+    return nullptr;
+  }
 
   // DP state: dp[subset_mask] stores the optimal plan information for that subset
   size_t num_subsets = 1ULL << n;
@@ -384,7 +400,9 @@ Plan JoinReOrder::reorder_with_dp(const JoinGraph &graph, Plan &root, double bas
   // Step 3: Final decision
   size_t all_tables = (1ULL << n) - 1;
   double best_cost = dp[all_tables].cost;
+  trace.add("candidate_cost", best_cost);
   if (best_cost == 0 || dp[all_tables].left_subset == 0 || dp[all_tables].right_subset == 0) {
+    trace.add_alnum("cause", "no_valid_candidate");
     DBUG_PRINT("rapid_optimizer", ("No valid DP solution found. Keeping MySQL's original order."));
     return nullptr;
   }
@@ -392,13 +410,16 @@ Plan JoinReOrder::reorder_with_dp(const JoinGraph &graph, Plan &root, double bas
   // If DP's optimal cost is not significantly better than baseline (considering threshold),
   // skip the reordering. This prevents frequent plan changes due to minor statistical fluctuations.
   if (best_cost >= baseline_cost * (1.0 - REORDER_BENEFIT_THRESHOLD)) {
+    trace.add_alnum("cause", "insufficient_cost_benefit");
     DBUG_PRINT("rapid_optimizer",
                ("DP cost %.2f is not significantly better than baseline %.2f. Skipping.", best_cost, baseline_cost));
     return nullptr;
   }
 
   // Step 4: Reconstruct physical plan tree based on DP path
-  return reconstruct_join_plan(all_tables, dp, graph, root);
+  Plan result = reconstruct_join_plan(all_tables, dp, graph, root);
+  trace.add("reconstructed", result != nullptr);
+  return result;
 }
 
 /**
@@ -456,6 +477,10 @@ Plan JoinReOrder::reconstruct_join_plan(size_t subset, std::vector<DPState> &dp,
  * Reorder joins using greedy algorithm (for large queries)
  */
 Plan JoinReOrder::reorder_with_greedy(const JoinGraph &graph, Plan &root, double baseline_cost) {
+  Opt_trace_object trace(&current_thd->opt_trace);
+  trace.add_alnum("decision", "rapid_join_reorder_greedy")
+      .add("tables", graph.num_tables)
+      .add("baseline_cost", baseline_cost);
   size_t n = graph.num_tables;
   std::vector<size_t> order;  // Record the greedy selection order of table indices
   std::vector<bool> joined(n, false);
@@ -518,9 +543,15 @@ Plan JoinReOrder::reorder_with_greedy(const JoinGraph &graph, Plan &root, double
   }
 
   // 3. Final cost check: Return nullptr if greedy result is not better than MySQL's baseline
-  if (total_greedy_cost >= baseline_cost) return nullptr;
+  trace.add("candidate_cost", total_greedy_cost);
+  if (total_greedy_cost >= baseline_cost) {
+    trace.add_alnum("cause", "no_cost_benefit");
+    return nullptr;
+  }
 
-  return reconstruct_greedy_plan(order, graph, root);
+  Plan result = reconstruct_greedy_plan(order, graph, root);
+  trace.add("reconstructed", result != nullptr);
+  return result;
 }
 
 /**

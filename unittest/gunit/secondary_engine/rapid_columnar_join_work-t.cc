@@ -62,6 +62,23 @@ TEST(RapidAggregatePlacement, DenseJoinWithFewGroupsStillPreAggregates) {
   }
 }
 
+TEST(RapidAggregatePlacement, InputNdvReplacesUniformMatchExtrapolation) {
+  const auto uniform = AggregatePlacementCost::estimate(100000, 10000, 1000, true);
+  const auto snapshot = AggregatePlacementCost::estimate(100000, 10000, 1000, true, 1000);
+  ASSERT_TRUE(uniform.valid);
+  ASSERT_TRUE(snapshot.valid);
+  EXPECT_TRUE(uniform.assumes_uniform_matches);
+  EXPECT_FALSE(snapshot.assumes_uniform_matches);
+  EXPECT_DOUBLE_EQ(10000, uniform.input_groups);
+  EXPECT_DOUBLE_EQ(1000, snapshot.input_groups);
+  EXPECT_DOUBLE_EQ(uniform.join_first, snapshot.join_first);
+  EXPECT_LT(snapshot.aggregate_first, uniform.aggregate_first);
+  EXPECT_FALSE(AggregatePlacementCost::estimate(100000, 10000, 1000, true, 999).valid);
+  EXPECT_FALSE(AggregatePlacementCost::estimate(100000, 10000, 1000, true, 100001).valid);
+  EXPECT_FALSE(AggregatePlacementCost::estimate(100000, 10000, 1000, true,
+                                               std::numeric_limits<double>::quiet_NaN()).valid);
+}
+
 TEST(RapidAggregatePlacement, NoReductionAndUncertainEstimatesKeepJoinFirst) {
   EXPECT_FALSE(AggregatePlacementCost::estimate(1000, 1000, 1000, false)
                    .push_aggregation());
@@ -94,6 +111,8 @@ TEST(RapidAggregatePlacement, RequiresMeaningfulSavingsAtExtremeCardinalities) {
 #include "sql/item_sum.h"
 #include "sql/sql_optimizer.h"
 #include "storage/rapid_engine/optimizer/rules/condition_pushdown.h"
+#include "storage/rapid_engine/optimizer/rules/join_reorder.h"
+#include "storage/rapid_engine/optimizer/optimizer.h"
 #include "unittest/gunit/fake_table.h"
 #include "unittest/gunit/test_utils.h"
 
@@ -133,6 +152,7 @@ class RapidAggregatePlacementRule : public ::testing::Test {
     join->children.push_back(std::move(left));
     join->children.push_back(std::move(right));
     auto agg = std::make_unique<LocalAgg>();
+    agg->strategy = ShannonBase::AggregateStrategy::HASH;
     agg->estimated_rows = groups;
     agg->group_by.push_back(key);
     agg->aggregates.push_back(
@@ -184,11 +204,31 @@ TEST_F(RapidAggregatePlacementRule, NativeAggregatePreservesPhysicalGroupingCach
 
 TEST_F(RapidAggregatePlacementRule, DenseJoinMovesSameAggregateBelowProbe) {
   Plan plan = make_plan(100000, 100);
+  auto *input_join = plan->children[0].get();
+  input_join->children[0]->cost = 200;
+  input_join->children[1]->cost = 30;
+  input_join->cost = 400;
+  const auto comparison = AggregatePlacementCost::estimate(100000, 100000, 100, false);
+  const double unchanged = std::max(0.0, 400 - 230 -
+      100000 * RapidCostConstants::kHashProbePerRow);
   auto *aggregate = plan.get();
   AggregationPushDown().apply(plan);
   ASSERT_EQ(PlanNode::Type::HASH_JOIN, plan->type());
   EXPECT_EQ(aggregate, plan->children[0].get());
   EXPECT_EQ(PlanNode::Type::SCAN, plan->children[0]->children[0]->type());
+  EXPECT_EQ(100U, plan->estimated_rows);
+  EXPECT_EQ(100U, aggregate->estimated_rows);
+  EXPECT_DOUBLE_EQ(200 + 100000 * RapidCostConstants::kVectorCpuPerRow * 2.0, aggregate->cost);
+  EXPECT_DOUBLE_EQ(230 + unchanged + comparison.aggregate_first, plan->cost);
+}
+
+TEST_F(RapidAggregatePlacementRule, HashPlacementCostCannotSelectStreamingAlgorithm) {
+  Plan plan = make_plan(100000, 100);
+  auto *aggregate = static_cast<LocalAgg *>(plan.get());
+  aggregate->strategy = ShannonBase::AggregateStrategy::STREAMING;
+  AggregationPushDown().apply(plan);
+  EXPECT_EQ(aggregate, plan.get());
+  EXPECT_EQ(PlanNode::Type::HASH_JOIN, plan->children[0]->type());
 }
 
 TEST_F(RapidAggregatePlacementRule, CheapPushStillRequiresUniqueInnerJoin) {
@@ -277,6 +317,20 @@ class RapidCardinalityObservation : public ::testing::Test {
   }
   my_testing::Server_initializer server;
 };
+
+using RapidRuleTrace = RapidCardinalityObservation;
+
+TEST_F(RapidRuleTrace, DisabledJoinReorderExplainsWhyPlanIsUnchanged) {
+  using namespace ShannonBase::Optimizer;
+  Plan plan = std::make_unique<ScanTable>();
+  const auto *original = plan.get();
+  const auto result = trace([&] { JoinReOrder().apply(plan); });
+  EXPECT_EQ(original, plan.get());
+  EXPECT_NE(std::string::npos, result.find("\"decision\": \"rapid_join_reorder\""));
+  EXPECT_NE(std::string::npos, result.find("\"enabled\": false"));
+  EXPECT_NE(std::string::npos, result.find("\"applied\": false"));
+  EXPECT_NE(std::string::npos, result.find("reconstruction_semantics_not_proven"));
+}
 
 TEST_F(RapidCardinalityObservation, CompletesOnceAndResetsOnReexecution) {
   ShannonBase::Executor::CardinalityObservation observation(10);

@@ -28,6 +28,7 @@
 #include "sql/item.h"  //Item
 #include "sql/join_optimizer/materialize_path_parameters.h"
 #include "sql/join_optimizer/walk_access_paths.h"
+#include "sql/opt_trace.h"
 #include "sql/sql_lex.h"  //query_expression
 #include "sql/sql_list.h"
 #include "sql/temp_table_param.h"
@@ -59,17 +60,27 @@ void StorageIndexPrune::apply(Plan &root) {
     if (node->type() != PlanNode::Type::SCAN) return;
 
     auto *scan = static_cast<ScanTable *>(node);
+    Opt_trace_object trace(&current_thd->opt_trace);
+    trace.add_alnum("decision", "rapid_storage_index_prune");
+    if (scan->source_table) trace.add_utf8("table", scan->source_table->alias);
 
     // Only an absent RpdTable disqualifies a scan. `use_storage_index` is
     // already set by translate_access_path() (from the cost context) and by
     // PredicatePushDown, so treating it as "already configured" made this rule
     // a no-op on exactly the scans it exists to improve. Predicates found below
     // are merged into any existing prune_predicate.
-    if (!scan->rpd_table) return;
+    if (!scan->rpd_table) {
+      trace.add_alnum("cause", "no_imcs_table");
+      return;
+    }
 
     // Find predicates for this scan
     auto it = scan_predicates.find(scan);
-    if (it == scan_predicates.end() || it->second.empty()) return;  // No predicates -> no pruning benefit
+    if (it == scan_predicates.end() || it->second.empty()) {
+      trace.add_alnum("cause", "no_predicates");
+      return;
+    }
+    trace.add("input_predicates", it->second.size());
     // Analyze predicates to determine Storage Index candidates
     std::vector<Item *> storage_index_predicates;
     for (auto *pred : it->second) {
@@ -78,7 +89,11 @@ void StorageIndexPrune::apply(Plan &root) {
       }
     }
 
-    if (storage_index_predicates.empty()) return;  // No suitable predicates for Storage Index
+    trace.add("candidate_predicates", storage_index_predicates.size());
+    if (storage_index_predicates.empty()) {
+      trace.add_alnum("cause", "no_storage_index_candidates");
+      return;
+    }
 
     // Convert to actual IMCS predicates so the executor's IMCU-skip check (gated on
     // scan->prune_predicate being non-empty, see table0view.cpp) receives exactly what this
@@ -96,7 +111,11 @@ void StorageIndexPrune::apply(Plan &root) {
     // Nothing from this rule's candidates survived the safety gate — leave the scan untouched
     // rather than crediting a benefit backed by no predicate (a pre-existing prune_predicate,
     // e.g. from an INDEX_RANGE_SCAN translation, already works on its own without this rule).
-    if (converted_predicates.empty()) return;
+    trace.add("safe_predicates", converted_predicates.size());
+    if (converted_predicates.empty()) {
+      trace.add_alnum("cause", "no_safe_storage_predicates");
+      return;
+    }
 
     auto compound = std::make_unique<Imcs::Compound_Predicate>(Imcs::PredicateOperator::AND);
     for (auto &converted : converted_predicates) compound->add_child(std::move(converted));
@@ -108,7 +127,14 @@ void StorageIndexPrune::apply(Plan &root) {
     scan->use_storage_index = true;
     // Estimate pruning benefit and update cost/cardinality, scoped to the predicates that
     // actually made it into scan->prune_predicate above.
+    const auto input_rows = scan->estimated_rows;
+    const double input_cost = scan->cost;
     estimate_pruning_benefit(scan, pruned_predicates);
+    trace.add("pruning_enabled", true)
+        .add("input_rows", input_rows)
+        .add("estimated_rows", scan->estimated_rows)
+        .add("input_cost", input_cost)
+        .add("estimated_cost", scan->cost);
   };
 
   WalkPlan(root.get(), prune_func);
@@ -770,7 +796,14 @@ void ProjectionPruning::apply(Plan &root) {
   auto projection_prun_func = [&](PlanNode *node) {
     if (node->type() != PlanNode::Type::SCAN) return;
     auto *scan = static_cast<ScanTable *>(node);
-    if (!scan->rpd_table) return;
+    Opt_trace_object trace(&current_thd->opt_trace);
+    trace.add_alnum("decision", "rapid_projection_pruning");
+    if (scan->source_table) trace.add_utf8("table", scan->source_table->alias);
+    if (!scan->rpd_table) {
+      trace.add_alnum("cause", "no_imcs_table");
+      return;
+    }
+    const double input_cost = scan->cost;
 
     // Build table key: "db.table"
     std::string table_key =
@@ -795,6 +828,10 @@ void ProjectionPruning::apply(Plan &root) {
 
     size_t total_columns = scan->rpd_table->meta().num_columns;
     size_t required_columns = required_cols.size();
+    trace.add("total_columns", total_columns)
+        .add("required_columns", required_columns)
+        .add("includes_mysql_read_set", scan->source_table != nullptr && scan->source_table->read_set != nullptr)
+        .add("input_cost", input_cost);
     if (required_columns > 0) {
       scan->projected_columns.assign(required_cols.begin(), required_cols.end());
       if (required_columns < total_columns) {
@@ -806,6 +843,8 @@ void ProjectionPruning::apply(Plan &root) {
       // the storage layer can use its metadata/row-count fast path.
       scan->cost *= 0.1;
     }
+    trace.add("estimated_cost", scan->cost)
+        .add_alnum("chosen", required_columns == 0 ? "no_field_dependencies" : "required_columns");
   };
 
   WalkPlan(root.get(), projection_prun_func);

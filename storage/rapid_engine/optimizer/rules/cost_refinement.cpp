@@ -91,8 +91,8 @@ bool CostRefinement::Refine(THD *thd, PlanNode *node) {
   aggregate->estimated_rows = static_cast<ha_rows>(std::ceil(groups));
 
   if (thd && thd->opt_trace.is_started()) {
-    Opt_trace_object wrapper(&thd->opt_trace);
-    Opt_trace_object trace(&thd->opt_trace, "rapid_cost_refinement");
+    Opt_trace_object trace(&thd->opt_trace);
+    trace.add_alnum("decision", "rapid_cost_refinement");
     trace.add_alnum("source", source)
         .add("previous_groups", previous)
         .add("input_rows", input_rows)

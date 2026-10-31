@@ -706,7 +706,13 @@ Plan Optimizer::Optimize(const OptimizeContext *context, const THD *thd, const J
   // No plan means "Rapid declines this statement". Running the rules over a
   // null root would leave every one of them to check for it individually.
   if (!plan.root) return nullptr;
+  auto *trace_context = &const_cast<THD *>(thd)->opt_trace;
+  Opt_trace_object rapid_trace(trace_context);
+  Opt_trace_array rules_trace(trace_context, "rapid_optimizer_rules");
   for (auto &rule : m_optimize_rules) {
+    Opt_trace_object rule_trace(trace_context);
+    if (trace_context->is_started()) rule_trace.add_alnum("rule", rule->name().c_str());
+    Opt_trace_array decisions_trace(trace_context, "decisions");
     Timer rule_timer;
     rule->apply(plan.root);
     DBUG_PRINT("optimizer", ("Rule %s took %s", rule->name().c_str(), rule_timer.lap_formatted().c_str()));

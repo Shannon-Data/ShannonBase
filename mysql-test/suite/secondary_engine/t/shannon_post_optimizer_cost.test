@@ -26,6 +26,45 @@ SET use_secondary_engine=OFF;
 SELECT LOCATE('imcs_ndv_product',TRACE)>0 AS uses_imcs_ndv,
  REGEXP_LIKE(TRACE,'"estimated_groups": 4([.]0+)?[[:space:],}]') AS estimates_four_groups
  FROM information_schema.optimizer_trace;
+# All active rules are grouped in valid JSON, with their actual decisions.
+SELECT JSON_VALID(TRACE) AS valid_rule_trace,
+JSON_SEARCH(TRACE,'one','PredicatePushDown') IS NOT NULL AND
+JSON_SEARCH(TRACE,'one','StorageIndexPrune') IS NOT NULL AND
+JSON_SEARCH(TRACE,'one','ProjectionPruning') IS NOT NULL AND
+JSON_SEARCH(TRACE,'one','TopNPushDown') IS NOT NULL AND
+JSON_SEARCH(TRACE,'one','AggregationPushDown') IS NOT NULL AND
+JSON_SEARCH(TRACE,'one','CostRefinement') IS NOT NULL AS all_active_rules
+FROM information_schema.optimizer_trace;
+--disable_query_log
+--disable_result_log
+SET use_secondary_engine=FORCED;
+SET optimizer_trace='enabled=on';
+SELECT v FROM post_cost_groups WHERE g=1 LIMIT 2;
+SET optimizer_trace='enabled=off';
+SET use_secondary_engine=OFF;
+--enable_result_log
+--enable_query_log
+SELECT EXISTS(SELECT 1 FROM JSON_TABLE(TRACE,'$**.decisions[*]'
+COLUMNS(decision VARCHAR(64) PATH '$.decision',pushed INT PATH '$.pushed_predicates')) AS p
+WHERE decision='rapid_predicate_pushdown' AND pushed>0) AS predicate_pushed,
+EXISTS(SELECT 1 FROM JSON_TABLE(TRACE,'$**.decisions[*]'
+COLUMNS(decision VARCHAR(64) PATH '$.decision',pushed INT PATH '$.pushed')) AS l
+WHERE decision='rapid_topn_pushdown' AND pushed=1) AS limit_pushed
+FROM information_schema.optimizer_trace;
+--disable_query_log
+--disable_result_log
+SET use_secondary_engine=FORCED;
+SET optimizer_trace='enabled=on';
+SELECT v FROM post_cost_groups WHERE ABS(v)=1 LIMIT 2;
+SET optimizer_trace='enabled=off';
+SET use_secondary_engine=OFF;
+--enable_result_log
+--enable_query_log
+SELECT EXISTS(SELECT 1 FROM JSON_TABLE(TRACE,'$**.decisions[*]'
+COLUMNS(decision VARCHAR(64) PATH '$.decision',residual INT PATH '$.residual_predicates')) AS p
+WHERE decision='rapid_predicate_pushdown' AND residual>0) AS residual_retained,
+JSON_SEARCH(TRACE,'one','semantic_barrier_or_limit_side_effects') IS NOT NULL AS limit_barrier_reported
+FROM information_schema.optimizer_trace;
 --disable_query_log
 DROP TABLE post_cost_groups;
 --enable_query_log

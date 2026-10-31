@@ -473,11 +473,14 @@ class RpdCostEstimator : public CostEstimator {
     double join_first{0};
     double aggregate_first{0};
     bool valid{false};
+    double input_groups{0};
+    bool assumes_uniform_matches{true};
 
-    bool push_aggregation() const { return valid && aggregate_first < join_first * 0.8; }
+    static constexpr double kRequiredCostRatio = 0.8;
+    bool push_aggregation() const { return valid && aggregate_first < join_first * kRequiredCostRatio; }
 
-    static AggregatePlacementCost estimate(double input_rows, double joined_rows, double output_groups,
-                                           bool build_side) {
+    static AggregatePlacementCost estimate(double input_rows, double joined_rows, double output_groups, bool build_side,
+                                           double input_groups = -1) {
       if (!std::isfinite(input_rows) || !std::isfinite(joined_rows) || !std::isfinite(output_groups) ||
           input_rows <= 0 || joined_rows <= 0 || joined_rows > input_rows || output_groups <= 0 ||
           output_groups > joined_rows)
@@ -486,14 +489,17 @@ class RpdCostEstimator : public CostEstimator {
       // The available group estimate is AFTER the join. Extrapolate with its match
       // fraction; using it unchanged would underprice pre-aggregation precisely
       // when a selective join removes most groups. This assumes uniform matches.
-      const double groups = std::min(input_rows, (output_groups / joined_rows) * input_rows);
+      const bool uniform = input_groups == -1;
+      if (!uniform && (!std::isfinite(input_groups) || input_groups < output_groups || input_groups > input_rows))
+        return {};
+      const double groups = uniform ? std::min(input_rows, (output_groups / joined_rows) * input_rows) : input_groups;
       const double join_row = build_side ? RapidCostConstants::kHashBuildPerRow + RapidCostConstants::kMemoryWritePerRow
                                          : RapidCostConstants::kHashProbePerRow;
       const double agg_row = RapidCostConstants::kVectorCpuPerRow * 2.0;
       const double first = input_rows * join_row + joined_rows * agg_row;
       const double pushed = input_rows * agg_row + groups * join_row;
       if (!std::isfinite(first) || !std::isfinite(pushed)) return {};
-      return {first, pushed, true};
+      return {first, pushed, true, groups, uniform};
     }
   };
 

@@ -173,6 +173,11 @@ Plan PredicatePushDown::push_below_join(Plan &join, std::vector<Item *> &pending
   const bool can_push_through_join = Utils::is_provably_inner_join(join.get());
 
   if (!can_push_through_join) {
+    {
+      Opt_trace_object trace(&current_thd->opt_trace);
+      trace.add_alnum("decision", "rapid_predicate_pushdown");
+      trace.add_alnum("cause", "non_inner_join").add("retained_predicates", pending_filters.size());
+    }
     // Filters above outer/semi/anti joins cannot in general be pushed into
     // either input without changing NULL-complementation or match semantics.
     std::vector<Item *> left_pending;
@@ -249,6 +254,9 @@ Plan PredicatePushDown::push_into_scan(Plan &scan, std::vector<Item *> &pending_
   if (pending_filters.empty()) return std::move(scan);
   assert(scan_node->source_table);
   TABLE *scan_table = scan_node->source_table;
+  const auto input_rows = scan_node->estimated_rows;
+  const auto predicate_count = pending_filters.size();
+  size_t pushed_count{0}, duplicate_count{0}, unsafe_count{0};
 
   std::vector<Item *> to_storage_engine;  // simple predicate：push down to (Storage Index)
   std::vector<Item *> to_filter_node;     // complex predicate：to be Filter operator
@@ -299,6 +307,7 @@ Plan PredicatePushDown::push_into_scan(Plan &scan, std::vector<Item *> &pending_
         // final row qualification. Preserve any unproven semantics as a MySQL
         // Filter node instead of risking a wrong result.
         to_filter_node.push_back(f);
+        ++unsafe_count;
         continue;
       }
       const bool already_pushed = std::any_of(
@@ -306,7 +315,11 @@ Plan PredicatePushDown::push_into_scan(Plan &scan, std::vector<Item *> &pending_
           [&](const std::unique_ptr<Imcs::Predicate> &pushed) { return same_condition(*pushed, *child_pre); });
       // The condition is already enforced by a pushed predicate; dropping this
       // copy keeps both EXPLAIN and the row estimate honest.
-      if (already_pushed) continue;
+      if (already_pushed) {
+        ++duplicate_count;
+        continue;
+      }
+      ++pushed_count;
 
       pushed_storage_items.push_back(f);
       predicates->add_child(std::move(child_pre));
@@ -332,6 +345,20 @@ Plan PredicatePushDown::push_into_scan(Plan &scan, std::vector<Item *> &pending_
     }
   }
 
+  {
+    Opt_trace_object trace(&current_thd->opt_trace);
+    trace.add_alnum("decision", "rapid_predicate_pushdown");
+    trace.add_utf8("table", scan_table->alias)
+        .add("input_predicates", predicate_count)
+        .add("scan_can_enforce_predicates", scan_can_enforce_predicates)
+        .add("pushed_predicates", pushed_count)
+        .add("already_enforced_predicates", duplicate_count)
+        .add("unsafe_predicates", unsafe_count)
+        .add("residual_predicates", to_filter_node.size())
+        .add("external_predicates", pending_filters.size())
+        .add("input_rows", input_rows)
+        .add("scan_rows", scan_node->estimated_rows);
+  }
   if (!to_filter_node.empty()) {
     Item *combined_cond = ShannonBase::Optimizer::Utils::combine_with_and(to_filter_node);
     double filter_selectivity = 1.0;
@@ -885,13 +912,19 @@ Plan AggregationPushDown::create_two_phase_aggregation(Plan global_agg_node) {
  */
 Plan AggregationPushDown::try_push_below_join(Plan agg_node) {
   auto *agg = static_cast<LocalAgg *>(agg_node.get());
-  Opt_trace_object trace(&current_thd->opt_trace, "rapid_aggregation_placement");
+  Opt_trace_object trace(&current_thd->opt_trace);
+  trace.add_alnum("decision", "rapid_aggregation_placement");
   trace.add("grouped", !agg->group_by.empty()).add("requires_order", agg->hash_output_order != nullptr);
 
   // No GROUP BY (implicit single-group aggregate), ROLLUP super-aggregate rows, or a hash output
   // order a parent depends on: none of these are provably safe to relocate below a join with the
   // single-phase execution model Rapid's aggregate iterator has today.
-  if (agg->group_by.empty() || agg->olap != olap_type::UNSPECIFIED_OLAP_TYPE || agg->hash_output_order != nullptr) {
+  // This comparison prices hash grouping. Moving a streaming aggregate also
+  // needs proof that the new input supplies its grouping order; do not price
+  // that alternative as hash and silently keep a different execution algorithm.
+  if (agg->strategy != AggregateStrategy::HASH || agg->group_by.empty() ||
+      agg->olap != olap_type::UNSPECIFIED_OLAP_TYPE || agg->hash_output_order != nullptr) {
+    trace.add_alnum("cause", "unsupported_grouping_algorithm_or_order");
     return agg_node;
   }
 
@@ -902,6 +935,7 @@ Plan AggregationPushDown::try_push_below_join(Plan agg_node) {
   // whether the join runs before or after grouping, which is not true in general for OUTER/SEMI/
   // ANTI/FULL_OUTER joins.
   if (hj->join_type != JoinType::INNER) {
+    trace.add_alnum("cause", "non_inner_join");
     agg->children[0] = std::move(join);
     return agg_node;
   }
@@ -918,6 +952,7 @@ Plan AggregationPushDown::try_push_below_join(Plan agg_node) {
   for (auto *group_item : agg->group_by) {
     auto tables = get_item_tables(group_item);
     if (tables.empty()) {
+      trace.add_alnum("cause", "unresolved_grouping_or_aggregate_expression");
       agg->children[0] = std::move(join);
       return agg_node;  // unresolvable → cannot push
     }
@@ -931,6 +966,7 @@ Plan AggregationPushDown::try_push_below_join(Plan agg_node) {
       }
     }
     if (!all_from_left && !all_from_right) {
+      trace.add_alnum("cause", "unresolved_grouping_or_aggregate_expression");
       agg->children[0] = std::move(join);
       return agg_node;
     }
@@ -940,6 +976,7 @@ Plan AggregationPushDown::try_push_below_join(Plan agg_node) {
   for (auto *agg_func : agg->aggregates) {
     auto tables = get_item_tables(agg_func);
     if (tables.empty()) {
+      trace.add_alnum("cause", "unresolved_grouping_or_aggregate_expression");
       agg->children[0] = std::move(join);
       return agg_node;  // unresolvable → cannot push
     }
@@ -953,6 +990,7 @@ Plan AggregationPushDown::try_push_below_join(Plan agg_node) {
       }
     }
     if (!all_from_left && !all_from_right) {
+      trace.add_alnum("cause", "unresolved_grouping_or_aggregate_expression");
       agg->children[0] = std::move(join);
       return agg_node;
     }
@@ -960,6 +998,7 @@ Plan AggregationPushDown::try_push_below_join(Plan agg_node) {
 
   // Requires at least one resolved item on each axis and exclusive side.
   if (!any_group || !any_agg || all_from_left == all_from_right) {
+    trace.add_alnum("cause", "grouping_and_arguments_not_exclusive_to_one_side");
     agg->children[0] = std::move(join);
     return agg_node;
   }
@@ -974,17 +1013,19 @@ Plan AggregationPushDown::try_push_below_join(Plan agg_node) {
   // aggregate iterator has no second (global) phase to collapse that back down (LocalAgg::join
   // is the query's one shared JOIN; see HashJoin::child_multiplicity's doc comment).
   if (hj->child_multiplicity[keep_side] != JoinMultiplicity::kAtMostOne) {
+    trace.add_alnum("cause", "other_side_not_proven_unique");
     agg->children[0] = std::move(join);
     return agg_node;
   }
 
   TABLE *push_table = get_pushable_scan_table(join->children[push_side].get());
   if (push_table == nullptr || !group_by_covers_join_keys(agg, hj->join_conditions, push_table)) {
+    trace.add_alnum("cause", "unsupported_input_or_grouping_does_not_preserve_join_keys");
     agg->children[0] = std::move(join);
     return agg_node;
   }
 
-  // Issues: #966. Keep selective joins below aggregation unless pre-grouping
+  // Keep selective joins below aggregation unless pre-grouping
   // has a clear cost advantage. This preserves the original semantic boundaries
   // and leaves the scan directly reachable by the runtime Bloom filter.
   auto rows = [](const PlanNode *node) -> double {
@@ -992,44 +1033,75 @@ Plan AggregationPushDown::try_push_below_join(Plan agg_node) {
     return node->original_path ? node->original_path->num_output_rows() : -1.0;
   };
   double groups = rows(agg);
-  double ndv_groups;
+  double ndv_groups{0.0};
   const bool groups_from_imcs = PlanningStatistics::Groups(current_thd, agg->group_by, rows(join.get()), &ndv_groups);
   if (groups_from_imcs) groups = ndv_groups;
-  const auto placement = RpdCostEstimator::AggregatePlacementCost::estimate(rows(join->children[push_side].get()),
-                                                                            rows(join.get()), groups, push_side == 1);
+
+  double input_groups = -1;
+  const bool input_groups_from_imcs =
+      PlanningStatistics::Groups(current_thd, agg->group_by, rows(join->children[push_side].get()), &ndv_groups);
+  if (input_groups_from_imcs) input_groups = ndv_groups;
+  const auto placement = RpdCostEstimator::AggregatePlacementCost::estimate(
+      rows(join->children[push_side].get()), rows(join.get()), groups, push_side == 1, input_groups);
   bool push = placement.push_aggregation();
   // A/B baseline after all semantic guards; never bypass correctness checks.
-  DBUG_EXECUTE_IF("rapid_aggregate_placement_legacy", { push = true; });
+  DBUG_EXECUTE_IF("rapid_aggregate_placement_legacy", { push = placement.valid; });
+
   trace.add("estimates_valid", placement.valid)
       .add("groups_from_imcs", groups_from_imcs)
+      .add("input_groups_from_imcs", input_groups_from_imcs)
+      .add("input_groups", placement.input_groups)
+      .add("assumes_uniform_matches", placement.assumes_uniform_matches)
       .add("join_first_cost", placement.join_first)
       .add("aggregate_first_cost", placement.aggregate_first)
       .add("push_aggregation", push);
   if (!push) {
+    trace.add_alnum("cause", placement.valid ? "insufficient_cost_benefit" : "unknown_or_invalid_estimates");
     agg->children[0] = std::move(join);
     return agg_node;
   }
 
-  return push_aggregation_to_join_side(std::move(agg_node), std::move(join), push_side);
+  // Both alternatives produce the same logical output. The relocated local
+  // aggregate, however, runs BEFORE the selective join and needs its own NDV.
+  // Keep common scan/other-side work and price the changed work exactly once.
+  const double common_cost = join->children[0]->cost + join->children[1]->cost;
+  const double join_row = push_side == 1 ? RapidCostConstants::kHashBuildPerRow + RapidCostConstants::kMemoryWritePerRow
+                                         : RapidCostConstants::kHashProbePerRow;
+  const double unchanged_join_work =
+      std::max(0.0, join->cost - common_cost - rows(join->children[push_side].get()) * join_row);
+  const double selected_cost = common_cost + unchanged_join_work + placement.aggregate_first;
+  if (!std::isfinite(selected_cost) || selected_cost < 0 ||
+      placement.input_groups >= static_cast<double>(HA_POS_ERROR) || groups >= static_cast<double>(HA_POS_ERROR)) {
+    trace.add_alnum("cause", "unrepresentable_cost_or_cardinality");
+    agg->children[0] = std::move(join);
+    return agg_node;
+  }
+  trace.add_alnum("chosen", "aggregate_before_join").add("selected_subtree_cost", selected_cost);
+  return push_aggregation_to_join_side(std::move(agg_node), std::move(join), push_side, placement.input_groups, groups,
+                                       selected_cost);
 }
 
 /**
  * Relocate agg_node (unchanged: same JOIN*, same group_by/aggregates Items) to wrap
  * join->children[push_side], and return join as the new subtree root.
  */
-Plan AggregationPushDown::push_aggregation_to_join_side(Plan agg_node, Plan join, int push_side) {
+Plan AggregationPushDown::push_aggregation_to_join_side(Plan agg_node, Plan join, int push_side, double input_groups,
+                                                        double output_groups, double selected_cost) {
   auto *agg = static_cast<LocalAgg *>(agg_node.get());
 
   Plan pushed_child = std::move(join->children[push_side]);
-  agg->cost = pushed_child->cost * 1.5;
+  const double input_rows = pushed_child->estimated_rows != HA_POS_ERROR && pushed_child->estimated_rows > 0
+                                ? static_cast<double>(pushed_child->estimated_rows)
+                                : pushed_child->original_path->num_output_rows();
+  agg->cost = pushed_child->cost + input_rows * RapidCostConstants::kVectorCpuPerRow * 2.0;
+  agg->estimated_rows = static_cast<ha_rows>(std::ceil(input_groups));
   agg->children[0] = std::move(pushed_child);
 
   join->children[push_side] = std::move(agg_node);
-  join->cost = join->children[0]->cost + join->children[1]->cost;
-  // The join can no longer output more rows than the (now pre-grouped) push side has groups, and
-  // keep_side is proven to contribute at most one row per match, so agg's own prior estimate
-  // remains a valid upper bound for the join's output.
-  join->estimated_rows = agg->estimated_rows;
+  join->cost = selected_cost;
+  // Unique INNER matching only removes groups. Keep the logical output equal
+  // to the join-first candidate, independently of the local aggregate's NDV.
+  join->estimated_rows = static_cast<ha_rows>(std::ceil(output_groups));
 
   return join;
 }
@@ -1161,15 +1233,23 @@ void TopNPushDown::apply(Plan &root) {
 
     if (node->type() != PlanNode::Type::LIMIT) return;
     auto *limit_node = static_cast<Limit *>(node.get());
+    Opt_trace_object trace(&current_thd->opt_trace);
+    trace.add_alnum("decision", "rapid_topn_pushdown");
+    trace.add("limit_end", limit_node->limit).add("offset", limit_node->offset);
     if (limit_node->children.size() != 1 || !limit_node->children[0] ||
         limit_node->children[0]->type() != PlanNode::Type::SCAN || limit_node->count_all_rows ||
-        limit_node->reject_multiple_rows || limit_node->send_records_override != nullptr)
+        limit_node->reject_multiple_rows || limit_node->send_records_override != nullptr) {
+      trace.add("pushed", false).add_alnum("cause", "semantic_barrier_or_limit_side_effects");
       return;
+    }
 
     auto *scan = static_cast<ScanTable *>(limit_node->children[0].get());
     // An ordered scan reads off the ART in the query's final order, so its
     // first rows are the answer: both LIMIT and OFFSET may be absorbed.
-    if (scan->has_required_order && scan->index_no < 0) return;
+    if (scan->has_required_order && scan->index_no < 0) {
+      trace.add("pushed", false).add_alnum("cause", "required_order_without_index");
+      return;
+    }
     // LIMIT_OFFSET stores an exclusive row boundary (returned rows +
     // OFFSET), whereas RapidCursor::set_scan_limit() expects the number of
     // rows to return after skipping OFFSET. Normalize the representation at
@@ -1181,6 +1261,11 @@ void TopNPushDown::apply(Plan &root) {
     const ha_rows child_rows = scan->estimated_rows;
     const ha_rows after_offset = child_rows > scan->offset ? child_rows - scan->offset : 0;
     scan->estimated_rows = scan->limit == HA_POS_ERROR ? after_offset : std::min(after_offset, scan->limit);
+    trace.add("pushed", true)
+        .add("required_order", scan->has_required_order)
+        .add("scan_limit", scan->limit)
+        .add("input_rows", child_rows)
+        .add("output_rows", scan->estimated_rows);
     node = std::move(limit_node->children[0]);
   };
   push_into_direct_scans(root);
