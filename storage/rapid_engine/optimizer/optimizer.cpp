@@ -1000,6 +1000,10 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
       DBUG_EXECUTE_IF("rapid_force_vectorized_nlj", { prefer_hash = false; });
       if (!prefer_hash && Executor::SelectVectorizedNestedLoop(thd, path, state->batch_requested)) {
         TranslateState outer, inner;
+        // The selected join consumes chunks itself. Preserve that demand on
+        // both inputs, including REF lookups below residual filters and
+        // nested joins; otherwise the batch core falls back to SQL rows.
+        outer.batch_requested = inner.batch_requested = true;
         if (translate_access_path(&outer, thd, nlj.outer, join) || translate_access_path(&inner, thd, nlj.inner, join))
           return true;
         if (!outer.plan_node || !inner.plan_node) {

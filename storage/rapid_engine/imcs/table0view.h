@@ -194,6 +194,8 @@ class RapidCursor : public MemoryObject {
   int index_init(uint keynr, bool sorted);
   int index_end();
   int index_read(uchar *buf, const uchar *key, uint key_len, ha_rkey_function find_flag, bool navigation = false);
+  int index_seek(const uchar *key, uint key_len, bool reverse);
+  int position_index(const uchar *key, uint key_len, ha_rkey_function find_flag, bool *reverse);
   int index_next(uchar *buf);
   int index_prev(uchar *buf);
 

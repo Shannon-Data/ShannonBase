@@ -114,6 +114,9 @@ class ha_rapid : public handler {
   int index_next_batch(size_t batch_size, std::pmr::vector<ShannonBase::Executor::ColumnChunk> &data, size_t &read_cnt,
                        bool reverse = false);
 
+  // Position an equality prefix without reading a TABLE record.
+  int index_lookup_batch_start(const uchar *key, uint length, bool reverse);
+
   const std::vector<row_id_t> &last_batch_row_ids() const;
   void set_last_returned_rowid(row_id_t rid);
 

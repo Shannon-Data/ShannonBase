@@ -269,6 +269,16 @@ AccessPath *NestLoopJoin::ToAccessPath(THD *thd) {
 
   PropagateCostAndRows(this, path);
   path->vectorized = !row_mode && Executor::SelectVectorizedNestedLoop(thd, path, batch_output_requested);
+  if (!path->vectorized) {
+    // A later aggregate decision can put this join back in row mode. Direct
+    // lookups then have no batch consumer; keep their native row entry point.
+    // Scans and filters may still benefit from batching internally.
+    for (AccessPath *input : {path->nested_loop_join().outer, path->nested_loop_join().inner}) {
+      if (input != nullptr && (input->type == AccessPath::REF || input->type == AccessPath::REF_OR_NULL ||
+                               input->type == AccessPath::EQ_REF))
+        input->vectorized = false;
+    }
+  }
   path->secondary_engine_data = nullptr;
   if (path->vectorized) {
     auto *params = new (thd->mem_root) RapidNestedLoopParameters;

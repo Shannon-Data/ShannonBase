@@ -21,12 +21,13 @@
 
    Copyright (c) 2026, Shannon Data AI and/or its affiliates.
 */
-#ifndef SHANNON_BINLOG_POSITION_H
-#define SHANNON_BINLOG_POSITION_H
+#ifndef __SHANNON_BINLOG_POSITION_H__
+#define __SHANNON_BINLOG_POSITION_H__
 #include <iosfwd>
 #include "storage/rapid_engine/include/rapid_change_record.h"
 
-namespace ShannonBase::Utils {
+namespace ShannonBase {
+namespace Utils {
 // Certifies an immutable local-binlog prefix; never applies row changes.
 class BinlogPositionReader {
  public:
@@ -35,6 +36,6 @@ class BinlogPositionReader {
   static bool certify_file(const char *path, BinlogPosition &position);
   static bool certify_stream(std::istream &stream, BinlogPosition &position);
 };
-
-}  // namespace ShannonBase::Utils
+}  // namespace Utils
+}  // namespace ShannonBase
 #endif

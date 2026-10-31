@@ -101,6 +101,7 @@ bool VectorizedMaterializeIterator::WriteBlock() {
     if (!TryAllocation(
             [&] { owner = std::allocate_shared<Owner>(std::pmr::polymorphic_allocator<Owner>(&m_memory), &m_memory); }))
       return Error("Rapid materialization spool descriptor allocation failed");
+
     if (owner->file == nullptr) return Error("Rapid materialization could not create its column spool");
     m_file = std::shared_ptr<FILE>(owner, owner->file);
   }
@@ -122,6 +123,7 @@ bool VectorizedMaterializeIterator::WriteBlock() {
 
   for (auto &column : m_columns) {
     if (!column.valid()) continue;
+
     const size_t width = column.width();
     m_encoded.assign(m_rows * (width + 1), 0);
     for (size_t row = 0; row < m_rows; ++row) {
@@ -129,8 +131,10 @@ bool VectorizedMaterializeIterator::WriteBlock() {
       to[0] = column.nullable_fast(row);
       if (to[0] == 0) memcpy(to + 1, column.data_fast(row), width);
     }
+
     if (fwrite(m_encoded.data(), 1, m_encoded.size(), m_file.get()) != m_encoded.size())
       return Error("Rapid materialization column write failed");
+
     column.clear();
   }
   m_spill_bytes += bytes;
@@ -150,14 +154,17 @@ bool VectorizedMaterializeIterator::InitImpl() {
     }
     return false;
   }
+
   m_ready = false;
   m_file.reset();
   m_columns.clear();
   m_tail.clear();
   m_input.clear();
+  m_input_selection.clear();
   m_encoded.clear();
   m_rows = m_position = m_total = m_emitted = m_tail_start = m_tail_count = 0;
   m_spill_bytes = 0;
+
   if (!m_reservation) return Error("Rapid materialization memory reservation exhausted");
   if (m_source->Init()) return true;
 
@@ -176,7 +183,11 @@ bool VectorizedMaterializeIterator::InitImpl() {
   // Leave room for growth overlap, input chunks, encoded IO and lookahead.
   m_max_rows = std::min<size_t>(UINT32_MAX, m_reservation.bytes() / (8 * width));
   DBUG_EXECUTE_IF("rapid_materialize_tiny_cache", { m_max_rows = std::min<size_t>(m_max_rows, 8); });
-  size_t capacity = std::min<size_t>(1024, m_max_rows);
+  m_batch_capacity = std::min(m_max_rows, SelectBatchRows(width, m_reservation.bytes(), 8));
+
+  if (m_batch_capacity == 0) return Error("Rapid materialization batch exceeds its memory budget");
+
+  size_t capacity = m_batch_capacity;
   // Spool IO reuses this buffer, so replay never has to allocate.
   const auto ensure_encoded = [&](size_t rows) {
     const size_t bytes = rows * max_width;
@@ -186,6 +197,7 @@ bool VectorizedMaterializeIterator::InitImpl() {
   if (!ensure_encoded(capacity)) return Error("Rapid materialization spool buffer allocation failed");
   if (!TryReserve(m_columns, m_table->s->fields))
     return Error("Rapid materialization column descriptors allocation failed");
+
   for (uint i = 0; i < m_table->s->fields; ++i) {
     m_columns.emplace_back(bitmap_is_set(m_table->read_set, i) ? m_table->field[i] : nullptr,
                            bitmap_is_set(m_table->read_set, i) ? capacity : 0, &m_memory);
@@ -197,9 +209,10 @@ bool VectorizedMaterializeIterator::InitImpl() {
   if (batch != nullptr) {
     if (!TryReserve(m_input, m_table->s->fields))
       return Error("Rapid materialization input descriptors allocation failed");
+
     for (uint i = 0; i < m_table->s->fields; ++i) {
       m_input.emplace_back(bitmap_is_set(m_table->read_set, i) ? m_table->field[i] : nullptr,
-                           bitmap_is_set(m_table->read_set, i) ? std::min<size_t>(1024, capacity) : 0, &m_memory);
+                           bitmap_is_set(m_table->read_set, i) ? std::min(m_batch_capacity, capacity) : 0, &m_memory);
       if (m_input.back().failed()) return Error("Rapid materialization could not allocate an input chunk");
     }
   }
@@ -212,8 +225,9 @@ bool VectorizedMaterializeIterator::InitImpl() {
     if (m_rows == capacity) {
       if (capacity < m_max_rows) {
         const size_t next = std::min(m_max_rows, capacity * 2);
-        for (auto &column : m_columns)
+        for (auto &column : m_columns) {
           if (column.valid() && !column.grow(next)) return Error("Rapid materialization column growth failed");
+        }
         capacity = next;
         if (!ensure_encoded(capacity)) return Error("Rapid materialization spool buffer growth failed");
       } else if (WriteBlock())
@@ -222,17 +236,24 @@ bool VectorizedMaterializeIterator::InitImpl() {
 
     if (batch != nullptr) {
       for (auto &column : m_input) column.clear();
-      size_t rows = 0;
-      const size_t requested = std::min<size_t>({1024, capacity - m_rows, m_limit - m_total});
-      const int result = batch->ReadBatch(m_input, requested, rows);
+
+      size_t rows{0};
+      const size_t requested = std::min<size_t>({m_batch_capacity, capacity - m_rows, m_limit - m_total});
+      const int result = batch->ReadSelectedBatch(m_input, requested, rows, m_input_selection);
       if (result != 0 && result != HA_ERR_END_OF_FILE) return true;
+
       for (size_t i = 0; i < m_columns.size(); ++i) {
         if (!m_columns[i].valid()) continue;
-        for (size_t row = 0; row < rows; ++row)
-          if (!m_columns[i].append_from(m_input[i], row)) return Error("Rapid materialization batch append failed");
+        for (size_t row = 0; row < rows; ++row) {
+          const size_t physical = m_input_selection.empty() ? row : m_input_selection[row];
+          if (!m_columns[i].append_from(m_input[i], physical))
+            return Error("Rapid materialization batch append failed");
+        }
       }
+
       m_rows += rows;
       m_total += rows;
+
       if (result == HA_ERR_END_OF_FILE) break;
       if (rows == 0) return Error("Rapid materialization input batch made no progress");
       continue;
@@ -311,6 +332,7 @@ int VectorizedMaterializeIterator::Read() {
     --m_tail_count;
     return 0;
   }
+
   const int result = EnsureBlock();
   if (result != 0) return result;
   Restore(m_columns, m_position++);
@@ -325,7 +347,8 @@ int VectorizedMaterializeIterator::ReadBatch(std::pmr::vector<ColumnChunk> &chun
       RapidMonitor::rapid_counters.query_vectorized_materialize_batch_rows_total.fetch_add(rows,
                                                                                            std::memory_order_relaxed);
   });
-  capacity = std::min<size_t>(capacity, 1024);
+
+  capacity = std::min(capacity, m_batch_capacity);
   while (rows < capacity) {
     if (thd()->killed) {
       thd()->send_kill_message();
@@ -343,12 +366,15 @@ int VectorizedMaterializeIterator::ReadBatch(std::pmr::vector<ColumnChunk> &chun
     }
     for (auto &target : chunks) {
       if (!target.valid()) continue;
+
       const ColumnChunk *column = nullptr;
-      for (const auto &candidate : *source)
+      for (const auto &candidate : *source) {
         if (candidate.valid() && candidate.source_field() == target.source_field()) column = &candidate;
+      }
       if (column == nullptr || !target.append_from(*column, position))
         return Error("Rapid materialization batch replay failed");
     }
+
     if (m_tail_count != 0) {
       ++m_tail_start;
       --m_tail_count;

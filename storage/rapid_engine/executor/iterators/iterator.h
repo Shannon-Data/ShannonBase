@@ -67,8 +67,34 @@ namespace Executor {
  * consumers are iterators.
  */
 namespace Batch {
-using SelectionVector = std::vector<uint32_t>;
+using SelectionVector = std::pmr::vector<uint32_t>;
 }  // namespace Batch
+
+// Hardware hints affect batching, never query semantics or the memory ceiling.
+struct BatchHardware {
+  size_t cache_line_bytes{CACHE_LINE_SIZE};
+  size_t l2_bytes{CACHE_L2_SIZE};
+  size_t simd_bytes{sizeof(uint64_t)};
+};
+const BatchHardware &ExecutionBatchHardware();
+
+inline size_t SelectBatchRows(size_t row_bytes, size_t available_bytes, size_t live_batches = 1,
+                              const BatchHardware &hardware = ExecutionBatchHardware()) {
+  row_bytes = std::max<size_t>(1, row_bytes);
+  live_batches = std::max<size_t>(1, live_batches);
+  if (row_bytes > SIZE_MAX / live_batches) return 0;
+  const size_t footprint = row_bytes * live_batches;
+  const size_t memory_rows = available_bytes / footprint;
+  if (memory_rows == 0) return 0;
+  // Use only a fraction of L2: keys, null bits and downstream state also need it.
+  const size_t cache_bytes = std::max<size_t>(1, hardware.l2_bytes / 4);
+  size_t rows = std::min<size_t>({8192, memory_rows, std::max<size_t>(1, cache_bytes / footprint)});
+  // Whole-byte columns of any width then end at cache/SIMD boundaries. Small
+  // grants may serve fewer rows; alignment must never round above the grant.
+  const size_t quantum = std::max<size_t>({1, hardware.cache_line_bytes, hardware.simd_bytes});
+  if (rows >= quantum) rows -= rows % quantum;
+  return rows;
+}
 
 // The single STL allocation boundary. std::pmr containers must receive a
 // throwing allocator (returning nullptr is undefined behavior). Keep exception
@@ -132,13 +158,15 @@ inline T Max(const T *data, const uint8_t *null_mask, size_t rows) {
   return Utils::SIMD::max<T>(data, null_mask, rows);
 }
 
+template <typename Allocator>
 inline size_t FilterCompareInt32(const int32_t *data, const uint8_t *null_mask, size_t rows, int32_t value,
-                                 Utils::SIMD::CompareOp op, std::vector<size_t> &selection) {
+                                 Utils::SIMD::CompareOp op, std::vector<size_t, Allocator> &selection) {
   return Utils::SIMD::filter_compare_int32(data, null_mask, rows, value, op, selection);
 }
 
+template <typename Allocator>
 inline size_t FilterCompareInt64(const int64_t *data, const uint8_t *null_mask, size_t rows, int64_t value,
-                                 Utils::SIMD::CompareOp op, std::vector<size_t> &selection) {
+                                 Utils::SIMD::CompareOp op, std::vector<size_t, Allocator> &selection) {
   return Utils::SIMD::filter_compare_int64(data, null_mask, rows, value, op, selection);
 }
 
@@ -270,7 +298,10 @@ class ColumnChunk {
 
   // Compact rows in-place according to a monotonically increasing selection.
   // Used by batch-preserving filters; no temporary column buffers are needed.
-  bool gather_in_place(const std::vector<uint32_t> &selection, size_t *bytes_moved = nullptr);
+  template <typename Allocator>
+  bool gather_in_place(const std::vector<uint32_t, Allocator> &selection, size_t *bytes_moved = nullptr) {
+    return GatherRows(selection.data(), selection.size(), bytes_moved);
+  }
 
   inline uchar *mutable_data_base() noexcept { return m_cols_buffer_data; }
   inline uint8_t *mutable_null_mask_data() noexcept { return m_null_mask_data; }
@@ -362,6 +393,7 @@ class ColumnChunk {
   inline ShannonBase::bit_array_t *get_null_mask() const { return m_null_mask.get(); }
 
  private:
+  bool GatherRows(const uint32_t *selection, size_t count, size_t *bytes_moved);
   bool initialize_buffers();
 
   void copy_from(const ColumnChunk &other);
@@ -760,6 +792,20 @@ class BatchReadable {
    */
   virtual int ReadBatch(std::pmr::vector<ColumnChunk> &col_chunks, size_t capacity, size_t &rows_read) = 0;
 
+  // Selection indexes physical rows in caller-owned chunks. An empty selection
+  // means the first rows_read rows are dense. Valid until the next read into
+  // these chunks; callers must retain both chunks and selection for lookahead.
+  // Dense-only consumers keep using ReadBatch(), which materializes explicitly.
+  virtual int ReadSelectedBatch(std::pmr::vector<ColumnChunk> &chunks, size_t capacity, size_t &rows_read,
+                                std::pmr::vector<uint32_t> &selection) {
+    selection.clear();
+    return ReadBatch(chunks, capacity, rows_read);
+  }
+
+  // Table-level NULL complements cannot be inferred from nullable column values.
+  virtual bool BatchNullRow(TABLE *, size_t) const { return false; }
+  virtual bool PreservesBatchNullRows() const { return false; }
+
   /**
    * Push rows [from_row, total_rows) back into an internal lookahead buffer
    * so the next ReadBatch() re-delivers them first.
@@ -815,8 +861,18 @@ class VectorizedFilterIterator final : public RowIterator, public BatchReadable 
   void UnlockRow() override;
 
   int ReadBatch(std::pmr::vector<ColumnChunk> &col_chunks, size_t capacity, size_t &rows_read) override;
+  int ReadSelectedBatch(std::pmr::vector<ColumnChunk> &chunks, size_t capacity, size_t &rows_read,
+                        std::pmr::vector<uint32_t> &selection) override;
+  std::shared_ptr<Compress::Dictionary> Dictionary(const Field *field) const override {
+    return m_batch_source ? m_batch_source->Dictionary(field) : nullptr;
+  }
   bool PushbackBatchTail(const std::pmr::vector<ColumnChunk> &chunks, size_t from_row, size_t total_rows) override;
 
+  bool BatchNullRow(TABLE *table, size_t row) const override;
+  bool PreservesBatchNullRows() const override {
+    auto *source = dynamic_cast<BatchReadable *>(m_source->real_iterator());
+    return source && source->PreservesBatchNullRows();
+  }
   const VectorizedOperatorStats &stats() const { return m_stats; }
   size_t row_materializations() const { return m_stats.row_materializations; }
   size_t vectorized_predicate_rows() const { return m_stats.simd_rows + m_stats.scalar_fallback_rows; }
@@ -831,26 +887,35 @@ class VectorizedFilterIterator final : public RowIterator, public BatchReadable 
     bool valid{false};
   };
 
-  void CollectConditionFields();
+  bool CollectConditionFields();
   void CompileSimplePredicate();
   bool EvaluateSimplePredicateBatch(const std::pmr::vector<ColumnChunk> &chunks, size_t rows);
   bool BuildConditionChunkMap(const std::pmr::vector<ColumnChunk> &chunks);
   bool MaterializeConditionRow(const std::pmr::vector<ColumnChunk> &chunks, size_t row);
+  int ReadSelectedBatchImpl(std::pmr::vector<ColumnChunk> &chunks, size_t capacity, size_t &rows_read,
+                            std::pmr::vector<uint32_t> &selection);
   int ReadBatchViaRows(std::pmr::vector<ColumnChunk> &col_chunks, size_t capacity, size_t &rows_read);
   bool DrainLookahead(std::pmr::vector<ColumnChunk> &col_chunks, size_t capacity, size_t *rows_read);
 
+  ResMgmt::MemoryBudget::Reservation m_reservation;
+  ResMgmt::BoundedMemoryResource m_memory;
   unique_ptr_destroy_only<RowIterator> m_source;
   Item *m_condition{nullptr};
   BatchReadable *m_batch_source{nullptr};
-  std::vector<Field *> m_condition_fields;
-  std::vector<size_t> m_condition_chunk_map;
+  std::pmr::vector<Field *> m_condition_fields;
+  std::pmr::vector<size_t> m_condition_chunk_map;
+  std::pmr::vector<char> m_condition_decode;
   Batch::SelectionVector m_selection;
-  std::vector<size_t> m_simd_selection;
+  std::pmr::vector<uint32_t> m_input_selection;
+  std::pmr::vector<TABLE *> m_null_tables;
+  std::pmr::vector<uint64_t> m_batch_nulls, m_lookahead_nulls;
+  std::pmr::vector<size_t> m_simd_selection;
   SimplePredicate m_simple_predicate;
 
   std::pmr::vector<ColumnChunk> m_lookahead_chunks;
   size_t m_lookahead_start{0};
-  size_t m_lookahead_count{0};
+  size_t m_lookahead_count{0}, m_batch_capacity{0};
+  bool m_replayed_row{false};
   VectorizedOperatorStats m_stats;
   CardinalityObservation m_cardinality;
 };

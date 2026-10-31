@@ -1,0 +1,50 @@
+# Native lookup batching and selection-preserving residual predicates.
+--source include/have_debug.inc
+CREATE DATABASE rapid_batch_lookup;
+USE rapid_batch_lookup;
+SET use_secondary_engine=OFF;
+CREATE TABLE o (id INT PRIMARY KEY, k INT) SECONDARY_ENGINE=rapid;
+CREATE TABLE i (id INT PRIMARY KEY, k INT, v INT, s VARCHAR(20), KEY(k), KEY(k,v)) SECONDARY_ENGINE=rapid;
+INSERT INTO o VALUES (1,1),(2,1),(3,2),(4,9),(5,NULL);
+SET cte_max_recursion_depth=2000;
+INSERT INTO i WITH RECURSIVE seq AS
+ (SELECT 1 n UNION ALL SELECT n+1 FROM seq WHERE n<1600)
+ SELECT n,IF(n<=1300,1,2),IF(MOD(n,7)=0,NULL,n),IF(MOD(n,11)=0,NULL,CONCAT('s',MOD(n,5))) FROM seq;
+INSERT INTO i VALUES (1601,NULL,7,'null-key');
+SET cte_max_recursion_depth=DEFAULT;
+ANALYZE TABLE o,i;
+ALTER TABLE o SECONDARY_LOAD;
+ALTER TABLE i SECONDARY_LOAD;
+SET use_secondary_engine=FORCED;
+SET optimizer_switch='hypergraph_optimizer=off';
+SET SESSION debug='+d,rapid_force_vectorized_nlj,rapid_force_vectorized_ref,rapid_require_batch_lookup';
+--echo # Repeated REF keys and a match range spanning multiple batches.
+--let $assert_query = SELECT COUNT(*),SUM(i.v),COUNT(i.s) FROM o STRAIGHT_JOIN i FORCE INDEX(k) ON i.k=o.k
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--echo # Correlated residuals and dictionary strings stay on the batch path.
+--let $assert_query = SELECT COUNT(*),SUM(i.v) FROM o STRAIGHT_JOIN i FORCE INDEX(k) ON i.k=o.k AND i.v>o.id AND i.s>'s2'
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--echo # Unmatched and NULL outer keys retain NULL complements.
+--let $assert_query = SELECT o.id,COUNT(i.id),SUM(i.v) FROM o LEFT JOIN i FORCE INDEX(k) ON i.k=o.k AND i.v>o.id GROUP BY o.id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--echo # REF_OR_NULL traverses both equality ranges on every Init.
+--let $assert_query = SELECT COUNT(*),SUM(i.v) FROM o STRAIGHT_JOIN i FORCE INDEX(k) ON i.k=o.k OR i.k IS NULL
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--echo # A NULL outer key visits the NULL-key range exactly once.
+--let $assert_query = SELECT COUNT(*),SUM(i.v) FROM o STRAIGHT_JOIN i FORCE INDEX(k) ON i.k=o.k OR i.k IS NULL WHERE o.k IS NULL
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--echo # EQ_REF supports repeated keys and cache reuse across scalar boundaries.
+--let $assert_query = SELECT COUNT(*),SUM(i.v) FROM o STRAIGHT_JOIN i FORCE INDEX(PRIMARY) ON i.id=o.k
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--echo # Reverse prefix reads and early LIMIT preserve index ordering.
+--let $assert_query = SELECT id,k FROM i FORCE INDEX(k) WHERE k=1 ORDER BY id DESC LIMIT 5
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+SET SESSION debug='-d,rapid_force_vectorized_nlj,rapid_force_vectorized_ref,rapid_require_batch_lookup';
+--echo # Prepared execution restarts both lookup and selection state.
+PREPARE stmt FROM 'SELECT COUNT(*),SUM(i.v) FROM o STRAIGHT_JOIN i FORCE INDEX(k) ON i.k=o.k AND i.v>o.id';
+EXECUTE stmt;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
+SET use_secondary_engine=OFF;
+DROP DATABASE rapid_batch_lookup;

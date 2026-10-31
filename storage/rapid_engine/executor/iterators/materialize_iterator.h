@@ -61,13 +61,14 @@ class VectorizedMaterializeIterator final : public RowIterator, public BatchRead
   TABLE *m_table{nullptr};
   std::pmr::vector<ColumnChunk> m_columns, m_tail;
   std::pmr::vector<ColumnChunk> m_input;
+  std::pmr::vector<uint32_t> m_input_selection{&m_memory};
   std::pmr::vector<uchar> m_encoded;
   std::shared_ptr<FILE> m_file;
 
   size_t m_rows{0}, m_position{0}, m_total{0}, m_emitted{0}, m_max_rows{0};
-  size_t m_tail_start{0}, m_tail_count{0};
+  size_t m_tail_start{0}, m_tail_count{0}, m_batch_capacity{0};
   uint64_t m_spill_bytes{0};
-  ha_rows m_limit;
+  ha_rows m_limit{HA_POS_ERROR};
   query_id_t m_query_id{0};
   bool m_ready{false};
 };

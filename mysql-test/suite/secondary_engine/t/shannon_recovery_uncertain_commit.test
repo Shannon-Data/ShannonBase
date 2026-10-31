@@ -6,6 +6,8 @@
 
 --disable_query_log
 CALL mtr.add_suppression("recovery eligibility is revoked or cannot be verified; automatic recovery stopped");
+# The unlogged writes below revoke eligibility while a checkpoint may be queued.
+CALL mtr.add_suppression("CheckpointScheduler: on-demand checkpoint failed sh_recovery_uncertain[.]t");
 --enable_query_log
 CREATE DATABASE sh_recovery_uncertain;
 USE sh_recovery_uncertain;

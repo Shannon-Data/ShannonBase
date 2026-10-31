@@ -28,25 +28,29 @@
 #ifndef __SHANNONBASE_STREAM_ITERATOR_H__
 #define __SHANNONBASE_STREAM_ITERATOR_H__
 #include "sql/iterators/composite_iterators.h"
-#include "storage/rapid_engine/executor/iterators/iterator.h"
+#include "storage/rapid_engine/executor/iterators/record_iterator.h"
 
 namespace ShannonBase {
 namespace Executor {
-class VectorizedStreamIterator final : public RowIterator, public BatchReadable {
+
+namespace detail {
+class BatchStreamIterator final : public RowIterator, public BatchReadable {
  public:
   static bool CanVectorize(const Temp_table_param *param, TABLE *table, bool provide_rowid);
-  VectorizedStreamIterator(THD *thd, unique_ptr_destroy_only<RowIterator> source, Temp_table_param *param, TABLE *table,
-                           bool provide_rowid, JOIN *join, int ref_slice,
-                           const Prealloced_array<TABLE *, 4> &input_tables, size_t budget);
+  BatchStreamIterator(THD *thd, unique_ptr_destroy_only<RowIterator> source, Temp_table_param *param, TABLE *table,
+                      bool provide_rowid, JOIN *join, int ref_slice, const Prealloced_array<TABLE *, 4> &input_tables,
+                      size_t budget);
   bool Init() override;
   int Read() override;
   int ReadBatch(std::pmr::vector<ColumnChunk> &chunks, size_t capacity, size_t &rows) override;
-  bool SupportsBatchRead() const override { return m_batch != nullptr; }
+  bool SupportsBatchRead() const override;
+  bool PreservesBatchNullRows() const override;
+  bool BatchNullRow(TABLE *table, size_t row) const override;
   std::shared_ptr<Compress::Dictionary> Dictionary(const Field *field) const override;
   bool PushbackBatchTail(const std::pmr::vector<ColumnChunk> &chunks, size_t from, size_t total) override;
-  void SetNullRowFlag(bool value) override { m_native.SetNullRowFlag(value); }
-  void UnlockRow() override { m_source->UnlockRow(); }
-  void EndPSIBatchModeIfStarted() override { m_source->EndPSIBatchModeIfStarted(); }
+  void SetNullRowFlag(bool value) override;
+  void UnlockRow() override;
+  void EndPSIBatchModeIfStarted() override;
 
  private:
   struct Binding {
@@ -56,8 +60,6 @@ class VectorizedStreamIterator final : public RowIterator, public BatchReadable 
     std::shared_ptr<Compress::Dictionary> dictionary;
   };
   int Error();
-  bool PushbackBatchTailImpl(const std::pmr::vector<ColumnChunk> &chunks, size_t from, size_t total);
-  bool LoadTail();
   ResMgmt::MemoryBudget::Reservation m_reservation;
   ResMgmt::BoundedMemoryResource m_memory;
   unique_ptr_destroy_only<RowIterator> m_source;
@@ -69,10 +71,19 @@ class VectorizedStreamIterator final : public RowIterator, public BatchReadable 
   bool m_provide_rowid;
   BatchReadable *m_batch{nullptr};
   std::pmr::vector<Field *> m_input_fields;
-  std::pmr::vector<ColumnChunk> m_input, m_tail;
+  std::pmr::vector<ColumnChunk> m_input;
+  std::pmr::vector<uint32_t> m_input_selection{&m_memory};
   std::pmr::vector<Binding> m_bindings;
-  std::pmr::vector<char> m_decode;
-  size_t m_tail_start{0}, m_tail_count{0};
+  size_t m_batch_capacity{0};
+};
+}  // namespace detail
+
+class VectorizedStreamIterator final : public VectorizedRecordIterator {
+ public:
+  static bool CanVectorize(const Temp_table_param *param, TABLE *table, bool provide_rowid);
+  VectorizedStreamIterator(THD *thd, unique_ptr_destroy_only<RowIterator> source, Temp_table_param *param, TABLE *table,
+                           bool provide_rowid, JOIN *join, int ref_slice,
+                           const Prealloced_array<TABLE *, 4> &input_tables, size_t budget);
 };
 }  // namespace Executor
 }  // namespace ShannonBase

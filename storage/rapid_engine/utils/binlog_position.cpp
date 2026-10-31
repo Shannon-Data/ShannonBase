@@ -33,7 +33,8 @@
 #include "sql/mysqld.h"
 #include "storage/innobase/include/srv0srv.h"
 
-namespace ShannonBase::Utils {
+namespace ShannonBase {
+namespace Utils {
 namespace {
 std::string basename(const std::string &name) { return std::filesystem::path(name).filename().string(); }
 
@@ -111,5 +112,5 @@ bool BinlogPositionReader::certify_stream(std::istream &stream, BinlogPosition &
 bool BinlogPositionReader::certify_file(const char *path, BinlogPosition &position) {
   return position.valid() && prefix_digest(path, position.offset, position.prefix_digest);
 }
-
-}  // namespace ShannonBase::Utils
+}  // namespace Utils
+}  // namespace ShannonBase

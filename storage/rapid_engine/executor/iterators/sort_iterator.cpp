@@ -140,6 +140,7 @@ bool VectorizedSortIterator::ResetState() {
   std::pmr::vector<uint32_t>(&m_sort_memory).swap(m_order);
   decltype(m_topn_payload)(&m_sort_memory).swap(m_topn_payload);
   decltype(m_chunks)(&m_aux_memory).swap(m_chunks);
+  decltype(m_input_selection)(&m_aux_memory).swap(m_input_selection);
   decltype(m_payload_fields)(&m_aux_memory).swap(m_payload_fields);
   decltype(m_batch_dictionaries)(&m_aux_memory).swap(m_batch_dictionaries);
   decltype(m_dictionary_decode_scratch)(&m_aux_memory).swap(m_dictionary_decode_scratch);
@@ -282,7 +283,7 @@ bool VectorizedSortIterator::SetupBatch() {
 
   if (m_key_width > SIZE_MAX - m_row_width || m_key_width + m_row_width == 0) return false;
 
-  m_batch_capacity = std::min(kBatchRows, (m_memory_budget / 4) / (m_key_width + m_row_width));
+  m_batch_capacity = SelectBatchRows(m_key_width + m_row_width, m_memory_budget, 4);
   if (m_batch_capacity == 0) return false;
 
   if (!TryReserve(m_chunks, index)) {
@@ -411,12 +412,13 @@ bool VectorizedSortIterator::EncodeBatchKeys(size_t rows) {
     for (size_t r = 0; r < rows; ++r) {
       uchar *to = m_block_keys.data() + r * width + offset;
       uchar *const start = to;
-      const bool is_null = chunk.nullable_fast(r);
+      const size_t physical = m_input_selection.empty() ? r : m_input_selection[r];
+      const bool is_null = chunk.nullable_fast(physical);
       if (kp.maybe_null) *to++ = is_null ? 0 : 1;
       if (is_null) {
         memset(to, 0, kp.width);
       } else {
-        const uchar *from = chunk.data_fast(r);
+        const uchar *from = chunk.data_fast(physical);
         switch (type) {
           case MYSQL_TYPE_TINY:
           case MYSQL_TYPE_SHORT:
@@ -488,7 +490,7 @@ long VectorizedSortIterator::FetchBlock() {
 
   for (ColumnChunk &chunk : m_chunks) chunk.clear();
   size_t rows{0};
-  const int err = m_batch_source->ReadBatch(m_chunks, m_batch_capacity, rows);
+  const int err = m_batch_source->ReadSelectedBatch(m_chunks, m_batch_capacity, rows, m_input_selection);
   if (err == HA_ERR_END_OF_FILE)
     m_batch_eof = true;
   else if (err != 0)
@@ -517,11 +519,12 @@ const uchar *VectorizedSortIterator::BlockPayload(size_t row, size_t *length) {
     return pointer_cast<const uchar *>(m_row_buffer.ptr());
   }
   m_row_image.resize(m_row_width);
+  const size_t physical = m_input_selection.empty() ? row : m_input_selection[row];
   for (const PayloadField &pf : m_payload_fields) {
     const ColumnChunk &chunk = m_chunks[pf.chunk_index];
     uchar *to = m_row_image.data() + pf.offset;
-    to[0] = chunk.nullable_fast(row) ? 1 : 0;
-    if (to[0] == 0) memcpy(to + 1, chunk.data_fast(row), pf.width);
+    to[0] = chunk.nullable_fast(physical) ? 1 : 0;
+    if (to[0] == 0) memcpy(to + 1, chunk.data_fast(physical), pf.width);
   }
   *length = m_row_width;
   return m_row_image.data();
@@ -1092,7 +1095,7 @@ int VectorizedSortIterator::ReadBatchImpl(std::pmr::vector<ColumnChunk> &chunks,
     return 1;
   }
 
-  capacity = std::min(capacity, kBatchRows);
+  capacity = std::min(capacity, m_batch_capacity);
   m_output_columns.clear();
   if (!TryReserve(m_output_columns, chunks.size())) {
     AllocationError("Rapid sort output schema allocation failed");
