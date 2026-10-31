@@ -24,6 +24,8 @@
 */
 #include "pii_detector.h"
 
+#include "ml/infra_component/ort_runtime.h"
+
 #include <algorithm>
 #include <cassert>
 #include <cmath>
@@ -70,6 +72,8 @@ bool PIIDetector::InitializeONNX() {
     m_sessionOptions = std::make_unique<Ort::SessionOptions>();
     m_sessionOptions->SetIntraOpNumThreads(static_cast<int>(std::max(1u, std::thread::hardware_concurrency() / 2)));
     m_sessionOptions->SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_EXTENDED);
+
+    OrtRuntime::execute(*m_sessionOptions, "PIIDetector", OrtRuntime::file_size(m_modelPath));
 
     m_session = std::make_unique<Ort::Session>(*m_env, m_modelPath.c_str(), *m_sessionOptions);
 

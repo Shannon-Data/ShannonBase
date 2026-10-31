@@ -142,6 +142,7 @@ SET(ML_SOURCES
   ../ml/infra_component/llm_generate_onnx.cpp
   ../ml/infra_component/llm_generate_ollama.cpp
   ../ml/infra_component/pii_detector.cpp
+  ../ml/infra_component/ort_runtime.cpp
 )
 
 SET(DD_SOURCES
@@ -1011,7 +1012,12 @@ SET(TOKENIZER_FFI_LIB
 ADD_LIBRARY(sql_ml STATIC ${ML_SOURCES})
 #gomp required by lightgbm
 TARGET_LINK_LIBRARIES(sql_ml PUBLIC extra::rapidjson _lightgbm gomp ${ONNXRUNTIME_LIBRARIES} ${TOKENIZER_FFI_LIB})
-TARGET_LINK_LIBRARIES(sql_ml PRIVATE CURL::libcurl)
+TARGET_LINK_LIBRARIES(sql_ml PRIVATE CURL::libcurl ${CMAKE_DL_LIBS})
+# The CUDA EP is compiled in only when the package ships the provider; whether
+# it is actually used is decided per process by ML::OrtRuntime.
+IF(ONNXRUNTIME_HAS_CUDA_PROVIDER)
+  TARGET_COMPILE_DEFINITIONS(sql_ml PUBLIC SHANNONBASE_ONNX_CUDA_EP)
+ENDIF()
 TARGET_INCLUDE_DIRECTORIES(sql_ml PUBLIC 
                            ${CMAKE_SOURCE_DIR}/extra/unordered_dense/unordered_dense-4.4.0/include
                            ${CMAKE_SOURCE_DIR}/extra/lightgbm/include
@@ -1511,11 +1517,28 @@ IF(ONNXRUNTIME_FOUND)
     PATTERN "tests" EXCLUDE
   )
 
-  INSTALL(DIRECTORY ${ONNXRUNTIME_LIB_DIR}/
-    DESTINATION lib/onnxruntime
-    FILES_MATCHING
-    PATTERN "libonnxruntime*"
-    PATTERN "*.so*"
-    PATTERN "cmake" EXCLUDE
-  )
+  # Relative sub-directories are preserved, so per-CPU tiers under
+  # glibc-hwcaps/x86-64-vN/ land next to the baseline library and ld.so
+  # picks the best one at load time.
+  IF(ONNXRUNTIME_DISPATCH_ENABLED)
+    # Backends move one level down; libonnxruntime.so.1 is the dispatch shim.
+    INSTALL(TARGETS shannon_ort_dispatch LIBRARY DESTINATION lib/onnxruntime)
+    INSTALL(DIRECTORY ${ONNXRUNTIME_LIB_DIR}/
+      DESTINATION lib/onnxruntime/${ONNXRUNTIME_INSTALL_LIB_SUBDIR}
+      FILES_MATCHING
+      PATTERN "libonnxruntime*"
+      PATTERN "*.so*"
+      PATTERN "cmake" EXCLUDE
+      PATTERN "pkgconfig" EXCLUDE
+    )
+  ELSE()
+    INSTALL(DIRECTORY ${ONNXRUNTIME_LIB_DIR}/
+      DESTINATION lib/onnxruntime
+      FILES_MATCHING
+      PATTERN "libonnxruntime*"
+      PATTERN "*.so*"
+      PATTERN "cmake" EXCLUDE
+      PATTERN "pkgconfig" EXCLUDE
+    )
+  ENDIF()
 ENDIF()
