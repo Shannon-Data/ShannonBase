@@ -83,6 +83,8 @@ class CardinalityEstimator;
 struct TranslateState {
   // Demand on the output edge, propagated by batch-capable consumers only.
   bool batch_requested{false};
+  // The enclosing NLJ has already priced batching across all lookup probes.
+  bool costed_batch_lookup{false};
   // Set of tables covered by the current AccessPath node
   table_map state_map{0};
 

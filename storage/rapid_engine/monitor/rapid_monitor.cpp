@@ -185,6 +185,10 @@ void collect_rapid_monitor_metrics(Metrics &metrics) {
       rapid_counters.query_vectorized_sort_batch_rows_total.load(std::memory_order_relaxed);
   metrics.query_vectorized_ref_batch_rows_total =
       rapid_counters.query_vectorized_ref_batch_rows_total.load(std::memory_order_relaxed);
+  metrics.query_vectorized_expression_rows_total =
+      rapid_counters.query_vectorized_expression_rows_total.load(std::memory_order_relaxed);
+  metrics.query_scalar_expression_rows_total =
+      rapid_counters.query_scalar_expression_rows_total.load(std::memory_order_relaxed);
   metrics.query_vectorized_stream_batch_rows_total =
       rapid_counters.query_vectorized_stream_batch_rows_total.load(std::memory_order_relaxed);
   metrics.query_vectorized_materialize_batch_rows_total =

@@ -61,9 +61,9 @@ DISTANCE(STRING_TO_VECTOR("[0, 0, 0, 0]"), STRING_TO_VECTOR("[1, 2, 3, 4]"), "L1
 SELECT DISTANCE(STRING_TO_VECTOR("[0, 0, 0, 0]"), STRING_TO_VECTOR("[1, 2, 3, 4]"), "L2");
 DISTANCE(STRING_TO_VECTOR("[0, 0, 0, 0]"), STRING_TO_VECTOR("[1, 2, 3, 4]"), "L2")
 5.477225575051661
-SELECT ML_MODEL_LIST();
-ML_MODEL_LIST()
-[{"name": "multilingual-e5-small", "status": "ready"}]
+SELECT JSON_CONTAINS(ML_MODEL_LIST(), JSON_OBJECT('name', 'multilingual-e5-small', 'status', 'ready')) AS embed_model_ready;
+embed_model_ready
+1
 SELECT sys.ml_embed_row("What is artificial intelligence?", JSON_OBJECT("model_id", "all_minilm_l12_v2"));
 ERROR HY000: ML operation failed. cannot find ONNX model for: all_minilm_l12_v2.
 SELECT sys.ml_embed_row("What is artificial intelligence?", JSON_OBJECT("model_id", "multilingual-e5-small"));

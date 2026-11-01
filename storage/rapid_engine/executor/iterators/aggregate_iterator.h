@@ -213,6 +213,8 @@ class VectorizedAggregateIterator final : public RowIterator, public ResMgmt::Ev
     size_t bytes_copied{0};
     size_t simd_rows{0};
     size_t scalar_fallback_rows{0};
+    size_t expression_batch_rows{0};
+    size_t expression_scalar_rows{0};
     size_t hash_probes{0};
     size_t hash_collisions{0};
     size_t hash_spill_rows{0};
@@ -239,6 +241,7 @@ class VectorizedAggregateIterator final : public RowIterator, public ResMgmt::Ev
   bool CanEvaluateExpressionsFromBatch() const;
   // Fills the argument chunk of each expression aggregate for one batch.
   bool BuildExpressionChunksFromBatch(size_t rows);
+  int ReadSourceBatch(size_t &rows, bool selected);
 
  private:
   // Core members (identical to original AggregateIterator)
@@ -306,6 +309,9 @@ class VectorizedAggregateIterator final : public RowIterator, public ResMgmt::Ev
 
     // Aggregate function analysis
     struct AggregateInfo {
+      explicit AggregateInfo(std::pmr::memory_resource *memory) : expression(memory), expression_fields(memory) {}
+      VectorizedExpression expression;
+      std::pmr::vector<Field *> expression_fields;
       Item_sum *item;
       Item_sum::Sumfunctype type;
       Field *source_field;  // Primary field for this aggregate. For an
@@ -314,10 +320,9 @@ class VectorizedAggregateIterator final : public RowIterator, public ResMgmt::Ev
                             // expression rather than a base table column.
       // Non-NULL when the aggregate's argument is an expression rather than a
       // bare column -- e.g. SUM(l_extendedprice * (1 - l_discount)). The value
-      // is evaluated once per row into source_field by
-      // EvaluateExpressionFields(), so every consumer that reads source_field
-      // (the batch chunks and UpdateHashGroup) sees the derived value and needs
-      // no special case. Paths that instead re-drive the aggregate through
+      // is evaluated directly into a synthetic column by VectorizedExpression.
+      // Row input and unsupported values use EvaluateExpressionFields().
+      // Paths that instead re-drive the aggregate through
       // Item_sum::aggregator_add() must NOT be used for these, because that
       // re-evaluates args[0] from the base columns of whatever row happens to
       // be current; IsSimpleAggregate() admits only the aggregate kinds whose

@@ -40,6 +40,7 @@
 #include <xxhash.h>
 #include "sql/current_thd.h"
 #include "sql/item_cmpfunc.h"  //Item_eq_base
+#include "storage/rapid_engine/compress/dictionary/dictionary.h"
 
 #include "storage/rapid_engine/executor/iterators/table_scan_iterator.h"
 #include "storage/rapid_engine/imcs/imcs.h"
@@ -339,10 +340,10 @@ bool VectorizedHashJoinIterator::Init() {
   if (m_probe_batch_input == nullptr)
     m_probe_batch_input = dynamic_cast<BatchReadable *>(m_probe_input->real_iterator());
 
-  // Rapid scans expose encoded string payloads in their chunks. Keep those
-  // inputs on the scalar path until the batch interface carries decoded data.
-  if (!SupportsDirectBatchInput(m_build_input_tables)) m_build_batch_input = nullptr;
-  if (!SupportsDirectBatchInput(m_probe_input_tables)) m_probe_batch_input = nullptr;
+  // Encoded payloads retain the input's dictionary for the lifetime of the
+  // execution, including spill replay. Only SQL row boundaries decode them.
+  if (!SupportsDirectBatchInput(m_build_input_tables, m_build_batch_input)) m_build_batch_input = nullptr;
+  if (!SupportsDirectBatchInput(m_probe_input_tables, m_probe_batch_input)) m_probe_batch_input = nullptr;
   // A child may implement BatchReadable yet be unable to serve batches for this
   // execution (e.g. a nested hash join holding record images).
   if (m_build_batch_input != nullptr && !m_build_batch_input->SupportsBatchRead()) m_build_batch_input = nullptr;
@@ -883,14 +884,53 @@ bool VectorizedHashJoinIterator::EnsureHashCapacity(size_t required_slots, size_
   return false;
 }
 
-bool VectorizedHashJoinIterator::SupportsDirectBatchInput(const pack_rows::TableCollection &tables) const {
+bool VectorizedHashJoinIterator::SupportsDirectBatchInput(const pack_rows::TableCollection &tables,
+                                                          BatchReadable *source) const {
+  if (source == nullptr || !source->SupportsBatchRead()) return false;
   for (const pack_rows::Table &table : tables.tables()) {
     for (const pack_rows::Column &column : table.columns) {
-      const enum_field_types type = column.field->type();
-      if (Utils::Util::is_string(type) || Utils::IsOffPageField(column.field)) return false;
+      const Field *field = column.field;
+      if (Utils::IsOffPageField(field)) return false;
+      if (Utils::Util::is_string(field->type()) && field->real_type() != MYSQL_TYPE_ENUM &&
+          field->real_type() != MYSQL_TYPE_SET) {
+        if (!source->Dictionary(field)) return false;
+      } else if (Utils::Util::normalized_length(field) != field->pack_length())
+        return false;
     }
   }
   return true;
+}
+
+std::shared_ptr<Compress::Dictionary> VectorizedHashJoinIterator::Dictionary(const Field *field) const {
+  if (field == nullptr) return {};
+  for (const auto &entry : m_build_input_tables.tables())
+    if (entry.table == field->table) return m_build_batch_input ? m_build_batch_input->Dictionary(field) : nullptr;
+  for (const auto &entry : m_probe_input_tables.tables())
+    if (entry.table == field->table) return m_probe_batch_input ? m_probe_batch_input->Dictionary(field) : nullptr;
+  return {};
+}
+
+bool VectorizedHashJoinIterator::RestoreColumn(const ColumnChunk &chunk, size_t row, bool row_image) {
+  Field *field = chunk.source_field();
+  if (auto dictionary = row_image ? nullptr : Dictionary(field)) {
+    if (chunk.width() != sizeof(uint32_t) || !TryReserve(m_dictionary_decode, field->pack_length()))
+      return AllocationError("Rapid hash join dictionary decode allocation failed");
+    m_dictionary_decode.resize(field->pack_length());
+    uint32_t code;
+    std::memcpy(&code, chunk.data_fast(row), sizeof(code));
+    const auto length = dictionary->get(code, m_dictionary_decode.data(), m_dictionary_decode.size());
+    Utils::ColumnMapGuard write_guard(field->table, Utils::ColumnMapGuard::TYPE::WRITE);
+    if (!length || field->store(m_dictionary_decode.data(), *length, field->charset()) != TYPE_OK)
+      return AllocationError("Rapid hash join could not decode its input dictionary");
+    m_stats.bytes_copied += *length;
+  } else if (row_image) {
+    std::memcpy(field->field_ptr(), chunk.data_fast(row), chunk.width());
+    m_stats.bytes_copied += chunk.width();
+  } else {
+    field->pack(field->field_ptr(), chunk.data_fast(row), chunk.width());
+    m_stats.bytes_copied += chunk.width();
+  }
+  return false;
 }
 
 int VectorizedHashJoinIterator::Read() { return ReadImpl(); }
@@ -915,7 +955,7 @@ int VectorizedHashJoinIterator::ReadImpl() {
           field->table->set_null_row();
       } else {
         field->set_notnull();
-        field->pack(field->field_ptr(), chunk.data_fast(m_lookahead_start), chunk.width());
+        if (RestoreColumn(chunk, m_lookahead_start, false)) return 1;
       }
     }
     ++m_lookahead_start;
@@ -2300,14 +2340,8 @@ bool VectorizedHashJoinIterator::LoadRowFromColumnChunks(const std::pmr::vector<
         }
       } else {
         field->set_notnull();
-        const bool normalized_batch = (&chunks == &m_build_columns && m_build_batch_input != nullptr) ||
-                                      (&chunks == &m_probe_columns && m_probe_batch_input != nullptr);
-        if (normalized_batch) {
-          field->pack(field->field_ptr(), chunk.data_fast(row_idx), chunk.width());
-        } else {
-          std::memcpy(field->field_ptr(), chunk.data_fast(row_idx), chunk.width());
-        }
-        m_stats.bytes_copied += chunk.width();
+        const bool row_image = &tables == &m_build_input_tables ? m_build_row_image : m_probe_row_image;
+        if (RestoreColumn(chunk, row_idx, row_image)) return true;
       }
 
       chunk_idx++;

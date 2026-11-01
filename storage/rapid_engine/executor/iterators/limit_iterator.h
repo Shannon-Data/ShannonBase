@@ -32,10 +32,10 @@ namespace ShannonBase {
 namespace Executor {
 namespace detail {
 // Owns LIMIT/OFFSET state once. Row-only input uses MySQL's native implementation.
-class BatchLimitIterator final : public RowIterator, public BatchReadable {
+class VectorizedLimitIterator final : public RowIterator, public BatchReadable {
  public:
-  BatchLimitIterator(THD *thd, unique_ptr_destroy_only<RowIterator> source, ha_rows limit, ha_rows offset,
-                     ha_rows *skipped, const Prealloced_array<TABLE *, 4> &tables, size_t budget);
+  VectorizedLimitIterator(THD *thd, unique_ptr_destroy_only<RowIterator> source, ha_rows limit, ha_rows offset,
+                          ha_rows *skipped, const Prealloced_array<TABLE *, 4> &tables, size_t budget);
   bool Init() override;
   int Read() override;
   int ReadBatch(std::pmr::vector<ColumnChunk> &chunks, size_t capacity, size_t &rows) override;

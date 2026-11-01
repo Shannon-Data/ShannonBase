@@ -30,6 +30,7 @@ Copyright (c) 2023, Shannon Data AI and/or its affiliates.
 #include "storage/rapid_engine/populate/log_commons.h"
 
 #include <cstring>
+#include <new>
 #include <optional>
 #include <string>
 
@@ -171,7 +172,21 @@ int ha_rapidpart::open(const char *name, int mode, unsigned int test_if_locked, 
   int error = ha_rapid::open(name, mode, test_if_locked, table_def);
   if (error) return error;
 
-  if (open_partitioning(nullptr)) {
+  // SQL resolves PARTITION (...) through TABLE_SHARE::ha_share before the
+  // iterator opens. Publish the name map under the share lock, and let the
+  // TABLE_SHARE own it across handler instances and table-cache reuse.
+  lock_shared_ha_data();
+  auto *part_share = static_cast<Partition_share *>(get_ha_share_ptr());
+  if (part_share == nullptr) {
+    std::unique_ptr<Partition_share> created(new (std::nothrow) Partition_share());
+    if (created && !created->populate_partition_name_hash(table->part_info)) {
+      part_share = created.release();
+      set_ha_share_ptr(part_share);
+    }
+  }
+  unlock_shared_ha_data();
+
+  if (part_share == nullptr || open_partitioning(part_share)) {
     ha_rapid::close();
     return HA_ERR_INITIALIZATION;
   }

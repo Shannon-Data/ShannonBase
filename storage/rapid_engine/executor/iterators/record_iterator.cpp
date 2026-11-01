@@ -89,7 +89,15 @@ bool CanBatchRecords(TABLE *table) {
   return true;
 }
 
-bool SelectVectorizedLookup(THD *thd, AccessPath *path) {
+namespace {
+// ha_rapid's direct batch probes use one cursor. Partition_helper owns
+// pruning, per-partition cursors and ordered merges for partitioned lookups;
+// its native row interface must keep driving that state. Record encoding is
+// a separate capability, so CanBatchRecords() remains usable at row boundaries.
+bool HasDirectLookupCursor(const TABLE *table) { return table != nullptr && table->part_info == nullptr; }
+}  // namespace
+
+bool SelectVectorizedLookup(THD *thd, AccessPath *path, bool costed_batch_consumer) {
   if (thd == nullptr || path == nullptr) return false;
 
   TABLE *table{nullptr};
@@ -107,7 +115,7 @@ bool SelectVectorizedLookup(THD *thd, AccessPath *path) {
       return false;
   }
 
-  if (!CanBatchRecords(table)) return false;
+  if (!HasDirectLookupCursor(table) || !CanBatchRecords(table)) return false;
 
   DBUG_EXECUTE_IF("rapid_disable_vectorized_ref", { return false; });
   DBUG_EXECUTE_IF("rapid_force_vectorized_ref", { return true; });
@@ -124,13 +132,17 @@ bool SelectVectorizedLookup(THD *thd, AccessPath *path) {
   }
 
   using Optimizer::RapidCostConstants;
-  return Optimizer::RpdCostEstimator::NestedLoopBatchEstimator::estimate(
-             path->num_output_rows(), columns, strings, width, record_width,
-             std::min<size_t>(Utils::Util::hash_join_memory_budget(thd), 2 * 1024 * 1024),
-             RapidCostConstants::kHashBuildPerRow, RapidCostConstants::kVectorDecompCostPerCell,
-             RapidCostConstants::kHashLookupPerRow, RapidCostConstants::kArtRangeSetupCost,
-             RapidCostConstants::kHashBuildCopyPerByte)
-      .choose_batches();
+  const auto work = Optimizer::RpdCostEstimator::NestedLoopBatchEstimator::estimate(
+      path->num_output_rows(), columns, strings, width, record_width,
+      std::min<size_t>(Utils::Util::hash_join_memory_budget(thd), 2 * 1024 * 1024),
+      RapidCostConstants::kHashBuildPerRow, RapidCostConstants::kVectorDecompCostPerCell,
+      RapidCostConstants::kHashLookupPerRow, RapidCostConstants::kArtRangeSetupCost,
+      RapidCostConstants::kHashBuildCopyPerByte);
+  // A selected batch NLJ already prices transport for all of its probes.
+  // Requiring each single-key EQ_REF to amortize a whole batch's setup would
+  // undo that decision and force the parent to restore/re-encode SQL rows.
+  // Keep layout, memory and explicit disable checks in both cases.
+  return costed_batch_consumer ? work.valid : work.choose_batches();
 }
 
 namespace {
@@ -519,7 +531,8 @@ bool VectorizedLookup::Init() {
 }
 
 bool VectorizedLookup::SupportsBatchRead() const {
-  return m_handler && !m_table->file->pushed_cond && !m_table->file->pushed_idx_cond && !m_ref->keypart_hash &&
+  return m_handler && HasDirectLookupCursor(m_table) && !m_table->file->pushed_cond &&
+         !m_table->file->pushed_idx_cond && !m_ref->keypart_hash &&
          !(m_table->key_info[m_ref->key].flags & HA_MULTI_VALUED_KEY);
 }
 
@@ -552,6 +565,7 @@ bool VectorizedLookup::PushbackBatchTail(const std::pmr::vector<ColumnChunk> &, 
 int VectorizedLookup::ReadBatch(std::pmr::vector<ColumnChunk> &chunks, size_t capacity, size_t &rows) {
   rows = 0;
   if (!capacity) return 0;
+  if (!SupportsBatchRead()) return BatchError();
   if (m_done) return HA_ERR_END_OF_FILE;
   if (thd()->killed) {
     thd()->send_kill_message();
@@ -668,6 +682,7 @@ unique_ptr_destroy_only<RowIterator> CreateVectorizedLookup(THD *thd, unique_ptr
     table = path->ref_or_null().table;
     ref = path->ref_or_null().ref;
   }
+  if (!HasDirectLookupCursor(table)) return native;
   return NewIterator<detail::VectorizedLookup>(thd, thd->mem_root, std::move(native), table, ref, reverse,
                                                path->type == AccessPath::EQ_REF, path->type == AccessPath::REF_OR_NULL,
                                                examined);

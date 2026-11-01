@@ -137,6 +137,8 @@ struct Metrics {
   uint64_t query_vectorized_aggregate_scalar_decimal_values_total{0};
   uint64_t query_vectorized_sort_batch_rows_total{0};
   uint64_t query_vectorized_ref_batch_rows_total{0};
+  uint64_t query_vectorized_expression_rows_total{0};
+  uint64_t query_scalar_expression_rows_total{0};
   uint64_t query_vectorized_stream_batch_rows_total{0};
   uint64_t query_vectorized_materialize_batch_rows_total{0};
   uint64_t query_vectorized_aggregate_row_materializations_total{0};
@@ -206,6 +208,8 @@ struct RapidCounters {
   std::atomic<uint64_t> query_vectorized_aggregate_scalar_decimal_values_total{0};
   std::atomic<uint64_t> query_vectorized_sort_batch_rows_total{0};
   std::atomic<uint64_t> query_vectorized_ref_batch_rows_total{0};
+  std::atomic<uint64_t> query_vectorized_expression_rows_total{0};
+  std::atomic<uint64_t> query_scalar_expression_rows_total{0};
   std::atomic<uint64_t> query_vectorized_stream_batch_rows_total{0};
   std::atomic<uint64_t> query_vectorized_materialize_batch_rows_total{0};
   std::atomic<uint64_t> query_vectorized_aggregate_row_materializations_total{0};

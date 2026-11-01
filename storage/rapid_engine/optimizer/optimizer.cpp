@@ -1004,6 +1004,7 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
         // both inputs, including REF lookups below residual filters and
         // nested joins; otherwise the batch core falls back to SQL rows.
         outer.batch_requested = inner.batch_requested = true;
+        inner.costed_batch_lookup = true;
         if (translate_access_path(&outer, thd, nlj.outer, join) || translate_access_path(&inner, thd, nlj.inner, join))
           return true;
         if (!outer.plan_node || !inner.plan_node) {
@@ -1369,6 +1370,7 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
       TranslateState child_state;
       child_state.batch_requested =
           state->batch_requested && !limit_ap.count_all_rows && !limit_ap.reject_multiple_rows;
+      child_state.costed_batch_lookup = state->costed_batch_lookup && child_state.batch_requested;
       if (translate_access_path(&child_state, thd, limit_ap.child, join)) {
         return true;
       }
@@ -1429,6 +1431,7 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
       }
       TranslateState child_state;
       child_state.batch_requested = state->batch_requested;
+      child_state.costed_batch_lookup = state->costed_batch_lookup;
       if (translate_access_path(&child_state, thd, f.child, join)) return true;
 
       auto node = std::make_unique<Filter>();
@@ -1790,8 +1793,9 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
     case AccessPath::REF:
     case AccessPath::REF_OR_NULL:
     case AccessPath::EQ_REF: {
-      if (state->batch_requested && Executor::SelectVectorizedLookup(thd, path)) {
+      if (state->batch_requested && Executor::SelectVectorizedLookup(thd, path, state->costed_batch_lookup)) {
         auto node = std::make_unique<RefLookup>();
+        node->costed_batch_consumer = state->costed_batch_lookup;
         node->original_path = path;
         node->cost = path->cost();
         node->estimated_rows = SafeRowEstimate(path->num_output_rows());

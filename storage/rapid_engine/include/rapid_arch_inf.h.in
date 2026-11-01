@@ -135,6 +135,15 @@
 #endif
 // clang-format on
 
+// Compiler builtins for overflow-checked arithmetic; see utils/utils.h for the helpers.
+#if defined(__has_builtin)
+    #if __has_builtin(__builtin_add_overflow)
+        #define SHANNON_OVERFLOW_BUILTINS_SUPPORTED
+    #endif
+#elif defined(__GNUC__) && (__GNUC__ >= 5)
+    #define SHANNON_OVERFLOW_BUILTINS_SUPPORTED
+#endif
+
 // cache line size
 #define CACHE_LINE_SIZE @CACHE_LINE_SIZE@
 

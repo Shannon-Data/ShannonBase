@@ -50,7 +50,10 @@ bool VectorizedNestedLoopIterator::CanVectorize(AccessPath *path) {
   WalkTablesUnderAccessPath(
       path,
       [&](TABLE *table) {
-        if (!table || !table->s || !table->read_set || ++tables > 64) {
+        // Partition_helper supplies native rows for scans and lookups. Price
+        // that boundary up front instead of selecting a batch core that will
+        // fall back to a native NLJ during Init().
+        if (!table || !table->s || !table->read_set || table->part_info != nullptr || ++tables > 64) {
           supported = false;
           return false;
         }

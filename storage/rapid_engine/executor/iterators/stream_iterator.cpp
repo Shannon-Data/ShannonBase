@@ -48,7 +48,7 @@ bool SameRepresentation(Field *source, Field *target) {
 }  // namespace
 
 namespace detail {
-bool BatchStreamIterator::CanVectorize(const Temp_table_param *param, TABLE *table, bool provide_rowid) {
+bool VectorizedStreamIterator::CanVectorize(const Temp_table_param *param, TABLE *table, bool provide_rowid) {
   if (param == nullptr || table == nullptr || provide_rowid || !param->copy_fields.empty() ||
       param->items_to_copy == nullptr)
     return false;
@@ -81,9 +81,10 @@ bool BatchStreamIterator::CanVectorize(const Temp_table_param *param, TABLE *tab
   return true;
 }
 
-BatchStreamIterator::BatchStreamIterator(THD *thd, unique_ptr_destroy_only<RowIterator> source, Temp_table_param *param,
-                                         TABLE *table, bool provide_rowid, JOIN *join, int ref_slice,
-                                         const Prealloced_array<TABLE *, 4> &input_tables, size_t budget)
+VectorizedStreamIterator::VectorizedStreamIterator(THD *thd, unique_ptr_destroy_only<RowIterator> source,
+                                                   Temp_table_param *param, TABLE *table, bool provide_rowid,
+                                                   JOIN *join, int ref_slice,
+                                                   const Prealloced_array<TABLE *, 4> &input_tables, size_t budget)
     : RowIterator(thd),
       m_reservation(ResMgmt::reserve_query_memory(thd, ResMgmt::QueryMemoryOperator::kBatchTransport, budget)),
       m_memory(m_reservation.bytes()),
@@ -103,20 +104,20 @@ BatchStreamIterator::BatchStreamIterator(THD *thd, unique_ptr_destroy_only<RowIt
       m_input_fields.push_back(bitmap_is_set(input->read_set, i) ? input->field[i] : nullptr);
 }
 
-int BatchStreamIterator::Error() {
+int VectorizedStreamIterator::Error() {
   my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid stream could not preserve its columnar projection");
   return 1;
 }
 
-bool BatchStreamIterator::SupportsBatchRead() const { return m_batch != nullptr; }
+bool VectorizedStreamIterator::SupportsBatchRead() const { return m_batch != nullptr; }
 
-void BatchStreamIterator::SetNullRowFlag(bool value) { m_native.SetNullRowFlag(value); }
+void VectorizedStreamIterator::SetNullRowFlag(bool value) { m_native.SetNullRowFlag(value); }
 
-void BatchStreamIterator::UnlockRow() { m_source->UnlockRow(); }
+void VectorizedStreamIterator::UnlockRow() { m_source->UnlockRow(); }
 
-void BatchStreamIterator::EndPSIBatchModeIfStarted() { m_source->EndPSIBatchModeIfStarted(); }
+void VectorizedStreamIterator::EndPSIBatchModeIfStarted() { m_source->EndPSIBatchModeIfStarted(); }
 
-bool BatchStreamIterator::Init() {
+bool VectorizedStreamIterator::Init() {
   m_input.clear();
   m_bindings.clear();
   m_batch = nullptr;
@@ -151,15 +152,15 @@ bool BatchStreamIterator::Init() {
   return false;
 }
 
-std::shared_ptr<Compress::Dictionary> BatchStreamIterator::Dictionary(const Field *field) const {
+std::shared_ptr<Compress::Dictionary> VectorizedStreamIterator::Dictionary(const Field *field) const {
   for (const auto &binding : m_bindings)
     if (binding.target == field) return binding.dictionary;
   return {};
 }
 
-int BatchStreamIterator::Read() { return m_native.Read(); }
+int VectorizedStreamIterator::Read() { return m_native.Read(); }
 
-int BatchStreamIterator::ReadBatch(std::pmr::vector<ColumnChunk> &chunks, size_t capacity, size_t &rows) {
+int VectorizedStreamIterator::ReadBatch(std::pmr::vector<ColumnChunk> &chunks, size_t capacity, size_t &rows) {
   rows = 0;
   auto report_batches = create_scope_guard([&] {
     if (rows != 0)
@@ -196,11 +197,11 @@ int BatchStreamIterator::ReadBatch(std::pmr::vector<ColumnChunk> &chunks, size_t
   return result;
 }
 
-bool BatchStreamIterator::PushbackBatchTail(const std::pmr::vector<ColumnChunk> &, size_t, size_t) { return true; }
+bool VectorizedStreamIterator::PushbackBatchTail(const std::pmr::vector<ColumnChunk> &, size_t, size_t) { return true; }
 
-bool BatchStreamIterator::PreservesBatchNullRows() const { return true; }
+bool VectorizedStreamIterator::PreservesBatchNullRows() const { return true; }
 
-bool BatchStreamIterator::BatchNullRow(TABLE *table, size_t) const {
+bool VectorizedStreamIterator::BatchNullRow(TABLE *table, size_t) const {
   return table == m_table && m_table->has_null_row();
 }
 }  // namespace detail
@@ -214,7 +215,7 @@ Prealloced_array<TABLE *, 4> StreamOutputTables(TABLE *table) {
 }  // namespace
 
 bool VectorizedStreamIterator::CanVectorize(const Temp_table_param *param, TABLE *table, bool provide_rowid) {
-  return detail::BatchStreamIterator::CanVectorize(param, table, provide_rowid);
+  return detail::VectorizedStreamIterator::CanVectorize(param, table, provide_rowid);
 }
 
 VectorizedStreamIterator::VectorizedStreamIterator(THD *thd, unique_ptr_destroy_only<RowIterator> source,
@@ -223,8 +224,8 @@ VectorizedStreamIterator::VectorizedStreamIterator(THD *thd, unique_ptr_destroy_
                                                    const Prealloced_array<TABLE *, 4> &input_tables, size_t budget)
     : VectorizedRecordIterator(
           thd,
-          NewIterator<detail::BatchStreamIterator>(thd, thd->mem_root, std::move(source), param, table, provide_rowid,
-                                                   join, ref_slice, input_tables, budget / 2),
+          NewIterator<detail::VectorizedStreamIterator>(thd, thd->mem_root, std::move(source), param, table,
+                                                        provide_rowid, join, ref_slice, input_tables, budget / 2),
           StreamOutputTables(table), budget - budget / 2, -1.0, "stream") {}
 }  // namespace Executor
 }  // namespace ShannonBase

@@ -224,7 +224,7 @@ void VectorizedWindowIterator::IntSumAccumulator::FoldIntoCarry() {
 
 void VectorizedWindowIterator::IntSumAccumulator::Add(int64_t value) {
   int64_t next;
-  if (__builtin_add_overflow(acc, value, &next)) {
+  if (SHANNON_ADD_OVERFLOW(acc, value, &next)) {
     FoldIntoCarry();
     acc = value;
   } else {

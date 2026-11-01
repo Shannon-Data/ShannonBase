@@ -4,6 +4,8 @@
 #include "scope_guard.h"
 #include "sql/iterators/timing_iterator.h"
 #include "sql/item_cmpfunc.h"
+#include "sql/join_optimizer/access_path.h"
+#include "sql/partition_info.h"
 #include "storage/rapid_engine/cost/cost.h"
 #include "storage/rapid_engine/executor/iterators/nested_loop_iterator.h"
 #include "storage/rapid_engine/monitor/rapid_monitor.h"
@@ -616,11 +618,45 @@ class EvictAfterSelectedRead final : public RowIterator, public BatchReadable {
   bool PushbackBatchTail(const std::pmr::vector<ColumnChunk> &, size_t, size_t) override { return true; }
   void SetNullRowFlag(bool value) override { m_source->SetNullRowFlag(value); }
   void UnlockRow() override { m_source->UnlockRow(); }
+  std::shared_ptr<ShannonBase::Compress::Dictionary> Dictionary(const Field *field) const override {
+    return dynamic_cast<BatchReadable *>(m_source->real_iterator())->Dictionary(field);
+  }
  private:
   unique_ptr_destroy_only<RowIterator> m_source;
   VectorizedHashJoinIterator **m_owner;
   bool m_requested{false};
 };
+
+TEST_F(RapidBatchPipeline, PartitionedInputsKeepNativeLookupAndJoinSelection) {
+  AccessPath outer, inner, join, lookup;
+  outer.type = AccessPath::TABLE_SCAN;
+  outer.table_scan().table = left.get();
+  inner.type = AccessPath::TABLE_SCAN;
+  inner.table_scan().table = right.get();
+  join.type = AccessPath::NESTED_LOOP_JOIN;
+  join.nested_loop_join().outer = &outer;
+  join.nested_loop_join().inner = &inner;
+  join.nested_loop_join().join_type = JoinType::INNER;
+  lookup.type = AccessPath::EQ_REF;
+  lookup.eq_ref().table = right.get();
+  lookup.set_num_output_rows(1);
+  ASSERT_TRUE(VectorizedNestedLoopIterator::CanVectorize(&join));
+  ASSERT_TRUE(SelectVectorizedLookup(server.thd(), &lookup, true));
+
+  partition_info partitions;
+  for (TABLE *table : {left.get(), right.get()}) {
+    table->part_info = &partitions;
+    auto restore = create_scope_guard([&] { table->part_info = nullptr; });
+    EXPECT_FALSE(VectorizedNestedLoopIterator::CanVectorize(&join));
+    // Numeric records remain encodable at SQL boundaries. That does not
+    // authorize direct access to ha_rapid's non-partitioned lookup cursor.
+    EXPECT_TRUE(CanBatchRecords(table));
+    lookup.eq_ref().table = table;
+    EXPECT_FALSE(SelectVectorizedLookup(server.thd(), &lookup, true));
+    EXPECT_FALSE(SelectVectorizedLookup(server.thd(), &lookup, false));
+  }
+}
+
 TEST_F(RapidBatchPipeline, SortGathersJoinedColumnsWithCollidingFieldIndices) {
   ORDER order{}; order.item_initial = new Item_field(right->field[0]); order.direction = ORDER_ASC;
   Mem_root_array<TABLE *> tables(server.thd()->mem_root); tables.push_back(left.get()); tables.push_back(right.get());
@@ -743,6 +779,142 @@ TEST_F(RapidBatchPipeline, MaterializationConsumesSelectionWithoutCompactionAndR
   }
   EXPECT_EQ(0U, row_calls);
   EXPECT_EQ(1U, init_calls);
+}
+
+TEST_F(RapidBatchPipeline, ArithmeticResidualConsumesSelectionWithoutRestoringFields) {
+  for (bool decimal : {false, true}) {
+    size_t row_calls = 0;
+    Item *first = new Item_func_gt(new Item_field(right->field[0]), new Item_int(100));
+    ASSERT_FALSE(first->fix_fields(server.thd(), &first));
+    auto source = NewIterator<VectorizedFilterIterator>(server.thd(), server.thd()->mem_root,
+                                                        Source(1000, &row_calls), first);
+    Item *condition = decimal
+        ? static_cast<Item *>(new Item_func_gt(new Item_field(left->field[0]), new Item_decimal(20.5)))
+        : new Item_func_lt(new Item_func_mul(new Item_field(left->field[0]), new Item_int(2)),
+                           new Item_field(right->field[0]));
+    ASSERT_FALSE(condition->fix_fields(server.thd(), &condition));
+    VectorizedFilterIterator filter(server.thd(), std::move(source), condition);
+    for (size_t execution = 0; execution < 2; ++execution) {
+      ASSERT_FALSE(filter.Init());
+      auto chunks = Chunks(71);
+      std::pmr::vector<uint32_t> selection;
+      std::vector<int32_t> actual, expected;
+      for (int32_t value = 1; value <= 900; ++value)
+        if ((value - 1) % 17 != 0 && (decimal ? value > 20.5 : value * 2 < 1001 - value))
+          expected.push_back(value);
+      for (;;) {
+        for (auto &chunk : chunks) chunk.clear();
+        size_t rows = 0;
+        const int result = filter.ReadSelectedBatch(chunks, 71, rows, selection);
+        ASSERT_TRUE(result == 0 || result == HA_ERR_END_OF_FILE);
+        for (size_t row = 0; row < rows; ++row)
+          actual.push_back(Value(chunks[0], selection.empty() ? row : selection[row]));
+        if (result == HA_ERR_END_OF_FILE) break;
+      }
+      EXPECT_EQ(expected, actual);
+      EXPECT_EQ(0U, filter.row_materializations());
+      EXPECT_EQ(0U, filter.stats().bytes_copied);
+      EXPECT_EQ(0U, filter.stats().scalar_fallback_rows);
+      EXPECT_GT(filter.stats().expression_batch_rows, 0U);
+    }
+    EXPECT_EQ(0U, row_calls);
+  }
+}
+
+TEST_F(RapidBatchPipeline, DecimalExpressionMatchesMysqlWithoutWritingSourceFields) {
+  Field_new_decimal price(my_decimal_precision_to_length(15, 2, false), true, "price", 2, false);
+  Field_new_decimal discount(my_decimal_precision_to_length(15, 2, false), true, "discount", 2, false);
+  Fake_TABLE table(&price, &discount);
+  bitmap_set_all(table.write_set);
+  Item *expression = new Item_func_mul(new Item_field(&price),
+      new Item_func_minus(new Item_int(1), new Item_field(&discount)));
+  ASSERT_FALSE(expression->fix_fields(server.thd(), &expression));
+  Field_new_decimal output(my_decimal_precision_to_length(expression->decimal_precision(), expression->decimals, false),
+                           true, "output", expression->decimals, false);
+  Fake_TABLE output_table(&output);
+  bitmap_set_all(output_table.write_set);
+  VectorizedExpression program(std::pmr::get_default_resource());
+  ASSERT_TRUE(program.Compile(expression));
+  std::pmr::vector<ColumnChunk> chunks;
+  chunks.emplace_back(&price, 8);
+  chunks.emplace_back(&discount, 8);
+  ColumnChunk target(&output, 8);
+  std::vector<std::vector<uchar>> expected;
+  const char *prices[] = {"21168.23", "-45983.16", "0.00", "9999999999999.99", "-0.01", "7.13", "1.10", "0.01"};
+  const char *discounts[] = {"0.04", "1.09", "0.10", "-0.09", "0.10", "1.00", "0.07", "0.01"};
+  for (size_t row = 0; row < 8; ++row) {
+    price.set_notnull();
+    discount.set_notnull();
+    ASSERT_EQ(TYPE_OK, price.store(prices[row], strlen(prices[row]), &my_charset_latin1));
+    ASSERT_EQ(TYPE_OK, discount.store(discounts[row], strlen(discounts[row]), &my_charset_latin1));
+    if (row == 5) price.set_null();
+    if (row == 6) discount.set_null();
+    ASSERT_TRUE(chunks[0].add(price.field_ptr(), price.pack_length(), price.is_null()));
+    ASSERT_TRUE(chunks[1].add(discount.field_ptr(), discount.pack_length(), discount.is_null()));
+    my_decimal buffer;
+    my_decimal *value = expression->val_decimal(&buffer);
+    expected.emplace_back();
+    if (!expression->null_value) {
+      ASSERT_NE(nullptr, value);
+      ASSERT_EQ(TYPE_OK, output.store_decimal(value));
+      expected.back().assign(output.field_ptr(), output.field_ptr() + output.pack_length());
+    }
+  }
+  ASSERT_EQ(TYPE_OK, price.store("123.45", 6, &my_charset_latin1));
+  ASSERT_TRUE(program.Evaluate(chunks, 8));
+  ASSERT_TRUE(program.Store(&target, 8));
+  for (size_t row = 0; row < 8; ++row) {
+    EXPECT_EQ(expected[row].empty(), target.nullable_fast(row));
+    if (!expected[row].empty()) {
+      EXPECT_EQ(0, memcmp(expected[row].data(), target.data_fast(row), output.pack_length()));
+    }
+  }
+  EXPECT_DOUBLE_EQ(123.45, price.val_real());
+}
+
+TEST_F(RapidBatchPipeline, IntegerExpressionOverflowFallsBackWithoutDiagnosticsOrMutation) {
+  Item *expression = new Item_func_mul(new Item_field(left->field[0]),
+                                      new Item_int(std::numeric_limits<longlong>::max()));
+  ASSERT_FALSE(expression->fix_fields(server.thd(), &expression));
+  VectorizedExpression program(std::pmr::get_default_resource());
+  ASSERT_TRUE(program.Compile(expression));
+  auto chunks = Chunks(2);
+  for (int32_t value : {1, 2}) ASSERT_TRUE(chunks[0].add(reinterpret_cast<const uchar *>(&value), sizeof(value), false));
+  left->field[0]->store(123, false);
+  EXPECT_FALSE(program.Evaluate(chunks, 2));
+  EXPECT_FALSE(server.thd()->is_error());
+  EXPECT_EQ(123, left->field[0]->val_int());
+}
+
+TEST_F(RapidBatchPipeline, PackedExpressionOutputMatchesMysqlAtDecimalGroupBoundaries) {
+  for (unsigned precision : {9U, 18U, 19U, 38U, 39U, 65U}) {
+    for (unsigned scale : {0U, 1U, 9U, 18U, 30U}) {
+      if (scale > precision) continue;
+      Field_new_decimal field(my_decimal_precision_to_length(precision, scale, false), true, "decimal", scale, false);
+      Fake_TABLE table(&field);
+      bitmap_set_all(table.write_set);
+      VectorizedExpression program(std::pmr::get_default_resource());
+      ASSERT_TRUE(program.Compile(new Item_field(&field)));
+      std::pmr::vector<ColumnChunk> chunks;
+      chunks.emplace_back(&field, 3);
+      std::vector<std::vector<uchar>> expected;
+      for (int sign : {-1, 0, 1}) {
+        std::string value(sign == 0 ? 1 : std::min(precision, 37U), sign == 0 ? '0' : '9');
+        if (value.size() <= scale) value.insert(0, scale + 1 - value.size(), '0');
+        if (scale) value.insert(value.size() - scale, 1, '.');
+        if (sign == -1) value.insert(0, 1, '-');
+        ASSERT_EQ(TYPE_OK, field.store(value.data(), value.size(), &my_charset_latin1));
+        expected.emplace_back(field.field_ptr(), field.field_ptr() + field.pack_length());
+        ASSERT_TRUE(chunks[0].add(field.field_ptr(), field.pack_length(), false));
+      }
+      ASSERT_TRUE(program.Evaluate(chunks, 3));
+      ColumnChunk output(&field, 3);
+      ASSERT_TRUE(program.Store(&output, 3));
+      for (size_t row = 0; row < 3; ++row)
+        EXPECT_EQ(0, memcmp(expected[row].data(), output.data_fast(row), field.pack_length()))
+            << "DECIMAL(" << precision << ',' << scale << ')';
+    }
+  }
 }
 
 TEST_F(RapidBatchPipeline, HashJoinConsumesSelectionsOnBothInputsWithoutCompaction) {
@@ -920,11 +1092,15 @@ TEST_F(RapidBatchPipeline, ProjectionRowReadsUseTheBatchCoreAndReinitialize) {
 
 class DictionaryBatchRows final : public RowIterator, public ShannonBase::Executor::BatchReadable {
  public:
-  DictionaryBatchRows(THD *thd, Field *field, size_t *calls)
+  DictionaryBatchRows(THD *thd, Field *field, size_t *calls, Field *key = nullptr, size_t count = 5,
+                      bool shifted_dictionary = false)
       : RowIterator(thd),
         m_field(field),
         m_calls(calls),
+        m_key(key),
+        m_count(count),
         m_dictionary(std::make_shared<ShannonBase::Compress::Dictionary>()) {
+    if (shifted_dictionary) m_dictionary->store(reinterpret_cast<const uchar *>("padding"), 7);
     for (const char *value : {"alpha", "", "unused", "gamma", "delta"})
       m_ids.push_back(m_dictionary->store(reinterpret_cast<const uchar *>(value), strlen(value)));
   }
@@ -945,24 +1121,127 @@ class DictionaryBatchRows final : public RowIterator, public ShannonBase::Execut
   }
   int ReadBatch(std::pmr::vector<ColumnChunk> &chunks, size_t capacity, size_t &rows) override {
     rows = 0;
-    while (rows < capacity && m_position < m_ids.size()) {
-      const bool is_null = m_position == 2;
-      if (!chunks[0].add(is_null ? nullptr : reinterpret_cast<const uchar *>(&m_ids[m_position]),
-                         is_null ? 0 : sizeof(uint32_t), is_null))
-        return 1;
+    while (rows < capacity && m_position < m_count) {
+      const size_t index = m_position % m_ids.size();
+      const bool is_null = index == 2;
+      const int32_t key = m_position + 1;
+      for (auto &chunk : chunks) {
+        if (!chunk.valid()) continue;
+        if (chunk.source_field() == m_key) {
+          if (!chunk.add(reinterpret_cast<const uchar *>(&key), sizeof(key), false)) return 1;
+        } else if (chunk.source_field() == m_field) {
+          if (!chunk.add(is_null ? nullptr : reinterpret_cast<const uchar *>(&m_ids[index]),
+                         is_null ? 0 : sizeof(uint32_t), is_null)) return 1;
+        } else {
+          return 1;
+        }
+      }
       ++rows;
       ++m_position;
     }
-    return m_position == m_ids.size() ? HA_ERR_END_OF_FILE : 0;
+    return m_position == m_count ? HA_ERR_END_OF_FILE : 0;
   }
 
  private:
   Field *m_field;
   size_t *m_calls;
+  Field *m_key;
+  size_t m_count;
   std::shared_ptr<ShannonBase::Compress::Dictionary> m_dictionary;
   std::vector<uint32_t> m_ids;
   size_t m_position{0};
 };
+
+TEST_F(RapidBatchPipeline, HashJoinKeepsDictionaryPayloadsAcrossSpillPushbackAndRowReads) {
+  Fake_TABLE_SHARE share(2);
+  Mock_field_long build_key("build_key", false, false), probe_key("probe_key", false, false);
+  Mock_field_varstring build_value(&share, "build_value", 16, true), probe_value(&share, "probe_value", 16, true);
+  Fake_TABLE build_table(&build_key, &build_value), probe_table(&probe_key, &probe_value);
+  build_table.pos_in_table_list->set_tableno(0);
+  probe_table.pos_in_table_list->set_tableno(1);
+  for (auto *table : {&build_table, &probe_table}) {
+    bitmap_set_all(table->read_set);
+    bitmap_set_all(table->write_set);
+  }
+  constexpr size_t count = 4000;
+  for (bool spill : {false, true}) {
+    size_t row_calls = 0;
+    VectorizedHashJoinIterator *owner = nullptr;
+    auto build = NewIterator<DictionaryBatchRows>(server.thd(), server.thd()->mem_root, &build_value, &row_calls,
+                                                 &build_key, count, false);
+    auto input = NewIterator<EvictAfterSelectedRead>(server.thd(), server.thd()->mem_root, std::move(build), &owner);
+    auto probe = NewIterator<DictionaryBatchRows>(server.thd(), server.thd()->mem_root, &probe_value, &row_calls,
+                                                 &probe_key, count, true);
+    auto *eq = new Item_func_eq(new Item_field(&build_key), new Item_field(&probe_key));
+    eq->set_cmp_func();
+    std::vector<HashJoinCondition> conditions{HashJoinCondition(eq, server.thd()->mem_root)};
+    Mem_root_array<Item *> extra(server.thd()->mem_root);
+    Prealloced_array<TABLE *, 4> build_tables(PSI_NOT_INSTRUMENTED), probe_tables(PSI_NOT_INSTRUMENTED);
+    build_tables.push_back(&build_table);
+    probe_tables.push_back(&probe_table);
+    VectorizedHashJoinIterator join(server.thd(), std::move(input), build_tables, count, std::move(probe),
+                                    probe_tables, false, 0, 1024 * 1024, conditions, false, JoinType::INNER, extra,
+                                    HashJoinInput::kBuild, false, nullptr, count);
+    if (spill) owner = &join;
+    for (size_t execution = 0; execution < 2; ++execution) {
+      ASSERT_FALSE(join.Init());
+      ASSERT_TRUE(join.SupportsBatchRead());
+      ASSERT_NE(nullptr, join.Dictionary(&build_value));
+      ASSERT_NE(nullptr, join.Dictionary(&probe_value));
+      EXPECT_NE(join.Dictionary(&build_value), join.Dictionary(&probe_value));
+      std::pmr::vector<ColumnChunk> chunks;
+      for (Field *field : std::array<Field *, 4>{&build_key, &build_value, &probe_key, &probe_value})
+        chunks.emplace_back(field, 31);
+      const char *values[] = {"alpha", "", "unused", "gamma", "delta"};
+      std::vector<bool> seen(count + 1);
+      const auto check = [&](size_t row) {
+        const int32_t key = Value(chunks[0], row);
+        ASSERT_GE(key, 1);
+        ASSERT_LE(key, count);
+        EXPECT_FALSE(seen[key]);
+        seen[key] = true;
+        EXPECT_EQ(key, Value(chunks[2], row));
+        for (size_t col : {size_t{1}, size_t{3}}) {
+          const size_t index = (key - 1) % 5;
+          EXPECT_EQ(index == 2, chunks[col].nullable_fast(row));
+          if (index == 2) continue;
+          uint32_t code;
+          memcpy(&code, chunks[col].data_fast(row), sizeof(code));
+          char decoded[32];
+          auto length = join.Dictionary(chunks[col].source_field())->get(code, decoded, sizeof(decoded));
+          ASSERT_TRUE(length.has_value());
+          EXPECT_EQ(values[index], std::string(decoded, *length));
+        }
+      };
+      size_t rows = 0;
+      ASSERT_EQ(0, join.ReadBatch(chunks, 7, rows));
+      ASSERT_EQ(7U, rows);
+      check(0);
+      ASSERT_FALSE(join.PushbackBatchTail(chunks, 1, rows));
+      ASSERT_EQ(0, join.Read());
+      check(1);
+      const size_t index = (build_key.val_int() - 1) % 5;
+      EXPECT_EQ(build_key.val_int(), probe_key.val_int());
+      for (Field *field : {static_cast<Field *>(&build_value), static_cast<Field *>(&probe_value)}) {
+        EXPECT_EQ(index == 2, field->is_null());
+        if (index == 2) continue;
+        String buffer;
+        String *value = field->val_str(&buffer, &buffer);
+        ASSERT_NE(nullptr, value);
+        EXPECT_EQ(values[index], std::string(value->ptr(), value->length()));
+      }
+      for (;;) {
+        for (auto &chunk : chunks) chunk.clear();
+        const int result = join.ReadBatch(chunks, 31, rows);
+        ASSERT_TRUE(result == 0 || result == HA_ERR_END_OF_FILE);
+        for (size_t row = 0; row < rows; ++row) check(row);
+        if (result == HA_ERR_END_OF_FILE) break;
+      }
+      EXPECT_EQ(count, std::count(seen.begin(), seen.end(), true));
+      EXPECT_EQ(0U, row_calls);
+    }
+  }
+}
 
 TEST_F(RapidBatchPipeline, LimitRestoresTemporaryDictionaryStringsThroughTheSharedAdapter) {
   ShannonBase::LoadedTables registry;
