@@ -183,6 +183,7 @@ class VectorizedHashJoinIterator final : public RowIterator, public BatchReadabl
   // has read a single row, so it cannot depend on whether the build side later
   // spills: ReadBatch() serves the ordered-merge output too.
   bool SupportsBatchRead() const override;
+  std::shared_ptr<Compress::Dictionary> Dictionary(const Field *field) const override;
   int ReadBatch(std::pmr::vector<ColumnChunk> &col_chunks, size_t capacity, size_t &rows_read) override;
   bool PushbackBatchTail(const std::pmr::vector<ColumnChunk> &chunks, size_t from_row, size_t total_rows) override;
 
@@ -243,7 +244,8 @@ class VectorizedHashJoinIterator final : public RowIterator, public BatchReadabl
   // width matching whichever input path actually fills them.
   bool InitializeColumnChunks(const pack_rows::TableCollection &tables, std::pmr::vector<ColumnChunk> &chunks,
                               size_t capacity, bool input_layout, bool row_image);
-  bool SupportsDirectBatchInput(const pack_rows::TableCollection &tables) const;
+  bool SupportsDirectBatchInput(const pack_rows::TableCollection &tables, BatchReadable *source) const;
+  bool RestoreColumn(const ColumnChunk &chunk, size_t row, bool row_image);
   bool CopyBatchColumns(const std::pmr::vector<ColumnChunk> &source, size_t rows,
                         std::pmr::vector<ColumnChunk> &destination, const std::pmr::vector<uint32_t> &selection);
   bool EnsureBuildCapacity(size_t required_rows);
@@ -495,6 +497,7 @@ class VectorizedHashJoinIterator final : public RowIterator, public BatchReadabl
   Item *m_extra_condition;
   // Buffer for join key construction
   std::pmr::vector<char> m_join_key_storage{&m_aux_memory};
+  std::pmr::vector<char> m_dictionary_decode{&m_aux_memory};
   String m_join_key_buffer;
   // Hash table generation for optimization
   uint64_t *m_hash_table_gen{nullptr};

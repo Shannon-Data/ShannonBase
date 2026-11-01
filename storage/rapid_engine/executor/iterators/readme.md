@@ -116,7 +116,8 @@ Instead, it is declared on a Rapid-internal mixin:
 ```cpp
 // storage/rapid_engine/executor/iterators/iterator.h  (already Rapid-owned)
 
-namespace ShannonBase::Executor {
+namespace ShannonBase {
+namespace Executor {
 
 /**
  * Optional batch-pull interface for Rapid iterators.
@@ -160,7 +161,8 @@ class BatchReadable {
                                  size_t total_rows) = 0;
 };
 
-} // namespace ShannonBase::Executor
+} // namespace Executor
+} // namespace ShannonBase
 ```
 
 Using a separate mixin rather than polluting `RowIterator` keeps the Rapid extension

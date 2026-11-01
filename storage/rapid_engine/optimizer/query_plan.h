@@ -435,6 +435,7 @@ class Stream : public PlanNode {
  */
 class RefLookup : public PlanNode {
  public:
+  bool costed_batch_consumer{false};
   AccessPath *ToAccessPath(THD *thd) override;
   Type type() const override { return Type::REF_LOOKUP; }
   std::string ToString(int indent = 0) const override { return std::string(indent, ' ') + "→ Batch lookup"; }

@@ -34,12 +34,12 @@ namespace ShannonBase {
 namespace Executor {
 
 namespace detail {
-class BatchStreamIterator final : public RowIterator, public BatchReadable {
+class VectorizedStreamIterator final : public RowIterator, public BatchReadable {
  public:
   static bool CanVectorize(const Temp_table_param *param, TABLE *table, bool provide_rowid);
-  BatchStreamIterator(THD *thd, unique_ptr_destroy_only<RowIterator> source, Temp_table_param *param, TABLE *table,
-                      bool provide_rowid, JOIN *join, int ref_slice, const Prealloced_array<TABLE *, 4> &input_tables,
-                      size_t budget);
+  VectorizedStreamIterator(THD *thd, unique_ptr_destroy_only<RowIterator> source, Temp_table_param *param, TABLE *table,
+                           bool provide_rowid, JOIN *join, int ref_slice,
+                           const Prealloced_array<TABLE *, 4> &input_tables, size_t budget);
   bool Init() override;
   int Read() override;
   int ReadBatch(std::pmr::vector<ColumnChunk> &chunks, size_t capacity, size_t &rows) override;

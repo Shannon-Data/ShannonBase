@@ -29,9 +29,9 @@
 namespace ShannonBase {
 namespace Executor {
 namespace detail {
-BatchLimitIterator::BatchLimitIterator(THD *thd, unique_ptr_destroy_only<RowIterator> source, ha_rows limit,
-                                       ha_rows offset, ha_rows *skipped, const Prealloced_array<TABLE *, 4> &tables,
-                                       size_t budget)
+VectorizedLimitIterator::VectorizedLimitIterator(THD *thd, unique_ptr_destroy_only<RowIterator> source, ha_rows limit,
+                                                 ha_rows offset, ha_rows *skipped,
+                                                 const Prealloced_array<TABLE *, 4> &tables, size_t budget)
     : RowIterator(thd),
       m_reservation(ResMgmt::reserve_query_memory(thd, ResMgmt::QueryMemoryOperator::kBatchTransport, budget)),
       m_memory(m_reservation.bytes()),
@@ -44,12 +44,12 @@ BatchLimitIterator::BatchLimitIterator(THD *thd, unique_ptr_destroy_only<RowIter
       m_skipped(skipped),
       m_discard(&m_memory) {}
 
-int BatchLimitIterator::Error() {
+int VectorizedLimitIterator::Error() {
   my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid LIMIT could not preserve its batch input");
   return 1;
 }
 
-bool BatchLimitIterator::Init() {
+bool VectorizedLimitIterator::Init() {
   m_skip_source_init = false;
   m_seen = 0;
   m_eof = false;
@@ -103,27 +103,27 @@ bool BatchLimitIterator::Init() {
   return false;
 }
 
-int BatchLimitIterator::Read() { return m_native.Read(); }
+int VectorizedLimitIterator::Read() { return m_native.Read(); }
 
-bool BatchLimitIterator::SupportsBatchRead() const { return m_batch != nullptr; }
+bool VectorizedLimitIterator::SupportsBatchRead() const { return m_batch != nullptr; }
 
-bool BatchLimitIterator::PreservesBatchNullRows() const { return m_batch && m_batch->PreservesBatchNullRows(); }
+bool VectorizedLimitIterator::PreservesBatchNullRows() const { return m_batch && m_batch->PreservesBatchNullRows(); }
 
-bool BatchLimitIterator::BatchNullRow(TABLE *table, size_t row) const {
+bool VectorizedLimitIterator::BatchNullRow(TABLE *table, size_t row) const {
   return m_batch && m_batch->BatchNullRow(table, row);
 }
 
-std::shared_ptr<Compress::Dictionary> BatchLimitIterator::Dictionary(const Field *field) const {
+std::shared_ptr<Compress::Dictionary> VectorizedLimitIterator::Dictionary(const Field *field) const {
   return m_batch ? m_batch->Dictionary(field) : nullptr;
 }
 
-void BatchLimitIterator::SetNullRowFlag(bool value) { m_source->SetNullRowFlag(value); }
+void VectorizedLimitIterator::SetNullRowFlag(bool value) { m_source->SetNullRowFlag(value); }
 
-void BatchLimitIterator::UnlockRow() { m_source->UnlockRow(); }
+void VectorizedLimitIterator::UnlockRow() { m_source->UnlockRow(); }
 
-void BatchLimitIterator::EndPSIBatchModeIfStarted() { m_source->EndPSIBatchModeIfStarted(); }
+void VectorizedLimitIterator::EndPSIBatchModeIfStarted() { m_source->EndPSIBatchModeIfStarted(); }
 
-int BatchLimitIterator::ReadBatch(std::pmr::vector<ColumnChunk> &chunks, size_t capacity, size_t &rows) {
+int VectorizedLimitIterator::ReadBatch(std::pmr::vector<ColumnChunk> &chunks, size_t capacity, size_t &rows) {
   rows = 0;
   if (m_batch == nullptr) return Error();
   if (capacity == 0) return 0;
@@ -150,7 +150,7 @@ int BatchLimitIterator::ReadBatch(std::pmr::vector<ColumnChunk> &chunks, size_t 
   return m_eof || m_seen >= m_limit ? HA_ERR_END_OF_FILE : 0;
 }
 
-bool BatchLimitIterator::PushbackBatchTail(const std::pmr::vector<ColumnChunk> &, size_t, size_t) { return true; }
+bool VectorizedLimitIterator::PushbackBatchTail(const std::pmr::vector<ColumnChunk> &, size_t, size_t) { return true; }
 }  // namespace detail
 
 bool VectorizedLimitIterator::CanVectorize(const Prealloced_array<TABLE *, 4> &tables) {
@@ -171,8 +171,8 @@ VectorizedLimitIterator::VectorizedLimitIterator(THD *thd, unique_ptr_destroy_on
                                                  ha_rows offset, ha_rows *skipped,
                                                  const Prealloced_array<TABLE *, 4> &tables, size_t budget)
     : VectorizedRecordIterator(thd,
-                               NewIterator<detail::BatchLimitIterator>(thd, thd->mem_root, std::move(source), limit,
-                                                                       offset, skipped, tables, budget / 2),
+                               NewIterator<detail::VectorizedLimitIterator>(thd, thd->mem_root, std::move(source),
+                                                                            limit, offset, skipped, tables, budget / 2),
                                tables, budget - budget / 2, -1.0, "limit_offset") {}
 }  // namespace Executor
 }  // namespace ShannonBase

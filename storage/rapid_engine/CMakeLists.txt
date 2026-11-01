@@ -173,6 +173,7 @@ ENDIF()
 SET(SHANNON_ITERATOR_SOURCES
     executor/iterators/iterator.cpp
     executor/iterators/aggregate_iterator.cpp
+    executor/iterators/expression_iterator.cpp
     executor/iterators/hash_join_iterator.cpp
     executor/iterators/nested_loop_iterator.cpp
     executor/iterators/record_iterator.cpp

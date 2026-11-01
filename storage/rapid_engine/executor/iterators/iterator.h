@@ -47,6 +47,7 @@
 #include "sql/iterators/basic_row_iterators.h"
 #include "sql/iterators/row_iterator.h"
 
+#include "storage/rapid_engine/executor/iterators/expression_iterator.h"
 #include "storage/rapid_engine/include/rapid_arch_inf.h"
 #include "storage/rapid_engine/include/rapid_const.h"
 #include "storage/rapid_engine/include/rapid_types.h"
@@ -193,6 +194,7 @@ struct VectorizedOperatorStats {
   size_t bytes_copied{0};
   size_t simd_rows{0};
   size_t scalar_fallback_rows{0};
+  size_t expression_batch_rows{0};
   size_t hash_probes{0};
   size_t hash_collisions{0};
   size_t spill_rows{0};
@@ -911,6 +913,7 @@ class VectorizedFilterIterator final : public RowIterator, public BatchReadable 
   std::pmr::vector<uint64_t> m_batch_nulls, m_lookahead_nulls;
   std::pmr::vector<size_t> m_simd_selection;
   SimplePredicate m_simple_predicate;
+  VectorizedExpression m_expression{&m_memory};
 
   std::pmr::vector<ColumnChunk> m_lookahead_chunks;
   size_t m_lookahead_start{0};

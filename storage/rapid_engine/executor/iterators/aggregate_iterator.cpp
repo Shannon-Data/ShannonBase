@@ -621,6 +621,13 @@ int VectorizedAggregateIterator::ReadImpl() {
           return 1;
       }
 
+      const size_t expression_count =
+          std::count_if(m_vectorizer.aggregate_infos.begin(), m_vectorizer.aggregate_infos.end(),
+                        [](const auto &info) { return info.value_expr != nullptr; });
+      m_stats.expression_scalar_rows += expression_count;
+      RapidMonitor::rapid_counters.query_scalar_expression_rows_total.fetch_add(expression_count,
+                                                                                std::memory_order_relaxed);
+
       int result = ProcessCurrentGroupTraditional();
       if (result != 0) return result;
       if (m_output_slice != -1) m_join->set_ref_item_slice(m_output_slice);
@@ -1488,30 +1495,10 @@ int VectorizedAggregateIterator::BuildHashGroupsBatch() {
     for (ColumnChunk &chunk : m_batch_col_chunks) chunk.clear();
 
     size_t rows = 0;
-    // Keep the source's exact schema while it fills the batch. Synthetic
-    // columns are moved aside and restored before expression evaluation.
-    m_expression_chunk_scratch.clear();
-    while (m_batch_col_chunks.size() > m_source_batch_columns) {
-      m_expression_chunk_scratch.emplace_back(std::move(m_batch_col_chunks.back()));
-      m_batch_col_chunks.pop_back();
-    }
-    m_hash_batch_selection.clear();
-    const int result = HasExpressionAggregate()
-                           ? m_batch_source->ReadBatch(m_batch_col_chunks, m_vectorizer.opt_batch_size, rows)
-                           : m_batch_source->ReadSelectedBatch(m_batch_col_chunks, m_vectorizer.opt_batch_size, rows,
-                                                               m_hash_batch_selection);
-    while (!m_expression_chunk_scratch.empty()) {
-      m_batch_col_chunks.emplace_back(std::move(m_expression_chunk_scratch.back()));
-      m_expression_chunk_scratch.pop_back();
-    }
+    const int result = ReadSourceBatch(rows, !HasExpressionAggregate());
     if (result != 0 && result != HA_ERR_END_OF_FILE) {
       if (!thd()->is_error())
         my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid aggregate could not read its input batch");
-      return 1;
-    }
-    if (rows != 0 && HasExpressionAggregate() && BuildExpressionChunksFromBatch(rows)) {
-      if (!thd()->is_error())
-        my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid aggregate could not evaluate its input expressions");
       return 1;
     }
 
@@ -2286,7 +2273,7 @@ int VectorizedAggregateIterator::UpdateHashGroupFromBatch(HashGroupState *group,
         } break;
         case MYSQL_TYPE_NEWDECIMAL: {
           const auto *decimal_field = static_cast<const Field_new_decimal *>(field);
-          __int128 scaled;
+          int128_t scaled;
           if (m_scaled_aggregate && state.decimal_sum.scaled() &&
               Utils::DecodePackedDecimal128(chunk.data_fast(row_idx), chunk.width(), decimal_field->precision,
                                             field->decimals(), &scaled)) {
@@ -2399,14 +2386,8 @@ int VectorizedAggregateIterator::ProcessGroupVectorized() {
   // condition made the boundary-detection branch below permanently
   // unreachable. Only use it when every representative Field can be safely
   // reconstructed from the IMCS fixed-width batch representation.
-  // An expression aggregate has no column in the source's batch: its value is
-  // derived per row by EvaluateExpressionFields(), which only runs on the
-  // row-by-row path (from AppendCurrentRowToChunks()). Taking the batch path
-  // would leave its chunk unfilled, so only the first row -- the one
-  // reset_and_add() already consumed through the Item -- would reach the
-  // aggregate. Read row-by-row instead; the aggregation itself stays vectorized.
   const bool use_batch =
-      m_batch_source != nullptr && (!do_group_by || CanUseBatchGrouping()) && !HasExpressionAggregate();
+      m_batch_source != nullptr && (!do_group_by || CanUseBatchGrouping()) && CanEvaluateExpressionsFromBatch();
   // reset_and_add() has already consumed the first row of this group.
   ++m_stats.rows_in;
 
@@ -2422,8 +2403,7 @@ int VectorizedAggregateIterator::ProcessGroupVectorized() {
         if (!EnsureBatchCapacity(m_vectorizer.opt_batch_size)) return kFatalError;
         for (auto &c : m_batch_col_chunks) c.clear();
         m_streaming_batch_pos = m_streaming_batch_rows = 0;
-        const int err =
-            m_batch_source->ReadBatch(m_batch_col_chunks, m_vectorizer.opt_batch_size, m_streaming_batch_rows);
+        const int err = ReadSourceBatch(m_streaming_batch_rows, false);
         m_streaming_batch_eof = (err == HA_ERR_END_OF_FILE);
         if (err != 0 && !m_streaming_batch_eof) return kFatalError;
         // This status counts batch ingestion for both hash and streaming
@@ -3306,7 +3286,7 @@ bool VectorizedAggregateIterator::AnalyzeAggregatesForVectorization() {
   bool all_vectorizable = true;
 
   for (Item_sum **item = m_join->sum_funcs; *item != nullptr; ++item) {
-    VectorizedGroupProcessor::AggregateInfo info;
+    VectorizedGroupProcessor::AggregateInfo info(&m_aux_memory);
     info.item = *item;
     info.type = (*item)->sum_func();
     info.vectorizable = IsSimpleAggregate(*item);
@@ -3318,6 +3298,22 @@ bool VectorizedAggregateIterator::AnalyzeAggregatesForVectorization() {
         if (Field *expr_field = CreateExpressionField(expr); expr_field != nullptr) {
           info.value_expr = expr;
           info.source_field = expr_field;
+          info.expression.Compile(expr);
+          bool failed = false;
+          WalkItem(expr, enum_walk::PREFIX, [&](Item *item) {
+            if (item->type() != Item::FIELD_ITEM) return false;
+            Field *field = down_cast<Item_field *>(item)->field;
+            if (std::find(info.expression_fields.begin(), info.expression_fields.end(), field) ==
+                info.expression_fields.end()) {
+              if (!TryGrow(info.expression_fields, info.expression_fields.size() + 1)) return failed = true;
+              info.expression_fields.push_back(field);
+            }
+            return false;
+          });
+          if (failed) {
+            AllocationError("Rapid aggregate expression fields allocation failed");
+            return false;
+          }
         }
       }
     }
@@ -3327,7 +3323,7 @@ bool VectorizedAggregateIterator::AnalyzeAggregatesForVectorization() {
       AllocationError("Rapid aggregate plan allocation failed");
       return false;
     }
-    m_vectorizer.aggregate_infos.push_back(info);
+    m_vectorizer.aggregate_infos.push_back(std::move(info));
     has_aggregates = true;
     all_vectorizable = all_vectorizable && info.vectorizable;
   }
@@ -3497,7 +3493,6 @@ bool IsStorableArithmeticTree(const Item *item, int depth = 0) {
 }  // namespace
 
 Item *VectorizedAggregateIterator::GetAggregateValueExpr(Item_sum *item) const {
-  if (m_strategy != AggregateStrategy::HASH) return nullptr;
   return VectorizableAggregateValueExpr(item);
 }
 
@@ -3612,53 +3607,68 @@ bool VectorizedAggregateIterator::CanEvaluateExpressionsFromBatch() const {
     const Item_result result_type = info.value_expr->result_type();
     if (result_type != DECIMAL_RESULT && result_type != INT_RESULT) return false;
 
-    bool supported{true};
-    WalkItem(info.value_expr, enum_walk::PREFIX, [&](Item *item) {
-      if (!supported || item->type() != Item::FIELD_ITEM) return !supported;
-      Field *field = down_cast<Item_field *>(item)->field;
+    for (Field *field : info.expression_fields) {
       auto it = field != nullptr ? m_field_to_batch_chunk_idx.find(field) : m_field_to_batch_chunk_idx.end();
       if (it == m_field_to_batch_chunk_idx.end() || it->second >= m_batch_col_chunks.size() ||
           !m_batch_col_chunks[it->second].valid() || Utils::Util::is_string(field->type()) ||
           Utils::IsOffPageField(field) || m_batch_col_chunks[it->second].width() != field->pack_length())
-        supported = false;
-      return !supported;
-    });
-    if (!supported) return false;
+        return false;
+    }
   }
   return true;
 }
 
+int VectorizedAggregateIterator::ReadSourceBatch(size_t &rows, bool selected) {
+  // Synthetic expression slots are owned by this operator. The child sees
+  // only its own schema, for both HASH and STREAMING ingestion.
+  m_expression_chunk_scratch.clear();
+  while (m_batch_col_chunks.size() > m_source_batch_columns) {
+    m_expression_chunk_scratch.emplace_back(std::move(m_batch_col_chunks.back()));
+    m_batch_col_chunks.pop_back();
+  }
+  m_hash_batch_selection.clear();
+  const int result = selected ? m_batch_source->ReadSelectedBatch(m_batch_col_chunks, m_vectorizer.opt_batch_size, rows,
+                                                                  m_hash_batch_selection)
+                              : m_batch_source->ReadBatch(m_batch_col_chunks, m_vectorizer.opt_batch_size, rows);
+  while (!m_expression_chunk_scratch.empty()) {
+    m_batch_col_chunks.emplace_back(std::move(m_expression_chunk_scratch.back()));
+    m_expression_chunk_scratch.pop_back();
+  }
+  if (result != 0 && result != HA_ERR_END_OF_FILE) return result;
+  if (rows && HasExpressionAggregate() && BuildExpressionChunksFromBatch(rows)) {
+    if (!thd()->is_error())
+      my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid aggregate could not evaluate its input expressions");
+    return 1;
+  }
+  return result;
+}
+
 bool VectorizedAggregateIterator::BuildExpressionChunksFromBatch(size_t rows) {
-  for (const auto &info : m_vectorizer.aggregate_infos) {
+  for (auto &info : m_vectorizer.aggregate_infos) {
     if (info.value_expr == nullptr || info.source_field == nullptr) continue;
     if (info.batch_chunk_idx == static_cast<size_t>(-1) || info.batch_chunk_idx >= m_batch_col_chunks.size())
       return true;
     ColumnChunk &target = m_batch_col_chunks[info.batch_chunk_idx];
     if (!target.valid()) return true;
 
-    // Only the columns the expression actually reads are materialised, and only once
-    // per aggregate instead of once per aggregate and row.
-    std::vector<Field *> base_fields;
-    bool allocation_failed = false;
-    WalkItem(info.value_expr, enum_walk::PREFIX, [&](Item *item) {
-      if (item->type() == Item::FIELD_ITEM) {
-        Field *field = down_cast<Item_field *>(item)->field;
-        if (std::find(base_fields.begin(), base_fields.end(), field) == base_fields.end()) {
-          if (!TryGrow(base_fields, base_fields.size() + 1)) {
-            allocation_failed = true;
-            return true;
-          }
-          base_fields.push_back(field);
-        }
-      }
-      return false;
+    if (info.expression.Evaluate(m_batch_col_chunks, rows) && info.expression.Store(&target, rows)) {
+      m_stats.expression_batch_rows += rows;
+      RapidMonitor::rapid_counters.query_vectorized_expression_rows_total.fetch_add(rows, std::memory_order_relaxed);
+      continue;
+    }
+    // A failed speculative evaluation must not leave partial output behind.
+    target.clear();
+    DBUG_EXECUTE_IF("rapid_require_batch_expression", {
+      my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid expression used scalar evaluation");
+      return true;
     });
+    m_stats.expression_scalar_rows += rows;
+    RapidMonitor::rapid_counters.query_scalar_expression_rows_total.fetch_add(rows, std::memory_order_relaxed);
 
-    if (allocation_failed) return AllocationError("Rapid aggregate expression fields allocation failed");
     Field *out = info.source_field;
     Item *expr = info.value_expr;
     for (size_t row = 0; row < rows; ++row) {
-      for (Field *field : base_fields) {
+      for (Field *field : info.expression_fields) {
         auto it = m_field_to_batch_chunk_idx.find(field);
         if (it == m_field_to_batch_chunk_idx.end() || it->second >= m_batch_col_chunks.size()) return true;
         if (RestoreFieldFromChunk(field, m_batch_col_chunks[it->second], row)) return true;
@@ -3701,6 +3711,9 @@ bool VectorizedAggregateIterator::HasExpressionAggregate() const {
 bool VectorizedAggregateIterator::EvaluateExpressionFields() {
   for (auto &info : m_vectorizer.aggregate_infos) {
     if (info.value_expr == nullptr || info.source_field == nullptr) continue;
+
+    ++m_stats.expression_scalar_rows;
+    RapidMonitor::rapid_counters.query_scalar_expression_rows_total.fetch_add(1, std::memory_order_relaxed);
 
     Item *expr = info.value_expr;
     if (expr->result_type() == DECIMAL_RESULT) {

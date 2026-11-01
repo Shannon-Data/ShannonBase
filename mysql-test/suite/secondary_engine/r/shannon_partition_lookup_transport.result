@@ -1,0 +1,31 @@
+CREATE DATABASE rapid_partition_lookup;
+USE rapid_partition_lookup;
+SET use_secondary_engine=OFF;
+CREATE TABLE o (id INT PRIMARY KEY, k INT, probe_id INT) SECONDARY_ENGINE=rapid;
+CREATE TABLE p (id INT PRIMARY KEY, k INT, v DECIMAL(12,2), s VARCHAR(16), KEY(k))
+SECONDARY_ENGINE=rapid PARTITION BY RANGE(id)
+(PARTITION p0 VALUES LESS THAN (500), PARTITION p1 VALUES LESS THAN (1000), PARTITION p2 VALUES LESS THAN MAXVALUE);
+INSERT INTO o VALUES (1,1,499),(2,1,500),(3,2,999),(4,NULL,1000),(5,9,1501),(6,1,500);
+SET cte_max_recursion_depth=2000;
+INSERT INTO p WITH RECURSIVE seq AS (SELECT 1 n UNION ALL SELECT n+1 FROM seq WHERE n<1500)
+SELECT n,IF(MOD(n,9)=0,NULL,MOD(n,3)),IF(MOD(n,7)=0,NULL,n*1.25),
+IF(MOD(n,11)=0,NULL,CONCAT('s',MOD(n,5))) FROM seq;
+SET cte_max_recursion_depth=DEFAULT;
+ANALYZE TABLE o,p;
+Table	Op	Msg_type	Msg_text
+rapid_partition_lookup.o	analyze	status	OK
+rapid_partition_lookup.p	analyze	status	OK
+ALTER TABLE o SECONDARY_LOAD;
+ALTER TABLE p SECONDARY_LOAD;
+SET use_secondary_engine=FORCED;
+# EQ_REF crosses partition boundaries and repeats the same probe key.
+# REF consumes duplicate keys and string payloads across all partitions.
+# REF_OR_NULL visits the NULL range once for NULL outer keys.
+# Explicit pruning and residuals retain unmatched outer rows.
+# Reopening the table rebuilds the shared partition-name map.
+FLUSH TABLES;
+SELECT COUNT(*) FROM p PARTITION(missing);
+ERROR HY000: Unknown partition 'missing' in table 'p'
+# A partitioned outer scan and a regular inner lookup remain correct.
+SET use_secondary_engine=OFF;
+DROP DATABASE rapid_partition_lookup;

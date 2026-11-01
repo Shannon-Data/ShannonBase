@@ -32,13 +32,14 @@
 #include <new>
 #include "sql-common/my_decimal.h"
 #include "storage/rapid_engine/utils/decimal64.h"
+#include "storage/rapid_engine/utils/utils.h"
 
 namespace ShannonBase {
 namespace Utils {
 // Packed values may have leading zero groups even when their declared precision
 // exceeds 38. Reject only values that cannot be represented exactly in int128.
 inline bool DecodePackedDecimal128(const uint8_t *data, size_t bytes, unsigned precision, unsigned scale,
-                                   __int128 *out) {
+                                   int128_t *out) {
   if (!data || !out || precision == 0 || precision > DECIMAL_MAX_PRECISION || scale > precision ||
       scale > DECIMAL_MAX_SCALE)
     return false;
@@ -60,7 +61,7 @@ inline bool DecodePackedDecimal128(const uint8_t *data, size_t bytes, unsigned p
 
   const bool negative = (data[0] & 0x80) == 0;
   const uint8_t mask = negative ? 0xff : 0;
-  using Unsigned = unsigned __int128;
+  using Unsigned = uint128_t;
   const Unsigned limit = (Unsigned{1} << 127) - (negative ? 0 : 1);
   Unsigned value{0};
   size_t offset{0};
@@ -75,14 +76,14 @@ inline bool DecodePackedDecimal128(const uint8_t *data, size_t bytes, unsigned p
 
     // Valid DECIMAL(38) digits always fit int128. A 64-bit prefix multiplied
     // by at most 10^9 also fits, including leading-zero wide expressions.
-    if (precision <= std::numeric_limits<__int128>::digits10 || (value >> std::numeric_limits<uint64_t>::digits) == 0) {
+    if (precision <= std::numeric_limits<int128_t>::digits10 || (value >> std::numeric_limits<uint64_t>::digits) == 0) {
       value = value * kPowers[digits] + part;
       return true;
     }
 
     Unsigned product;
-    return !__builtin_mul_overflow(value, static_cast<Unsigned>(kPowers[digits]), &product) &&
-           !__builtin_add_overflow(product, static_cast<Unsigned>(part), &value) && value <= limit;
+    return !SHANNON_MUL_OVERFLOW(value, static_cast<Unsigned>(kPowers[digits]), &product) &&
+           !SHANNON_ADD_OVERFLOW(product, static_cast<Unsigned>(part), &value) && value <= limit;
   };
 
   if (integers % 9 && !group(integers % 9)) return false;
@@ -96,7 +97,7 @@ inline bool DecodePackedDecimal128(const uint8_t *data, size_t bytes, unsigned p
 
   if (scale % 9 && !group(scale % 9)) return false;
 
-  *out = negative && value != 0 ? -static_cast<__int128>(value - 1) - 1 : static_cast<__int128>(value);
+  *out = negative && value != 0 ? -static_cast<int128_t>(value - 1) - 1 : static_cast<int128_t>(value);
   return true;
 }
 
@@ -118,11 +119,11 @@ class DecimalSum {
 
   bool scaled() const { return !m_decimal; }
 
-  bool AddScaled(__int128 value, unsigned scale) {
+  bool AddScaled(int128_t value, unsigned scale) {
     if (scale > DECIMAL_MAX_SCALE) return true;
     if (m_scale == kUnsetScale) m_scale = scale;
-    __int128 result;
-    if (!m_decimal && m_scale == scale && !__builtin_add_overflow(m_value.scaled, value, &result)) {
+    int128_t result;
+    if (!m_decimal && m_scale == scale && !SHANNON_ADD_OVERFLOW(m_value.scaled, value, &result)) {
       m_value.scaled = result;
       return false;
     }
@@ -165,12 +166,12 @@ class DecimalSum {
  private:
   static constexpr unsigned kUnsetScale = DECIMAL_MAX_SCALE + 1;
 
-  static bool Convert(__int128 value, unsigned scale, my_decimal *result) {
+  static bool Convert(int128_t value, unsigned scale, my_decimal *result) {
     // int128 has at most 39 digits; padding to DECIMAL_MAX_SCALE is smaller.
     char text[DECIMAL_MAX_PRECISION + 3];
     char *end = text + sizeof(text), *cursor = end;
     const bool negative = value < 0;
-    using Unsigned = unsigned __int128;
+    using Unsigned = uint128_t;
     Unsigned magnitude = negative ? Unsigned{0} - static_cast<Unsigned>(value) : static_cast<Unsigned>(value);
     unsigned digits{0};
     do {
@@ -199,7 +200,7 @@ class DecimalSum {
   union Value {
     Value() : scaled(0) {}
     ~Value() {}
-    __int128 scaled;
+    int128_t scaled;
     my_decimal decimal;
   } m_value;
   unsigned m_scale{kUnsetScale};

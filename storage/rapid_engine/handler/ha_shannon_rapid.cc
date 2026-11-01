@@ -1721,6 +1721,8 @@ static const char *rapid_propagation_mode_names[] = {"DIRECT_NOTIFICATION", "RED
   X(query_vectorized_aggregate_scalar_decimal_values_total, query_vectorized_aggregate_scalar_decimal_values_total) \
   X(query_vectorized_sort_batch_rows_total, query_vectorized_sort_batch_rows_total)                                 \
   X(query_vectorized_ref_batch_rows_total, query_vectorized_ref_batch_rows_total)                                   \
+  X(query_vectorized_expression_rows_total, query_vectorized_expression_rows_total)                                 \
+  X(query_scalar_expression_rows_total, query_scalar_expression_rows_total)                                         \
   X(query_vectorized_stream_batch_rows_total, query_vectorized_stream_batch_rows_total)                             \
   X(query_vectorized_materialize_batch_rows_total, query_vectorized_materialize_batch_rows_total)                   \
   X(query_vectorized_aggregate_row_materializations_total, query_vectorized_aggregate_row_materializations_total)   \

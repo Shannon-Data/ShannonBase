@@ -28,6 +28,7 @@
  */
 
 #include "storage/rapid_engine/executor/iterators/iterator.h"
+#include "storage/rapid_engine/monitor/rapid_monitor.h"
 
 #include <algorithm>
 #include <cmath>
@@ -552,13 +553,13 @@ namespace {
 
 constexpr size_t kIntegerSumBatchRows = 4096;
 
-inline __int128 abs_as_int128(int64_t value) {
-  return value < 0 ? -static_cast<__int128>(value) : static_cast<__int128>(value);
+inline int128_t abs_as_int128(int64_t value) {
+  return value < 0 ? -static_cast<int128_t>(value) : static_cast<int128_t>(value);
 }
 
 inline bool int64_sum_overflow_safe(int64_t min_value, int64_t max_value, size_t count) {
-  const __int128 bound = std::max(abs_as_int128(min_value), abs_as_int128(max_value));
-  return bound * static_cast<__int128>(count) <= static_cast<__int128>(std::numeric_limits<int64_t>::max());
+  const int128_t bound = std::max(abs_as_int128(min_value), abs_as_int128(max_value));
+  return bound * static_cast<int128_t>(count) <= static_cast<int128_t>(std::numeric_limits<int64_t>::max());
 }
 
 inline void add_decimal(my_decimal *total, const my_decimal &delta) {
@@ -676,8 +677,8 @@ static my_decimal sum_integer_chunk_as_decimal(const ColumnChunk &chunk, size_t 
         memcpy(&value, chunk.data(offset + row), sizeof(value));
         max_value = std::max(max_value, value);
       }
-      simd_safe = static_cast<__int128>(max_value) * static_cast<__int128>(non_null) <=
-                  static_cast<__int128>(std::numeric_limits<int64_t>::max());
+      simd_safe = static_cast<int128_t>(max_value) * static_cast<int128_t>(non_null) <=
+                  static_cast<int128_t>(std::numeric_limits<int64_t>::max());
     } else {
       const int64_t min_value = Utils::SIMD::min<int64_t>(data, batch_mask, batch_rows);
       const int64_t max_value = Utils::SIMD::max<int64_t>(data, batch_mask, batch_rows);
@@ -1155,6 +1156,7 @@ bool VectorizedFilterIterator::Init() {
   if (m_batch_source && (!m_reservation || CollectConditionFields()))
     return AllocationError("Rapid filter condition fields allocation failed");
   CompileSimplePredicate();
+  m_expression.Compile(m_simple_predicate.valid ? nullptr : m_condition);
   return false;
 }
 
@@ -1390,6 +1392,7 @@ int VectorizedFilterIterator::ReadSelectedBatchImpl(std::pmr::vector<ColumnChunk
   rows_read = 0;
   if (capacity == 0) return 0;
   size_t width = 4 * sizeof(uint64_t);
+  width += m_expression.row_bytes();
   for (const auto &chunk : col_chunks)
     if (chunk.valid()) width += chunk.width() + 1;
   m_batch_capacity = SelectBatchRows(width, m_reservation.bytes(), 4);
@@ -1439,9 +1442,20 @@ int VectorizedFilterIterator::ReadSelectedBatchImpl(std::pmr::vector<ColumnChunk
     m_stats.rows_in += input_rows;
     ++m_stats.batches;
 
-    const bool used_vector_predicate = EvaluateSimplePredicateBatch(col_chunks, input_rows);
+    bool used_vector_predicate = EvaluateSimplePredicateBatch(col_chunks, input_rows);
+    if (!used_vector_predicate && m_expression.Evaluate(col_chunks, input_rows, &m_input_selection)) {
+      m_selection.clear();
+      if (!TryReserve(m_selection, input_rows)) return 1;
+      for (size_t row = 0; row < input_rows; ++row)
+        if (m_expression.Matches(row)) m_selection.push_back(m_input_selection.empty() ? row : m_input_selection[row]);
+      used_vector_predicate = true;
+      m_stats.expression_batch_rows += input_rows;
+      RapidMonitor::rapid_counters.query_vectorized_expression_rows_total.fetch_add(input_rows,
+                                                                                    std::memory_order_relaxed);
+    }
     if (thd()->is_error()) return 1;
     if (!used_vector_predicate) {
+      RapidMonitor::rapid_counters.query_scalar_expression_rows_total.fetch_add(input_rows, std::memory_order_relaxed);
       m_stats.scalar_fallback_rows += input_rows;
       m_selection.clear();
       if (!TryReserve(m_selection, input_rows)) return 1;

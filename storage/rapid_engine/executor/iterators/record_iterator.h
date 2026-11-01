@@ -35,7 +35,7 @@ class ha_rapid;
 namespace Executor {
 std::shared_ptr<Compress::Dictionary> RecordDictionary(const Field *field);
 bool CanBatchRecords(TABLE *table);
-bool SelectVectorizedLookup(THD *thd, AccessPath *path);
+bool SelectVectorizedLookup(THD *thd, AccessPath *path, bool costed_batch_consumer = false);
 unique_ptr_destroy_only<RowIterator> CreateVectorizedLookup(THD *thd, unique_ptr_destroy_only<RowIterator> native,
                                                             AccessPath *path, ha_rows *examined_rows);
 

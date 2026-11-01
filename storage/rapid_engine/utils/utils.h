@@ -48,6 +48,7 @@
 #include "sql/sql_class.h"                                        // THD
 #include "sql/tztime.h"                                           //timzone
 #include "storage/rapid_engine/compress/dictionary/dictionary.h"  //Dictionary
+#include "storage/rapid_engine/include/rapid_arch_inf.h"          // SHANNON_OVERFLOW_BUILTINS_SUPPORTED
 #include "storage/rapid_engine/include/rapid_types.h"             // bit_array_t
 
 class THD;
@@ -61,6 +62,65 @@ namespace Compress {
 class Dictionary;
 }
 namespace Utils {
+// Overflow-checked arithmetic; true means overflow.
+#if defined(SHANNON_OVERFLOW_BUILTINS_SUPPORTED)
+#define SHANNON_ADD_OVERFLOW(a, b, r) __builtin_add_overflow((a), (b), (r))
+#define SHANNON_SUB_OVERFLOW(a, b, r) __builtin_sub_overflow((a), (b), (r))
+#define SHANNON_MUL_OVERFLOW(a, b, r) __builtin_mul_overflow((a), (b), (r))
+#else
+// Portable fallback (e.g. MSVC): same contract, slower code.
+template <typename T, typename U, typename R>
+inline bool add_overflow(T a, U b, R *r) {
+  using C = typename std::common_type<T, U, R>::type;
+  const C x = static_cast<C>(a), y = static_cast<C>(b);
+  if constexpr (std::is_signed<C>::value) {
+    if ((y > 0 && x > (std::numeric_limits<C>::max)() - y) || (y < 0 && x < (std::numeric_limits<C>::min)() - y))
+      return true;
+  } else if (x > (std::numeric_limits<C>::max)() - y) {
+    return true;
+  }
+  *r = static_cast<R>(x + y);
+  return false;
+}
+
+template <typename T, typename U, typename R>
+inline bool sub_overflow(T a, U b, R *r) {
+  using C = typename std::common_type<T, U, R>::type;
+  const C x = static_cast<C>(a), y = static_cast<C>(b);
+  if constexpr (std::is_signed<C>::value) {
+    if ((y > 0 && x < (std::numeric_limits<C>::min)() + y) || (y < 0 && x > (std::numeric_limits<C>::max)() + y))
+      return true;
+  } else if (x < y) {
+    return true;
+  }
+  *r = static_cast<R>(x - y);
+  return false;
+}
+
+template <typename T, typename U, typename R>
+inline bool mul_overflow(T a, U b, R *r) {
+  using C = typename std::common_type<T, U, R>::type;
+  const C x = static_cast<C>(a), y = static_cast<C>(b);
+  const C max = (std::numeric_limits<C>::max)();
+  if constexpr (std::is_signed<C>::value) {
+    const C min = (std::numeric_limits<C>::min)();
+    if (x == 0 || y == 0) {
+      *r = 0;
+      return false;
+    }
+    if ((x == -1 && y == min) || (y == -1 && x == min)) return true;
+    if (x > 0 ? (y > 0 ? x > max / y : y < min / x) : (y > 0 ? x < min / y : y < max / x)) return true;
+  } else if (y != 0 && x > max / y) {
+    return true;
+  }
+  *r = static_cast<R>(x * y);
+  return false;
+}
+#define SHANNON_ADD_OVERFLOW(a, b, r) ::ShannonBase::Utils::add_overflow((a), (b), (r))
+#define SHANNON_SUB_OVERFLOW(a, b, r) ::ShannonBase::Utils::sub_overflow((a), (b), (r))
+#define SHANNON_MUL_OVERFLOW(a, b, r) ::ShannonBase::Utils::mul_overflow((a), (b), (r))
+#endif
+
 // Configuration and shutdown share the wait mutex, so notifications cannot be
 // lost between checking the predicate and entering the condition-variable wait.
 class MaintenanceWait {

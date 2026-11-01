@@ -73,7 +73,8 @@ SELECT DISTANCE(STRING_TO_VECTOR("[0, 0, 0, 0]"), STRING_TO_VECTOR("[1, 2, 3, 4]
 
 SELECT DISTANCE(STRING_TO_VECTOR("[0, 0, 0, 0]"), STRING_TO_VECTOR("[1, 2, 3, 4]"), "L2");
 
-SELECT ML_MODEL_LIST();
+# Check the model used below without depending on other locally installed models.
+SELECT JSON_CONTAINS(ML_MODEL_LIST(), JSON_OBJECT('name', 'multilingual-e5-small', 'status', 'ready')) AS embed_model_ready;
 
 --ERROR 6141
 SELECT sys.ml_embed_row("What is artificial intelligence?", JSON_OBJECT("model_id", "all_minilm_l12_v2"));

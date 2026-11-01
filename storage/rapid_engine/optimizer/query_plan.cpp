@@ -431,7 +431,8 @@ AccessPath *LocalAgg::ToAccessPath(THD *thd) {
         return Executor::SelectVectorizedNestedLoop(thd, node->original_path,
                                                     static_cast<const NestLoopJoin *>(node)->batch_output_requested);
       case PlanNode::Type::REF_LOOKUP:
-        return Executor::SelectVectorizedLookup(thd, node->original_path);
+        return Executor::SelectVectorizedLookup(thd, node->original_path,
+                                                static_cast<const RefLookup *>(node)->costed_batch_consumer);
       case PlanNode::Type::STREAM: {
         if (node->original_path == nullptr || node->children.size() != 1 || !self(self, node->children[0].get()))
           return false;
@@ -496,10 +497,11 @@ AccessPath *LocalAgg::ToAccessPath(THD *thd) {
        input->type() == PlanNode::Type::NESTED_LOOP_JOIN);
   bool consumes_batches = true;
   if (expanded_transport && strategy == AggregateStrategy::STREAMING) {
-    // A new batch-capable edge must not route DISTINCT/expression streaming
-    // aggregates into an implementation that will immediately request rows.
+    // Use the same expression admission as the aggregate executor. Unsupported
+    // functions and DISTINCT still require row transport at this boundary.
     for (Item_func *function : aggregates) {
       auto *sum = down_cast<Item_sum *>(function);
+      if (Executor::VectorizableAggregateValueExpr(sum) != nullptr) continue;
       Item *argument = sum->arg_count == 0 ? nullptr : sum->get_arg(0)->real_item();
       Field *field = argument != nullptr && argument->type() == Item::FIELD_ITEM
                          ? down_cast<Item_field *>(argument)->field
@@ -869,7 +871,7 @@ AccessPath *RefLookup::ToAccessPath(THD *thd) {
   auto *path = new (thd->mem_root) AccessPath(*original_path);
   path->iterator = nullptr;
   path->secondary_engine_data = nullptr;
-  path->vectorized = !row_mode && Executor::SelectVectorizedLookup(thd, path);
+  path->vectorized = !row_mode && Executor::SelectVectorizedLookup(thd, path, costed_batch_consumer);
   produces_batches = path->vectorized;
   PropagateCostAndRows(this, path);
   return path;

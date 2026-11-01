@@ -1,0 +1,46 @@
+CREATE DATABASE rapid_expression_kernel;
+USE rapid_expression_kernel;
+SET use_secondary_engine=OFF;
+CREATE TABLE fact (id INT PRIMARY KEY, g INT, n BIGINT, d DECIMAL(15,2), s VARCHAR(16)) SECONDARY_ENGINE=rapid;
+CREATE TABLE dim (id INT PRIMARY KEY, g INT, d DECIMAL(15,2), s VARCHAR(16)) SECONDARY_ENGINE=rapid;
+INSERT INTO fact WITH RECURSIVE seq AS
+(SELECT 1 n UNION ALL SELECT n+1 FROM seq WHERE n<1000)
+SELECT n,MOD(n,17)+1,IF(MOD(n,7)=0,NULL,n-500),IF(MOD(n,11)=0,NULL,(n-500)*1.25),
+IF(MOD(n,13)=0,NULL,CONCAT('v',MOD(n,5))) FROM seq;
+INSERT INTO dim SELECT id,id,id*0.01,IF(MOD(id,5)=0,NULL,CONCAT('d',MOD(id,3))) FROM fact WHERE id<=17;
+ANALYZE TABLE fact,dim;
+Table	Op	Msg_type	Msg_text
+rapid_expression_kernel.fact	analyze	status	OK
+rapid_expression_kernel.dim	analyze	status	OK
+ALTER TABLE fact SECONDARY_LOAD;
+ALTER TABLE dim SECONDARY_LOAD;
+SET use_secondary_engine=FORCED;
+SET optimizer_switch='hypergraph_optimizer=on';
+SET SESSION debug='+d,rapid_require_batch_expression';
+# Global arithmetic aggregation uses kernels after its first row.
+# Grouped expressions and dictionary payloads cross a hash join.
+# Group boundaries, NULLs, decimal residuals and prepared reexecution.
+PREPARE stmt FROM 'SELECT SUM(d*(1-d)),AVG(n*2) FROM fact';
+EXECUTE stmt;
+SUM(d*(1-d))	AVG(n*2)
+-118723860.9375	1.0000
+EXECUTE stmt;
+SUM(d*(1-d))	AVG(n*2)
+-118723860.9375	1.0000
+DEALLOCATE PREPARE stmt;
+# Default EQ_REF batching follows the selected parent NLJ decision.
+SET optimizer_switch='hypergraph_optimizer=off';
+SET SESSION debug='+d,rapid_require_batch_lookup';
+SET SESSION debug='-d,rapid_require_batch_lookup,rapid_require_batch_expression';
+# Wide decimals and integer overflow retain MySQL fallback semantics.
+SET use_secondary_engine=OFF;
+CREATE TABLE wide (id INT PRIMARY KEY, a DECIMAL(65,0), b BIGINT) SECONDARY_ENGINE=rapid;
+INSERT INTO wide VALUES (1,1,1),(2,12345678901234567890123456789012345678901234567890,9223372036854775807),(3,-1,-1);
+ALTER TABLE wide SECONDARY_LOAD;
+SET use_secondary_engine=FORCED;
+SELECT SUM(b*2) FROM wide;
+ERROR 22003: BIGINT value is out of range in '(`rapid_expression_kernel`.`wide`.`b` * 2)'
+SET use_secondary_engine=OFF;
+SELECT SUM(b*2) FROM wide;
+ERROR 22003: BIGINT value is out of range in '(`rapid_expression_kernel`.`wide`.`b` * 2)'
+DROP DATABASE rapid_expression_kernel;

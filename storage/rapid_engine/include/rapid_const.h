@@ -34,6 +34,10 @@ extern char *mysql_llm_home_ptr;
 namespace ShannonBase {
 using row_id_t = size_t;
 using table_id_t = uint64_t;
+
+// Wide integers for exact decimal arithmetic; change the underlying type here only.
+using int128_t = __int128;
+using uint128_t = unsigned __int128;
 /** Handler name for rapid */
 constexpr auto SHANNON_SUCCESS = 0;
 
