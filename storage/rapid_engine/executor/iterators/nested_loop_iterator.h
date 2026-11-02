@@ -52,6 +52,11 @@ class BatchNestedLoop final : public RowIterator, public BatchReadable {
   bool PushbackBatchTail(const std::pmr::vector<ColumnChunk> &, size_t, size_t) override;
   bool BatchNullRow(TABLE *table, size_t row) const override;
   int ReadBatch(std::pmr::vector<ColumnChunk> &chunks, size_t capacity, size_t &rows) override;
+  // Serves the outer side's parallel runs and replays the inner side from its
+  // immutable materialized block. Only an inner join whose inner input is such
+  // a block qualifies; everything else stays on the serial rescan path.
+  std::unique_ptr<Morsel::ParallelSource> CreateParallelSource(ResMgmt::BoundedMemoryResource *memory,
+                                                               const std::pmr::vector<Field *> &fields) override;
 
  private:
   int ReadBatchImpl(std::pmr::vector<ColumnChunk> &chunks, size_t capacity, size_t &rows);
@@ -59,6 +64,9 @@ class BatchNestedLoop final : public RowIterator, public BatchReadable {
   int Fetch(BatchReadable *source, std::pmr::vector<ColumnChunk> &chunks, std::pmr::vector<uint32_t> &selection,
             std::pmr::vector<uint64_t> &nulls, size_t &rows, bool &eof);
   int FetchInnerRows();
+  // Drains the inner side once into this operator's own block, so workers can
+  // replay it with private positions instead of sharing one cursor.
+  bool MaterializeInnerBlock();
   bool BindOuter();
   bool Emit(std::pmr::vector<ColumnChunk> &output, bool complement);
   void FinishProbe();
@@ -72,6 +80,9 @@ class BatchNestedLoop final : public RowIterator, public BatchReadable {
   ResMgmt::MemoryBudget::Reservation m_reservation;
   ResMgmt::BoundedMemoryResource m_memory;
   std::pmr::vector<ColumnChunk> m_outer_chunks, m_inner_chunks;
+  std::pmr::vector<ColumnChunk> m_inner_block;
+  size_t m_inner_block_rows{0};
+  size_t m_inner_block_bytes{0};
   struct OutputColumn {
     size_t target, source;
     bool inner;

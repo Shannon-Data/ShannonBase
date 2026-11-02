@@ -24,6 +24,7 @@
    The fundmental code for imcs.
 */
 #include "storage/rapid_engine/imcs/table0view.h"
+#include "storage/rapid_engine/executor/iterators/table_scan_iterator.h"
 #include "storage/rapid_engine/monitor/rapid_monitor.h"
 #include "storage/rapid_engine/populate/log_binlog_parser.h"
 
@@ -640,6 +641,47 @@ int RapidCursor::next(size_t batch_size, std::pmr::vector<ShannonBase::Executor:
   return HA_ERR_END_OF_FILE;
 }
 
+std::unique_ptr<Executor::Morsel::ParallelSource> RapidCursor::create_parallel_source(
+    ResMgmt::BoundedMemoryResource *memory, const std::pmr::vector<Field *> &fields, bool index_reverse) {
+  if (!m_scan_context || m_scan_limit != HA_POS_ERROR || m_scan_offset != 0 || m_data_source->part_info) return {};
+  for (Field *field : fields)
+    if (!field || field->table != m_data_source || Utils::IsOffPageField(field) ||
+        field->is_flag_set(NOT_SECONDARY_FLAG))
+      return {};
+
+  // Index-driven scan. The ART cursor cannot be shared, so the candidate walk
+  // is folded into per-IMCU runs here, before any worker starts; only the
+  // materialization is parallel. Requirements: nothing read yet (a serial
+  // fallback must still start at the beginning) and an index without versioned
+  // keys, because a per-candidate key re-check needs the ART key bytes and this
+  // path deliberately keeps none.
+  if (m_index_iter != nullptr) {
+    if (index_reverse || m_index_scan_started || m_index_exhausted || m_rows_returned != 0 || m_rows_skipped != 0 ||
+        m_scan_state.row_in_batch != 0 || m_scan_state.batch_size != 0 || m_active_index == MAX_KEY)
+      return {};
+    const auto *desc = m_rpd_table->get_art_index_descriptor(static_cast<uint>(m_active_index));
+    auto *index = m_rpd_table->get_index(static_cast<uint>(m_active_index));
+    if (desc == nullptr || index == nullptr || !index->initialized()) return {};
+    const auto *key_index = m_rpd_table->get_index(desc->key_name);
+    if (key_index == nullptr || key_index->has_versioned_keys()) return {};
+
+    // Only a row bound is computed here. The candidate walk itself moved into
+    // the source, so a caller that abandons the parallel phase never pays for a
+    // full index traversal.
+    size_t row_bound = 0;
+    for (const auto &imcu : m_scan_imcus)
+      if (imcu) row_bound += imcu->get_row_count();
+    if (row_bound < 2 * Executor::Morsel::ParallelQueue::kClaimRows) return {};
+    return std::make_unique<Executor::Morsel::ParallelIndexScan>(
+        memory, m_scan_context.get(), m_scan_imcus, m_scan_predicates, fields,
+        static_cast<uint32_t>(m_rpd_table->meta().rows_per_imcu), index->impl(), row_bound);
+  }
+
+  if (m_scan_state.curr_row_idx.load(std::memory_order_acquire) != 0) return {};
+  return std::make_unique<Executor::Morsel::ParallelScan>(memory, m_scan_context.get(), m_scan_imcus, m_scan_predicates,
+                                                          fields, m_use_storage_index);
+}
+
 int RapidCursor::next_projected(size_t capacity, std::pmr::vector<Executor::ColumnChunk> &chunks, size_t &rows,
                                 const std::vector<uint32_t> &projection) {
   rows = 0;
@@ -1131,8 +1173,12 @@ int RapidCursor::index_next_batch(size_t batch_size, std::pmr::vector<ShannonBas
     auto &target = col_chunks[col];
     if (!target.valid()) continue;
     target.clear();
-    for (size_t row = 0; row < read_cnt; ++row) {
-      if (!target.append_from(m_col_chunks[col], row)) return HA_ERR_INTERNAL_ERROR;
+    if (!target.append_range_from(m_col_chunks[col], 0, read_cnt)) {
+      // Layouts the bulk copy refuses keep the row-wise contract. It validates
+      // before writing, so nothing was applied.
+      for (size_t row = 0; row < read_cnt; ++row) {
+        if (!target.append_from(m_col_chunks[col], row)) return HA_ERR_INTERNAL_ERROR;
+      }
     }
   }
   m_scan_state.commit_batch(0);
@@ -1287,14 +1333,22 @@ size_t RapidCursor::scan_batch_internal(size_t batch_size, const std::vector<uin
   return batch_size - remaining;
 }
 
+ColumnChunkRecv::ColumnChunkRecv(RapidCursor *c, const std::vector<uint32_t> &proj,
+                                 std::pmr::vector<Executor::ColumnChunk> &ch, std::vector<row_id_t> &ids, size_t &cnt)
+    : cursor(c), projection_cols(proj), chunks(ch), row_ids(ids), read_cnt(cnt) {
+  // Resolve each projected column's storage width once instead of re-indexing
+  // the table metadata for every column of every row.
+  projection_lengths.reserve(proj.size());
+  const auto &fields = c->table()->meta().fields;
+  for (uint32_t col : proj) projection_lengths.push_back(col < fields.size() ? fields[col].normalized_length : 0);
+}
+
 void ColumnChunkRecv::on_row(row_id_t rowid, const std::vector<const uchar *> &row_data) {
   for (size_t idx = 0; idx < projection_cols.size(); ++idx) {
     auto col_idx = projection_cols[idx];
     if (col_idx >= chunks.size()) continue;
     auto &chunk = chunks[col_idx];
-    auto normal_len = cursor->table()->meta().fields[col_idx].normalized_length;
-
-    if (!chunk.add(row_data[idx], normal_len, row_data[idx] == nullptr)) return;  // chunk full
+    if (!chunk.add(row_data[idx], projection_lengths[idx], row_data[idx] == nullptr)) return;  // chunk full
   }
   row_ids.push_back(rowid);
   ++read_cnt;

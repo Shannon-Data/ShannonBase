@@ -35,7 +35,7 @@
 #include <pdh.h>
 #include <windows.h>
 #pragma comment(lib, "pdh.lib")
-#elif defined(__APPLE__)
+#elif defined(SHANNON_MACOS_PLATFORM)
 #include <mach/mach.h>
 #include <mach/mach_host.h>
 #include <mach/processor_info.h>
@@ -67,7 +67,7 @@ class SimpleRatioAdjuster {
 #ifdef SHANNON_WINDOWS_PLATFORM
   PDH_HQUERY m_cpu_query;
   PDH_HCOUNTER m_cpu_counter;
-#elif defined(__APPLE__)
+#elif defined(SHANNON_MACOS_PLATFORM)
   host_t host_port_;
 #else
   struct CpuTimes {
@@ -87,7 +87,7 @@ class SimpleRatioAdjuster {
         m_cpu_usage_ema(0.0),
         m_ema_alpha(ema_alpha),
         m_first_call(true)
-#ifdef __linux__
+#ifdef SHANNON_LINUX_PLATFORM
         ,
         cpu_times_initialized_(false)
 #endif
@@ -118,7 +118,7 @@ class SimpleRatioAdjuster {
   double getCurrentCpuUsage() const {
 #ifdef SHANNON_WINDOWS_PLATFORM
     return getWindowsCpuUsage();
-#elif defined(__APPLE__)
+#elif defined(SHANNON_MACOS_PLATFORM)
     return getMacOSCpuUsage();
 #else
     return getLinuxCpuUsage();
@@ -132,7 +132,7 @@ class SimpleRatioAdjuster {
     PdhAddCounter(m_cpu_query, L"\\Processor(_Total)\\% Processor Time", NULL, &m_cpu_counter);
     PdhCollectQueryData(m_cpu_query);
     std::this_thread::sleep_for(std::chrono::milliseconds(100));  // the first sampling.
-#elif defined(__APPLE__)
+#elif defined(SHANNON_MACOS_PLATFORM)
     host_port_ = mach_host_self();
 #endif
   }
@@ -152,7 +152,7 @@ class SimpleRatioAdjuster {
   }
 #endif
 
-#ifdef __APPLE__
+#ifdef SHANNON_MACOS_PLATFORM
   double getMacOSCpuUsage() const {
     processor_info_array_t cpu_info;
     mach_msg_type_number_t num_cpu_info;
@@ -183,7 +183,7 @@ class SimpleRatioAdjuster {
   }
 #endif
 
-#ifdef __linux__
+#ifdef SHANNON_LINUX_PLATFORM
   bool readCpuTimes(CpuTimes &times) const {
     std::ifstream file("/proc/stat");
     if (!file.is_open()) return false;

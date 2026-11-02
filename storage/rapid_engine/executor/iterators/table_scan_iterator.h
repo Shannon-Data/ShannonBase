@@ -27,6 +27,7 @@
 #define __SHANNONBASE_TABLE_SCAN_ITERATOR_H__
 
 #include <memory>
+#include <mutex>
 
 #include "sql/iterators/basic_row_iterators.h"
 #include "sql/iterators/row_iterator.h"
@@ -39,6 +40,113 @@
 #include "storage/rapid_engine/include/rapid_arch_inf.h"
 #include "storage/rapid_engine/include/rapid_const.h"
 #include "storage/rapid_engine/include/rapid_types.h"
+
+namespace ShannonBase {
+namespace Imcs {
+namespace Index {
+class ART;
+}
+}  // namespace Imcs
+}  // namespace ShannonBase
+
+namespace ShannonBase {
+namespace Executor {
+namespace Morsel {
+
+class ParallelScan final : public ParallelSource {
+ public:
+  ParallelScan(ResMgmt::BoundedMemoryResource *memory, const Rapid_scan_context *snapshot,
+               const std::vector<std::shared_ptr<Imcs::Imcu>> &imcus,
+               const std::vector<std::unique_ptr<Imcs::Predicate>> &predicates, const std::pmr::vector<Field *> &fields,
+               bool storage_index);
+  size_t tasks() const override { return m_queue.size(); }
+  uint64_t max_ordinal() const override { return m_max_ordinal; }
+  size_t extra_scratch_bytes() const override { return m_storage_scratch_bytes; }
+  bool ExecuteImpl(THD *worker, ResMgmt::BoundedMemoryResource *memory, const std::atomic<bool> &cancelled,
+                   const Consumer &consume) override;
+
+ private:
+  // The foreground cursor owns the snapshot, reader pins and predicates and
+  // cannot be advanced/destroyed until all workers have joined AND this
+  // borrowed source has been destroyed. Workers only read the shared ReadView.
+  const Rapid_scan_context *m_snapshot;
+  const std::vector<std::shared_ptr<Imcs::Imcu>> &m_imcus;
+  const std::vector<std::unique_ptr<Imcs::Predicate>> &m_predicates;
+  std::pmr::vector<Field *> m_fields;
+  std::pmr::vector<uint64_t> m_ordinal_bases;
+  ResMgmt::BoundedMemoryResource::Reservation m_projection_charge;
+  std::vector<uint32_t> m_projection;
+  ParallelQueue m_queue;
+  bool m_storage_index;
+  uint64_t m_max_ordinal{0};
+  size_t m_storage_scratch_bytes{0};
+};
+
+/**
+ * Index-driven variant of ParallelScan.
+ *
+ * The ART cursor is single-threaded and stateful, so the candidate walk stays
+ * on the coordinator: it is turned into per-IMCU runs of physical offsets
+ * before any worker starts. Workers then materialize one run each, which is
+ * where the cost is, and hand rows back with the ordinal the candidate had in
+ * index order. Consumers merge on that ordinal, so runs may finish in any
+ * order.
+ *
+ * Only an index without versioned keys may use this: the serial path then has
+ * nothing to verify per candidate (visible_index_key_matches() returns early),
+ * so a run of offsets is equivalent to the same run of ART entries.
+ */
+class ParallelIndexScan final : public ParallelSource {
+ public:
+  struct Run {
+    size_t imcu;          // Index into the cursor's IMCU list.
+    uint64_t ordinal;     // Index-order position of offsets[begin].
+    size_t begin, count;  // Slice of the shared offset array.
+  };
+
+  // The ART walk that produces the runs is deferred to Collect(): doing it in
+  // the constructor paid for a full index traversal even when the caller then
+  // abandoned the parallel phase, which is exactly what a cost gate decides.
+  ParallelIndexScan(ResMgmt::BoundedMemoryResource *memory, const Rapid_scan_context *snapshot,
+                    const std::vector<std::shared_ptr<Imcs::Imcu>> &imcus,
+                    const std::vector<std::unique_ptr<Imcs::Predicate>> &predicates,
+                    const std::pmr::vector<Field *> &fields, uint32_t rows_per_imcu, Imcs::Index::ART *index,
+                    size_t row_bound);
+  size_t tasks() const override {
+    const size_t runs = m_ready_runs.load(std::memory_order_acquire);
+    // Before collection the candidate count is unknown; the row bound is a safe
+    // upper estimate for worker sizing.
+    return runs != 0 ? runs : std::max<size_t>(1, m_row_bound / ParallelQueue::kClaimRows);
+  }
+  uint64_t max_ordinal() const override { return m_max_ordinal.load(std::memory_order_acquire); }
+  size_t extra_scratch_bytes() const override { return m_storage_scratch_bytes; }
+  bool ExecuteImpl(THD *worker, ResMgmt::BoundedMemoryResource *memory, const std::atomic<bool> &cancelled,
+                   const Consumer &consume) override;
+
+ private:
+  // Walks the index once, on whichever worker arrives first. Later callers block
+  // until it finishes, then read the finished run list.
+  void Collect();
+
+  const Rapid_scan_context *m_snapshot;
+  const std::vector<std::shared_ptr<Imcs::Imcu>> &m_imcus;
+  const std::vector<std::unique_ptr<Imcs::Predicate>> &m_predicates;
+  std::pmr::vector<Field *> m_fields;
+  std::vector<uint32_t> m_projection;
+  std::pmr::vector<uint32_t> m_offsets;
+  std::pmr::vector<Run> m_runs;
+  std::once_flag m_collect;
+  std::atomic<size_t> m_ready_runs{0};
+  std::atomic<size_t> m_next_run{0};
+  Imcs::Index::ART *m_index;
+  size_t m_row_bound;
+  uint32_t m_rows_per_imcu;
+  std::atomic<uint64_t> m_max_ordinal{0};
+  size_t m_storage_scratch_bytes{0};
+};
+}  // namespace Morsel
+}  // namespace Executor
+}  // namespace ShannonBase
 /**
  * Usage:
  *
@@ -109,6 +217,8 @@ class VectorizedTableScanIterator final : public TableRowIterator, public BatchR
                         RuntimeFilter filter);
 
   std::shared_ptr<Compress::Dictionary> Dictionary(const Field *field) const override;
+  std::unique_ptr<Morsel::ParallelSource> CreateParallelSource(ResMgmt::BoundedMemoryResource *memory,
+                                                               const std::pmr::vector<Field *> &fields) override;
 
   /**
    * Cache rows [from_row, total_rows) into lookahead buffer so the next

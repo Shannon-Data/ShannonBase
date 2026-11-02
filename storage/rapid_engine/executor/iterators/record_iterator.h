@@ -109,6 +109,13 @@ class VectorizedRecordIterator : public RowIterator, public BatchReadable {
   bool BatchNullRow(TABLE *table, size_t row) const override;
   bool SupportsBatchRead() const override;
   bool PreservesBatchNullRows() const override { return true; }
+  // This adapter is a transport shim, not an operator: a parallel pipeline can
+  // read the operator underneath it directly, so forward instead of declining.
+  std::unique_ptr<Morsel::ParallelSource> CreateParallelSource(ResMgmt::BoundedMemoryResource *memory,
+                                                               const std::pmr::vector<Field *> &fields) override {
+    if (m_batch_source == nullptr) return {};
+    return m_batch_source->CreateParallelSource(memory, fields);
+  }
   void SetNullRowFlag(bool value) override { m_source->SetNullRowFlag(value); }
   void UnlockRow() override {
     if (!m_replayed_row) m_source->UnlockRow();

@@ -35,6 +35,13 @@
 namespace ShannonBase {
 namespace Executor {
 namespace {
+// An int128 holds 38 decimal digits exactly. A DECIMAL column wider than that
+// still often stores values that fit, because the packed format keeps leading
+// zero groups, so fields are accepted and DecodePackedDecimal128() refuses the
+// individual batches that do not fit. A wide constant or computed result has no
+// such slack: its precision describes the value itself, so it is refused here.
+constexpr unsigned kMaxExactPrecision = 38;
+
 bool Rescale(int128_t value, unsigned scale, int128_t *result) {
   while (scale--) {
     if (SHANNON_MUL_OVERFLOW(value, int128_t{10}, &value)) return false;
@@ -75,9 +82,12 @@ bool EncodeDecimal(int128_t value, unsigned precision, unsigned scale, uchar *ou
 }
 }  // namespace
 
+// NOTE: unlike the MySQL convention used elsewhere in the executor
+// (true == error), these helpers return true on SUCCESS.
 bool VectorizedExpression::Compile(Item *expression) {
   m_nodes.clear();
-  m_values.clear();
+  m_numbers.clear();
+  m_nulls.clear();
   m_rows = 0;
   size_t root{0};
   if (CompileNode(expression, &root, 0)) return true;
@@ -99,6 +109,9 @@ bool VectorizedExpression::CompileNode(Item *expression, size_t *index, unsigned
 
   node.scale = node.integer ? 0 : item->decimals;
   if (node.scale > DECIMAL_MAX_SCALE) return false;
+  if (!node.integer && item->type() != Item::NULL_ITEM && item->type() != Item::FIELD_ITEM &&
+      item->decimal_precision() > kMaxExactPrecision)
+    return false;
 
   if (item->type() == Item::FIELD_ITEM) {
     node.op = Op::FIELD;
@@ -106,16 +119,26 @@ bool VectorizedExpression::CompileNode(Item *expression, size_t *index, unsigned
     if (!node.field || node.field->is_unsigned()) return false;
 
     switch (node.field->type()) {
+      case MYSQL_TYPE_TINY:
+      case MYSQL_TYPE_SHORT:
+      case MYSQL_TYPE_INT24:
       case MYSQL_TYPE_LONG:
       case MYSQL_TYPE_LONGLONG:
+        break;
       case MYSQL_TYPE_NEWDECIMAL:
+        // Any declared precision up to DECIMAL_MAX_PRECISION is accepted: the
+        // column may hold values that fit int128 exactly, and the ones that do
+        // not make Evaluate() decline for that batch instead of failing a
+        // compile that would otherwise be usable.
         break;
       default:
         return false;
     }
   } else if (item->type() == Item::INT_ITEM) {
+    node.op = Op::CONSTANT;
     node.constant = {item->val_int(), false};
   } else if (item->type() == Item::DECIMAL_ITEM) {
+    node.op = Op::CONSTANT;
     my_decimal buffer;
     const my_decimal *value = item->val_decimal(&buffer);
     uchar packed[DECIMAL_MAX_FIELD_SIZE] = {0};
@@ -128,6 +151,8 @@ bool VectorizedExpression::CompileNode(Item *expression, size_t *index, unsigned
       return false;
     node.constant.is_null = false;
   } else if (item->type() == Item::NULL_ITEM) {
+    node.op = Op::CONSTANT;
+    node.constant = Value{};  // explicitly NULL, not an accident of defaults
     node.scale = 0;
   } else if (item->type() == Item::FUNC_ITEM) {
     auto *func = down_cast<Item_func *>(item);
@@ -192,7 +217,7 @@ bool VectorizedExpression::CompileNode(Item *expression, size_t *index, unsigned
     return false;
   }
 
-  if (!TryGrow(m_nodes, m_nodes.size() + 1)) return false;
+  if (!Grow(m_nodes, m_nodes.size() + 1)) return false;
 
   *index = m_nodes.size();
   m_nodes.push_back(node);
@@ -210,14 +235,22 @@ bool VectorizedExpression::Evaluate(const std::pmr::vector<ColumnChunk> &chunks,
   if (rows == 0) return true;
 
   const size_t size = rows * m_nodes.size();
-  if (!TryReserve(m_values, size)) return false;
+  if (!Reserve(m_numbers, size) || !Reserve(m_nulls, size)) return false;
 
-  m_values.resize(size);
+  // Every slot read below is written first in this call, so existing slots need
+  // no re-initialisation: only grow.
+  if (m_numbers.size() < size) m_numbers.resize(size);
+  if (m_nulls.size() < size) m_nulls.resize(size);
   for (size_t instruction = 0; instruction < m_nodes.size(); ++instruction) {
     const Node &node = m_nodes[instruction];
-    Value *output = m_values.data() + instruction * rows;
+    int128_t *out = m_numbers.data() + instruction * rows;
+    uint8_t *out_null = m_nulls.data() + instruction * rows;
     if (node.op == Op::CONSTANT) {
-      std::fill_n(output, rows, node.constant);
+      // Operands read a constant with stride 0, so only the root (whose column
+      // Store()/Matches()/Result() read) needs all rows filled.
+      const size_t fill = instruction + 1 == m_nodes.size() ? rows : 1;
+      std::fill_n(out, fill, node.constant.number);
+      std::fill_n(out_null, fill, static_cast<uint8_t>(node.constant.is_null));
       continue;
     }
 
@@ -236,30 +269,45 @@ bool VectorizedExpression::Evaluate(const std::pmr::vector<ColumnChunk> &chunks,
         const size_t physical = selection && !selection->empty() ? (*selection)[row] : row;
         if (physical >= input->size()) return false;
 
-        output[row] = Value{};
-        if (input->nullable_fast(physical)) continue;
+        if (input->nullable_fast(physical)) {
+          out[row] = 0;
+          out_null[row] = 1;
+          continue;
+        }
 
-        output[row].is_null = false;
+        out_null[row] = 0;
         const uchar *data = input->data_fast(physical);
-        if (node.field->type() == MYSQL_TYPE_LONG) {
+        if (node.field->type() == MYSQL_TYPE_TINY) {
+          out[row] = static_cast<int8_t>(data[0]);
+        } else if (node.field->type() == MYSQL_TYPE_SHORT) {
+          int16_t value;
+          std::memcpy(&value, data, sizeof(value));
+          out[row] = value;
+        } else if (node.field->type() == MYSQL_TYPE_INT24) {
+          const int32_t raw = data[0] | (data[1] << 8) | (data[2] << 16);
+          out[row] = (raw ^ 0x800000) - 0x800000;  // sign-extend 24 bits
+        } else if (node.field->type() == MYSQL_TYPE_LONG) {
           int32_t value;
           std::memcpy(&value, data, sizeof(value));
-          output[row].number = value;
+          out[row] = value;
         } else if (node.field->type() == MYSQL_TYPE_LONGLONG) {
           int64_t value;
           std::memcpy(&value, data, sizeof(value));
-          output[row].number = value;
+          out[row] = value;
         } else if (!Utils::DecodePackedDecimal128(data, input->width(),
                                                   down_cast<Field_new_decimal *>(node.field)->precision, node.scale,
-                                                  &output[row].number)) {
+                                                  &out[row])) {
           return false;
         }
       }
       continue;
     }
 
-    const Value *left = m_values.data() + node.left * rows, *right = m_values.data() + node.right * rows;
+    const int128_t *left = m_numbers.data() + node.left * rows, *right = m_numbers.data() + node.right * rows;
+    const uint8_t *left_null = m_nulls.data() + node.left * rows, *right_null = m_nulls.data() + node.right * rows;
     const unsigned left_scale = m_nodes[node.left].scale, right_scale = m_nodes[node.right].scale;
+    const size_t left_stride = m_nodes[node.left].op == Op::CONSTANT ? 0 : 1;
+    const size_t right_stride = m_nodes[node.right].op == Op::CONSTANT ? 0 : 1;
     int128_t left_factor = 1, right_factor = 1;
     if (node.op != Op::MULTIPLY && node.op != Op::NEGATE) {
       const unsigned scale = std::max(left_scale, right_scale);
@@ -267,52 +315,105 @@ bool VectorizedExpression::Evaluate(const std::pmr::vector<ColumnChunk> &chunks,
         return false;
     }
 
-    for (size_t row = 0; row < rows; ++row) {
-      output[row] = Value{};
-      if (left[row].is_null || right[row].is_null) continue;
-      int128_t a = left[row].number, b = right[row].number, result = 0;
-      if ((left_factor != 1 && SHANNON_MUL_OVERFLOW(a, left_factor, &a)) ||
-          (right_factor != 1 && SHANNON_MUL_OVERFLOW(b, right_factor, &b)))
-        return false;
-      switch (node.op) {
-        case Op::ADD:
-          if (SHANNON_ADD_OVERFLOW(a, b, &result)) return false;
-          break;
-        case Op::SUBTRACT:
-          if (SHANNON_SUB_OVERFLOW(a, b, &result)) return false;
-          break;
-        case Op::MULTIPLY:
-          if (SHANNON_MUL_OVERFLOW(a, b, &result)) return false;
-          break;
-        case Op::NEGATE:
-          if (SHANNON_SUB_OVERFLOW(int128_t{0}, a, &result)) return false;
-          break;
-        case Op::EQ:
-          result = a == b;
-          break;
-        case Op::NE:
-          result = a != b;
-          break;
-        case Op::LT:
-          result = a < b;
-          break;
-        case Op::LE:
-          result = a <= b;
-          break;
-        case Op::GT:
-          result = a > b;
-          break;
-        case Op::GE:
-          result = a >= b;
-          break;
-        default:
+    // One tight loop per operator: the opcode is loop-invariant, and dispatching
+    // it per row keeps the compiler from specializing the body.
+    // Integer-only nodes need no scale alignment and fit in int64, so they take
+    // a 64-bit overflow check instead of 128-bit arithmetic.
+    const bool narrow = node.integer && m_nodes[node.left].integer && m_nodes[node.right].integer && left_factor == 1 &&
+                        right_factor == 1;
+    const auto run = [&](auto &&apply) -> bool {
+      for (size_t row = 0; row < rows; ++row) {
+        const size_t li = row * left_stride, ri = row * right_stride;
+        if (left_null[li] || right_null[ri]) {
+          out[row] = 0;
+          out_null[row] = 1;
+          continue;
+        }
+        int128_t a = left[li], b = right[ri], result = 0;
+        if ((left_factor != 1 && SHANNON_MUL_OVERFLOW(a, left_factor, &a)) ||
+            (right_factor != 1 && SHANNON_MUL_OVERFLOW(b, right_factor, &b)))
           return false;
+        if (!apply(a, b, &result)) return false;
+        if (node.integer &&
+            (result < std::numeric_limits<int64_t>::min() || result > std::numeric_limits<int64_t>::max()))
+          return false;
+        out[row] = result;
+        out_null[row] = 0;
       }
-      if (node.integer &&
-          (result < std::numeric_limits<int64_t>::min() || result > std::numeric_limits<int64_t>::max()))
+      return true;
+    };
+    bool ok = false;
+    switch (node.op) {
+      case Op::ADD:
+        ok = narrow ? run([](int128_t a, int128_t b, int128_t *r) {
+          int64_t v;
+          if (SHANNON_ADD_OVERFLOW(static_cast<int64_t>(a), static_cast<int64_t>(b), &v)) return false;
+          *r = v;
+          return true;
+        })
+                    : run([](int128_t a, int128_t b, int128_t *r) { return !SHANNON_ADD_OVERFLOW(a, b, r); });
+        break;
+      case Op::SUBTRACT:
+        ok = narrow ? run([](int128_t a, int128_t b, int128_t *r) {
+          int64_t v;
+          if (SHANNON_SUB_OVERFLOW(static_cast<int64_t>(a), static_cast<int64_t>(b), &v)) return false;
+          *r = v;
+          return true;
+        })
+                    : run([](int128_t a, int128_t b, int128_t *r) { return !SHANNON_SUB_OVERFLOW(a, b, r); });
+        break;
+      case Op::MULTIPLY:
+        ok = narrow ? run([](int128_t a, int128_t b, int128_t *r) {
+          int64_t v;
+          if (SHANNON_MUL_OVERFLOW(static_cast<int64_t>(a), static_cast<int64_t>(b), &v)) return false;
+          *r = v;
+          return true;
+        })
+                    : run([](int128_t a, int128_t b, int128_t *r) { return !SHANNON_MUL_OVERFLOW(a, b, r); });
+        break;
+      case Op::NEGATE:
+        ok = run([](int128_t a, int128_t, int128_t *r) { return !SHANNON_SUB_OVERFLOW(int128_t{0}, a, r); });
+        break;
+      case Op::EQ:
+        ok = run([](int128_t a, int128_t b, int128_t *r) {
+          *r = a == b;
+          return true;
+        });
+        break;
+      case Op::NE:
+        ok = run([](int128_t a, int128_t b, int128_t *r) {
+          *r = a != b;
+          return true;
+        });
+        break;
+      case Op::LT:
+        ok = run([](int128_t a, int128_t b, int128_t *r) {
+          *r = a < b;
+          return true;
+        });
+        break;
+      case Op::LE:
+        ok = run([](int128_t a, int128_t b, int128_t *r) {
+          *r = a <= b;
+          return true;
+        });
+        break;
+      case Op::GT:
+        ok = run([](int128_t a, int128_t b, int128_t *r) {
+          *r = a > b;
+          return true;
+        });
+        break;
+      case Op::GE:
+        ok = run([](int128_t a, int128_t b, int128_t *r) {
+          *r = a >= b;
+          return true;
+        });
+        break;
+      default:
         return false;
-      output[row] = {result, false};
     }
+    if (!ok) return false;
   }
   m_rows = rows;
   return true;
@@ -325,22 +426,36 @@ bool VectorizedExpression::Store(ColumnChunk *target, size_t rows) const {
   const auto *field = down_cast<Field_new_decimal *>(target->source_field());
   if (field->decimals() != m_nodes.back().scale) return false;
   if (rows == 0) return true;
-  const Value *values = m_values.data() + (m_nodes.size() - 1) * rows;
+  const int128_t *values = m_numbers.data() + (m_nodes.size() - 1) * rows;
+  const uint8_t *nulls = m_nulls.data() + (m_nodes.size() - 1) * rows;
   uchar packed[DECIMAL_MAX_FIELD_SIZE];
   for (size_t row = 0; row < rows; ++row) {
-    if (!values[row].is_null && !EncodeDecimal(values[row].number, field->precision, field->decimals(), packed))
-      return false;
-    if (!target->add(values[row].is_null ? nullptr : packed, values[row].is_null ? 0 : target->width(),
-                     values[row].is_null))
-      return false;
+    const bool is_null = nulls[row] != 0;
+    if (!is_null && !EncodeDecimal(values[row], field->precision, field->decimals(), packed)) return false;
+    if (!target->add(is_null ? nullptr : packed, is_null ? 0 : target->width(), is_null)) return false;
   }
   return true;
 }
 
 bool VectorizedExpression::Matches(size_t row) const {
   if (m_nodes.empty() || row >= m_rows) return false;
-  const Value &value = m_values[(m_nodes.size() - 1) * m_rows + row];
-  return !value.is_null && value.number != 0;
+  const size_t index = (m_nodes.size() - 1) * m_rows + row;
+  return m_nulls[index] == 0 && m_numbers[index] != 0;
+}
+
+bool VectorizedExpression::CopyProgram(const VectorizedExpression &source) {
+  if (!Reserve(m_nodes, source.m_nodes.size())) return false;
+  m_nodes.assign(source.m_nodes.begin(), source.m_nodes.end());
+  return !m_nodes.empty();
+}
+
+bool VectorizedExpression::Result(size_t row, int128_t *value, bool *is_null, unsigned *scale) const {
+  if (m_nodes.empty() || row >= m_rows) return false;
+  const size_t index = (m_nodes.size() - 1) * m_rows + row;
+  *value = m_numbers[index];
+  *is_null = m_nulls[index] != 0;
+  *scale = m_nodes.back().scale;
+  return true;
 }
 }  // namespace Executor
 }  // namespace ShannonBase

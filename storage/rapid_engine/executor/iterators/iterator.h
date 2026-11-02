@@ -24,7 +24,10 @@
    The fundmental code for imcs.
 */
 /** The basic iterator class for IMCS. All specific iterators are all inherited
- * from this.
+ * from this. The iterator is used to iterate the rows of a table or the result of a query.
+ * and it originally comes from mysql executor iterators. The iterator is used to iterate
+ * the rows of a table or the result of a query. The iterator is used to iterate the rows
+ * of a table or the result of a query.
  */
 #ifndef __SHANNONBASE_ITERATOR_H__
 #define __SHANNONBASE_ITERATOR_H__
@@ -47,6 +50,7 @@
 #include "sql/iterators/basic_row_iterators.h"
 #include "sql/iterators/row_iterator.h"
 
+#include "storage/rapid_engine/executor/executor.h"
 #include "storage/rapid_engine/executor/iterators/expression_iterator.h"
 #include "storage/rapid_engine/imcs/predicate.h"
 #include "storage/rapid_engine/include/rapid_arch_inf.h"
@@ -61,27 +65,9 @@ namespace Compress {
 class Dictionary;
 }
 namespace Executor {
-
-/*
- * Batch transport and the tiny execution kernels below are implementation
- * vocabulary of Rapid iterators. Keep them with the iterator abstraction
- * instead of exposing one-header batch/kernel subdirectories whose only
- * consumers are iterators.
- */
-namespace Batch {
-using SelectionVector = std::pmr::vector<uint32_t>;
-}  // namespace Batch
-
-// Hardware hints affect batching, never query semantics or the memory ceiling.
-struct BatchHardware {
-  size_t cache_line_bytes{CACHE_LINE_SIZE};
-  size_t l2_bytes{CACHE_L2_SIZE};
-  size_t simd_bytes{sizeof(uint64_t)};
-};
-const BatchHardware &ExecutionBatchHardware();
-
-inline size_t SelectBatchRows(size_t row_bytes, size_t available_bytes, size_t live_batches = 1,
-                              const BatchHardware &hardware = ExecutionBatchHardware()) {
+// Batch sizing hints never affect query semantics or the memory ceiling. Every
+// figure comes from rapid_arch_inf.h, so nothing is probed at runtime.
+inline size_t SelectBatchRows(size_t row_bytes, size_t available_bytes, size_t live_batches = 1) {
   row_bytes = std::max<size_t>(1, row_bytes);
   live_batches = std::max<size_t>(1, live_batches);
   if (row_bytes > SIZE_MAX / live_batches) return 0;
@@ -89,11 +75,11 @@ inline size_t SelectBatchRows(size_t row_bytes, size_t available_bytes, size_t l
   const size_t memory_rows = available_bytes / footprint;
   if (memory_rows == 0) return 0;
   // Use only a fraction of L2: keys, null bits and downstream state also need it.
-  const size_t cache_bytes = std::max<size_t>(1, hardware.l2_bytes / 4);
+  const size_t cache_bytes = std::max<size_t>(1, CACHE_L2_SIZE / 4);
   size_t rows = std::min<size_t>({8192, memory_rows, std::max<size_t>(1, cache_bytes / footprint)});
   // Whole-byte columns of any width then end at cache/SIMD boundaries. Small
   // grants may serve fewer rows; alignment must never round above the grant.
-  const size_t quantum = std::max<size_t>({1, hardware.cache_line_bytes, hardware.simd_bytes});
+  const size_t quantum = std::max<size_t>({1, size_t{CACHE_LINE_SIZE}, size_t{SHANNON_SIMD_ALIGN}});
   if (rows >= quantum) rows -= rows % quantum;
   return rows;
 }
@@ -114,7 +100,7 @@ inline bool TryAllocation(Allocate &&allocate) noexcept {
 }
 
 template <typename Buffer>
-inline bool TryReserve(Buffer &buffer, size_t capacity) noexcept {
+inline bool Reserve(Buffer &buffer, size_t capacity) noexcept {
   if (capacity <= buffer.capacity()) return true;
   if (capacity > buffer.max_size()) return false;
   return TryAllocation([&] { buffer.reserve(capacity); });
@@ -123,11 +109,11 @@ inline bool TryReserve(Buffer &buffer, size_t capacity) noexcept {
 // Retained append-only state needs geometric growth, rather than reserve(size+1)
 // on every row. Charge both old and new buffers through the original allocator.
 template <typename Buffer>
-inline bool TryGrow(Buffer &buffer, size_t required) noexcept {
+inline bool Grow(Buffer &buffer, size_t required) noexcept {
   if (required <= buffer.capacity()) return true;
   const size_t old = buffer.capacity();
   const size_t grown = old > buffer.max_size() / 2 ? buffer.max_size() : std::max<size_t>(1, old * 2);
-  return TryReserve(buffer, std::max(required, grown));
+  return Reserve(buffer, std::max(required, grown));
 }
 
 template <typename Container, typename... Args>
@@ -215,6 +201,8 @@ class CardinalityObservation {
     m_invalid = false;
   }
   void Invalidate() { m_invalid = true; }
+  // The optimizer's estimate for this operator's output, -1 when unknown.
+  double estimate() const { return m_estimate; }
   // A single observation per Init, only after the operator reaches EOF.
   void Finish(THD *thd, const char *operator_name, size_t rows);
 
@@ -228,7 +216,7 @@ using filter_func_t = std::function<bool(const uchar *)>;
 
 inline bool PrepareBudgetedString(String *value, std::pmr::vector<char> *buffer, size_t bytes) {
   if (bytes > UINT32_MAX - 16) return false;
-  if (!TryReserve(*buffer, bytes + 16)) return false;
+  if (!Reserve(*buffer, bytes + 16)) return false;
   buffer->resize(bytes + 16);
   value->set(buffer->data(), buffer->size(), &my_charset_bin);
   value->length(0);
@@ -298,6 +286,19 @@ class ColumnChunk {
 
   // Append one row without repeated metadata lookups. Single-consumer only.
   bool append_from(const ColumnChunk &source, size_t source_row);
+
+  // Append a dense range [source_row, source_row + count) in one memcpy.
+  // Same layout required (source field, width); returns false otherwise so the
+  // caller can fall back to append_from() per row.
+  bool append_range_from(const ColumnChunk &source, size_t source_row, size_t count);
+
+  // Append `count` rows taken from `source` at `rows[i]`, or densely when `rows`
+  // is null. Used by transports that copy between two different tables, where
+  // only the element width has to agree, so append_range_from() cannot be used.
+  bool append_rows_from(const ColumnChunk &source, const uint32_t *rows, size_t count);
+
+  // Non-NULL rows in [from, from + count). Null bits are not counted by width.
+  size_t count_non_null(size_t from, size_t count) const;
 
   // Compact rows in-place according to a monotonically increasing selection.
   // Used by batch-preserving filters; no temporary column buffers are needed.
@@ -770,6 +771,13 @@ class BatchReadable {
   // expose its dictionary. A row-image batch must return nullptr.
   virtual std::shared_ptr<Compress::Dictionary> Dictionary(const Field *) const { return nullptr; }
 
+  // Called before consuming input. Workers may execute this immutable plan,
+  // never the RowIterator itself or its TABLE/Item record buffers.
+  virtual std::unique_ptr<Morsel::ParallelSource> CreateParallelSource(ResMgmt::BoundedMemoryResource *,
+                                                                       const std::pmr::vector<Field *> &) {
+    return {};
+  }
+
   /**
    * Whether this iterator can currently serve ReadBatch() at all.
    *
@@ -853,22 +861,34 @@ bool PushbackBatchTailShared(const std::pmr::vector<ColumnChunk> &chunks, size_t
  */
 class VectorizedFilterIterator final : public RowIterator, public BatchReadable {
  public:
+  /*
+   * Batch transport and the tiny execution kernels below are implementation
+   * vocabulary of Rapid iterators. Keep them with the iterator abstraction
+   * instead of exposing one-header batch/kernel subdirectories whose only
+   * consumers are iterators.
+   */
+  using SelectionVector = std::pmr::vector<uint32_t>;
+
   VectorizedFilterIterator(THD *thd, unique_ptr_destroy_only<RowIterator> source, Item *condition,
                            double estimated_rows = -1.0);
 
   bool Init() override;
   int Read() override;
+
   void SetNullRowFlag(bool is_null_row) override;
   void StartPSIBatchMode() override;
   void EndPSIBatchModeIfStarted() override;
   void UnlockRow() override;
 
   int ReadBatch(std::pmr::vector<ColumnChunk> &col_chunks, size_t capacity, size_t &rows_read) override;
+
   int ReadSelectedBatch(std::pmr::vector<ColumnChunk> &chunks, size_t capacity, size_t &rows_read,
                         std::pmr::vector<uint32_t> &selection) override;
+
   std::shared_ptr<Compress::Dictionary> Dictionary(const Field *field) const override {
     return m_batch_source ? m_batch_source->Dictionary(field) : nullptr;
   }
+
   bool PushbackBatchTail(const std::pmr::vector<ColumnChunk> &chunks, size_t from_row, size_t total_rows) override;
 
   bool BatchNullRow(TABLE *table, size_t row) const override;
@@ -876,6 +896,8 @@ class VectorizedFilterIterator final : public RowIterator, public BatchReadable 
     auto *source = dynamic_cast<BatchReadable *>(m_source->real_iterator());
     return source && source->PreservesBatchNullRows();
   }
+  std::unique_ptr<Morsel::ParallelSource> CreateParallelSource(ResMgmt::BoundedMemoryResource *memory,
+                                                               const std::pmr::vector<Field *> &fields) override;
   const VectorizedOperatorStats &stats() const { return m_stats; }
   size_t row_materializations() const { return m_stats.row_materializations; }
   size_t vectorized_predicate_rows() const { return m_stats.simd_rows + m_stats.scalar_fallback_rows; }
@@ -902,29 +924,59 @@ class VectorizedFilterIterator final : public RowIterator, public BatchReadable 
   int ReadBatchViaRows(std::pmr::vector<ColumnChunk> &col_chunks, size_t capacity, size_t &rows_read);
   bool DrainLookahead(std::pmr::vector<ColumnChunk> &col_chunks, size_t capacity, size_t *rows_read);
 
+  // Morsel adapter that re-evaluates this filter's predicates per worker.
+  class FilterParallelSource final : public Morsel::ParallelSource {
+   public:
+    explicit FilterParallelSource(ResMgmt::BoundedMemoryResource *memory);
+
+    // Compiles the condition into one program per AND conjunct.
+    bool Compile(Item *condition);
+
+    // Morsel::ParallelSource interface
+    size_t tasks() const override;
+    void CommitStats() override;
+    uint64_t max_ordinal() const override { return child->max_ordinal(); }
+    size_t extra_scratch_bytes() const override;
+    bool needs_serial_retry() const override;
+    bool ExecuteImpl(THD *worker, ResMgmt::BoundedMemoryResource *memory, const std::atomic<bool> &cancelled,
+                     const Consumer &consume) override;
+
+    std::unique_ptr<Morsel::ParallelSource> child;
+    std::pmr::vector<VectorizedExpression> programs;
+    std::atomic<bool> retry{false};
+  };
+
   ResMgmt::MemoryBudget::Reservation m_reservation;
   ResMgmt::BoundedMemoryResource m_memory;
-  unique_ptr_destroy_only<RowIterator> m_source;
+
+  unique_ptr_destroy_only<RowIterator> m_source{nullptr};
   Item *m_condition{nullptr};
   BatchReadable *m_batch_source{nullptr};
+
   std::pmr::vector<Field *> m_condition_fields;
   std::pmr::vector<size_t> m_condition_chunk_map;
   std::pmr::vector<char> m_condition_decode;
-  Batch::SelectionVector m_selection;
+
+  SelectionVector m_selection;
+
   std::pmr::vector<uint32_t> m_input_selection;
   std::pmr::vector<TABLE *> m_null_tables;
   std::pmr::vector<uint64_t> m_batch_nulls, m_lookahead_nulls;
   std::pmr::vector<size_t> m_simd_selection;
+
   SimplePredicate m_simple_predicate;
-  std::unique_ptr<Imcs::Predicate> m_dictionary_predicate;
+
+  std::unique_ptr<Imcs::Predicate> m_dictionary_predicate{nullptr};
   Field *m_dictionary_field{nullptr};
   bool m_dictionary_residual{false};
   VectorizedExpression m_expression{&m_memory};
 
   std::pmr::vector<ColumnChunk> m_lookahead_chunks;
+
   size_t m_lookahead_start{0};
   size_t m_lookahead_count{0}, m_batch_capacity{0};
   bool m_replayed_row{false};
+
   VectorizedOperatorStats m_stats;
   CardinalityObservation m_cardinality;
 };

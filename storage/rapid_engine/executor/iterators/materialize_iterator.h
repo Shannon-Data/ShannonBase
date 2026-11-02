@@ -44,6 +44,9 @@ class VectorizedMaterializeIterator final : public RowIterator, public BatchRead
   void SetNullRowFlag(bool value) override { value ? m_table->set_null_row() : m_table->reset_null_row(); }
   void UnlockRow() override {}
   void EndPSIBatchModeIfStarted() override { m_source->EndPSIBatchModeIfStarted(); }
+  std::unique_ptr<Morsel::ParallelSource> CreateParallelSource(ResMgmt::BoundedMemoryResource *memory,
+                                                               const std::pmr::vector<Field *> &fields) override;
+  bool SupportsBatchRead() const override { return true; }
 
  private:
   inline int Error(const char *message) {
@@ -72,6 +75,95 @@ class VectorizedMaterializeIterator final : public RowIterator, public BatchRead
   query_id_t m_query_id{0};
   bool m_ready{false};
 };
+
+namespace Morsel {
+/**
+ * Serves a resident, immutable block of columns to parallel workers.
+ *
+ * The block is filled once by the coordinator and never mutated afterwards, so
+ * workers only copy row ranges out of it. Ordinals are the serial row positions,
+ * which is what a consumer merges on when tasks finish out of order.
+ *
+ * Two consumers need this shape: an operator that materializes its input
+ * (derived tables) and a nested loop join that must rescan its inner side once
+ * per outer row. `Replay()` is what makes the second one possible.
+ */
+class MaterializedSource final : public ParallelSource, public ReplayableParallelSource {
+ public:
+  MaterializedSource(ResMgmt::BoundedMemoryResource *memory, const std::pmr::vector<ColumnChunk> &rows,
+                     size_t row_count, const std::pmr::vector<Field *> &fields)
+      : m_rows(rows), m_fields(fields, memory), m_queue(memory), m_row_count(row_count) {
+    m_queue.Add(0, row_count);
+    m_max_ordinal = row_count ? row_count - 1 : 0;
+  }
+
+  size_t tasks() const override { return m_queue.size(); }
+  uint64_t max_ordinal() const override { return m_max_ordinal; }
+  size_t replay_row_count() const override { return m_row_count; }
+
+  // Any thread may copy any range out of the block. Chunks must be bound to the
+  // same fields, in the same order, this source was created with.
+  bool Replay(size_t from, size_t count, std::pmr::vector<ColumnChunk> &chunks) override {
+    if (count == 0) return true;
+    if (chunks.size() != m_fields.size()) return false;
+    for (size_t col = 0; col < m_fields.size(); ++col) {
+      const ColumnChunk *column = Find(m_fields[col]);
+      if (column == nullptr || !chunks[col].append_range_from(*column, from, count)) return false;
+    }
+    return true;
+  }
+
+  bool ExecuteImpl(THD *, ResMgmt::BoundedMemoryResource *memory, const std::atomic<bool> &cancelled,
+                   const Consumer &consume) override {
+    constexpr size_t capacity = kBatchRows;
+    // A chunk per requested field, bound to the resident column holding it. A
+    // field with no resident column means the caller wants something this block
+    // does not own; refuse rather than emit a partial row.
+    std::pmr::vector<ColumnChunk> chunks(memory);
+    std::pmr::vector<const ColumnChunk *> columns(memory);
+    std::pmr::vector<uint32_t> selection(memory);
+    std::pmr::vector<uint64_t> ordinals(memory);
+    if (!Reserve(chunks, m_fields.size()) || !Reserve(columns, m_fields.size()) || !Reserve(ordinals, capacity))
+      return true;
+    for (Field *field : m_fields) {
+      const ColumnChunk *column = Find(field);
+      if (column == nullptr) return true;
+      chunks.emplace_back(field, capacity, memory);
+      if (chunks.back().failed() || chunks.back().width() != column->width()) return true;
+      columns.push_back(column);
+    }
+
+    Task parallel;
+    while (!cancelled.load(std::memory_order_acquire) && m_queue.Claim(&parallel)) {
+      for (size_t offset = 0; offset < parallel.count; offset += capacity) {
+        if (cancelled.load(std::memory_order_acquire)) return false;
+        for (auto &chunk : chunks) chunk.clear();
+        ordinals.clear();
+        const size_t begin = parallel.begin + offset;
+        const size_t count = std::min(capacity, parallel.count - offset);
+        for (size_t col = 0; col < chunks.size(); ++col)
+          if (!chunks[col].append_range_from(*columns[col], begin, count)) return true;
+        for (size_t i = 0; i < count; ++i) ordinals.push_back(begin + i);
+        if (consume(chunks, count, selection, ordinals)) return true;
+      }
+    }
+    return false;
+  }
+
+ private:
+  const ColumnChunk *Find(const Field *field) const {
+    for (const auto &candidate : m_rows)
+      if (candidate.valid() && candidate.source_field() == field) return &candidate;
+    return nullptr;
+  }
+
+  const std::pmr::vector<ColumnChunk> &m_rows;
+  std::pmr::vector<Field *> m_fields;
+  ParallelQueue m_queue;
+  size_t m_row_count{0};
+  uint64_t m_max_ordinal{0};
+};
+}  // namespace Morsel
 }  // namespace Executor
 }  // namespace ShannonBase
 #endif

@@ -605,6 +605,15 @@ bool VectorizedTableScanIterator::SupportsLateMaterialization() const {
          (m_batch_exhausted || m_curr_row_in_batch >= m_curr_batch_size);
 }
 
+std::unique_ptr<Morsel::ParallelSource> VectorizedTableScanIterator::CreateParallelSource(
+    ResMgmt::BoundedMemoryResource *memory, const std::pmr::vector<Field *> &fields) {
+  // An index scan serves rows in its own order, so it has to hand the scan
+  // direction over: only a forward candidate walk can be split into runs.
+  if (m_eof_reached) return {};
+  if (m_index_no < 0 && (m_operator_stats.rows_in || !SupportsLateMaterialization())) return {};
+  return down_cast<ha_rapid *>(table()->file)->create_parallel_source(memory, fields, m_reverse);
+}
+
 int VectorizedTableScanIterator::ReadPredicateBatch(std::pmr::vector<ColumnChunk> &chunks, size_t capacity,
                                                     size_t &rows, const std::pmr::vector<Field *> &fields) {
   rows = 0;
@@ -685,5 +694,270 @@ bool VectorizedTableScanIterator::PushbackBatchTail(const std::pmr::vector<Colum
                                  &m_lookahead_count,
                                  /*bytes_copied=*/nullptr);
 }
+}  // namespace Executor
+}  // namespace ShannonBase
+
+namespace ShannonBase {
+namespace Executor {
+namespace Morsel {
+
+ParallelScan::ParallelScan(ResMgmt::BoundedMemoryResource *memory, const Rapid_scan_context *snapshot,
+                           const std::vector<std::shared_ptr<Imcs::Imcu>> &imcus,
+                           const std::vector<std::unique_ptr<Imcs::Predicate>> &predicates,
+                           const std::pmr::vector<Field *> &fields, bool storage_index)
+    : m_snapshot(snapshot),
+      m_imcus(imcus),
+      m_predicates(predicates),
+      m_fields(fields, memory),
+      m_ordinal_bases(memory),
+      m_projection_charge(memory, fields.size() * sizeof(uint32_t)),
+      m_queue(memory),
+      m_storage_index(storage_index) {
+  m_projection.reserve(fields.size());
+  for (auto *field : fields) m_projection.push_back(field->field_index());
+  m_ordinal_bases.reserve(imcus.size());
+  uint64_t ordinal = 0;
+  for (size_t i = 0; i < imcus.size(); ++i) {
+    m_ordinal_bases.push_back(ordinal);
+    if (imcus[i]) {
+      const size_t rows = imcus[i]->get_row_count();
+      m_queue.Add(i, rows);
+      ordinal += rows;
+    }
+  }
+  m_max_ordinal = ordinal ? ordinal - 1 : 0;
+  // Storage still uses ordinary vectors. Bound their live payload from the
+  // actual projection and predicate shape, including old/new MVCC slot overlap
+  // and recursive temporary masks, instead of a fixed 256 KiB guess. This
+  // reservation is for storage scratch; all pipeline buffers use PMR directly.
+  size_t projected_width = 0, max_width = 0, depth = 0;
+  for (auto *field : fields) projected_width += Utils::Util::normalized_length(field);
+  for (const auto &imcu : imcus) {
+    if (!imcu) continue;
+    for (size_t col = 0; col < imcu->get_column_count(); ++col) {
+      const auto *cu = imcu->get_cu(col);
+      if (cu && cu->field()) max_width = std::max<size_t>(max_width, cu->field()->pack_length());
+    }
+    break;  // Every IMCU shares the table schema.
+  }
+  const auto visit = [&](const auto &self, const Imcs::Predicate *pred, size_t level) -> void {
+    depth = std::max(depth, level);
+    if (pred && pred->is_compound())
+      for (const auto &child : static_cast<const Imcs::Compound_Predicate *>(pred)->children)
+        self(self, child.get(), level + 1);
+  };
+  for (const auto &predicate : predicates) visit(visit, predicate.get(), 1);
+  constexpr size_t scan_rows = kBatchRows;
+  m_storage_scratch_bytes =
+      2 * (fields.size() * (sizeof(VisibleCell) + 3 * sizeof(void *)) + projected_width + 4 * max_width +
+           scan_rows * sizeof(const uchar *) + (depth + 3) * (sizeof(bit_array_t) + (scan_rows + 7) / 8) +
+           snapshot->m_schema_name.size() + snapshot->m_table_name.size() + 256);
+  DBUG_EXECUTE_IF("rapid_parallel_scan_budget", { m_test_budget_refusal = true; });
+}
+
+bool ParallelScan::ExecuteImpl(THD *worker, ResMgmt::BoundedMemoryResource *memory, const std::atomic<bool> &cancelled,
+                               const Consumer &consume) {
+  constexpr size_t capacity = kBatchRows;
+  ResMgmt::BoundedMemoryResource::Reservation scratch(memory, m_storage_scratch_bytes);
+  Rapid_scan_context context;
+  context.m_thd = worker;
+  context.m_trx = m_snapshot->m_trx;
+  context.m_extra_info.m_trxid = m_snapshot->m_extra_info.m_trxid;
+  context.m_extra_info.m_scn = m_snapshot->m_extra_info.m_scn;
+  context.m_schema_name = m_snapshot->m_schema_name;
+  context.m_table_name = m_snapshot->m_table_name;
+  context.limit = 0;
+  std::pmr::vector<ColumnChunk> chunks(memory);
+  std::pmr::vector<uint32_t> selection(memory);
+  // Scan compacts visible matches into dense chunks. FilterParallelSource may
+  // instead pass an explicit selection over its input chunks.
+  std::pmr::vector<uint64_t> ordinals(memory);
+  chunks.reserve(m_fields.size());
+  ordinals.reserve(capacity);
+  for (Field *field : m_fields) {
+    chunks.emplace_back(field, capacity, memory);
+    if (chunks.back().failed()) return true;
+  }
+  Task parallel;
+  while (!cancelled.load(std::memory_order_acquire) && m_queue.Claim(&parallel)) {
+    context.rows_returned = 0;
+    auto &imcu = m_imcus[parallel.partition];
+    if (m_storage_index && !m_predicates.empty() && imcu->can_skip_imcu(m_predicates)) continue;
+    for (size_t offset = 0; offset < parallel.count; offset += capacity) {
+      if (cancelled.load(std::memory_order_acquire)) return false;
+      for (auto &chunk : chunks) chunk.clear();
+      ordinals.clear();
+      bool failed = false;
+      const size_t count = std::min(capacity, parallel.count - offset);
+      // scan() takes a physical range length, so selective filters cannot run
+      // into a neighbouring parallel. Its mutation lock encloses all slot copies.
+      imcu->scan(&context, parallel.begin + offset, count, m_predicates, m_projection,
+                 [&](row_id_t id, const std::vector<const uchar *> &values) {
+                   if (failed) return;
+                   for (size_t col = 0; col < chunks.size(); ++col)
+                     if (!chunks[col].add(values[col], values[col] ? chunks[col].width() : 0, !values[col])) {
+                       failed = true;
+                       return;
+                     }
+                   ordinals.push_back(m_ordinal_bases[parallel.partition] + id - imcu->get_start_row());
+                 });
+      // scan() has returned: the shared mutation lock is no longer held.
+      // Hashing, joins, expression evaluation and spill I/O run only here.
+      if (failed) return true;
+      if (!ordinals.empty() && consume(chunks, ordinals.size(), selection, ordinals)) return true;
+    }
+  }
+  return false;
+}
+
+ParallelIndexScan::ParallelIndexScan(ResMgmt::BoundedMemoryResource *memory, const Rapid_scan_context *snapshot,
+                                     const std::vector<std::shared_ptr<Imcs::Imcu>> &imcus,
+                                     const std::vector<std::unique_ptr<Imcs::Predicate>> &predicates,
+                                     const std::pmr::vector<Field *> &fields, uint32_t rows_per_imcu,
+                                     Imcs::Index::ART *index, size_t row_bound)
+    : m_snapshot(snapshot),
+      m_imcus(imcus),
+      m_predicates(predicates),
+      m_fields(fields, memory),
+      m_offsets(memory),
+      m_runs(memory),
+      m_index(index),
+      m_row_bound(row_bound),
+      m_rows_per_imcu(rows_per_imcu) {
+  m_projection.reserve(fields.size());
+  for (auto *field : fields) m_projection.push_back(field->field_index());
+
+  // Same storage scratch shape as ParallelScan: predicates and the row gather
+  // are the only allocations a worker makes on top of the pipeline buffers.
+  size_t projected_width = 0, max_width = 0, depth = 0;
+  for (auto *field : fields) projected_width += Utils::Util::normalized_length(field);
+  for (const auto &imcu : imcus) {
+    if (!imcu) continue;
+    for (size_t col = 0; col < imcu->get_column_count(); ++col) {
+      const auto *cu = imcu->get_cu(col);
+      if (cu && cu->field()) max_width = std::max<size_t>(max_width, cu->field()->pack_length());
+    }
+    break;  // Every IMCU shares the table schema.
+  }
+  const auto visit = [&](const auto &self, const Imcs::Predicate *pred, size_t level) -> void {
+    depth = std::max(depth, level);
+    if (pred && pred->is_compound())
+      for (const auto &child : static_cast<const Imcs::Compound_Predicate *>(pred)->children)
+        self(self, child.get(), level + 1);
+  };
+  for (const auto &predicate : predicates) visit(visit, predicate.get(), 1);
+  constexpr size_t scan_rows = ParallelSource::kBatchRows;
+  m_storage_scratch_bytes =
+      2 * (fields.size() * (sizeof(VisibleCell) + 3 * sizeof(void *)) + projected_width + 4 * max_width +
+           scan_rows * sizeof(const uchar *) + (depth + 3) * (sizeof(bit_array_t) + (scan_rows + 7) / 8) +
+           snapshot->m_schema_name.size() + snapshot->m_table_name.size() + 256);
+}
+
+void ParallelIndexScan::Collect() {
+  // Candidates arrive in index order; a run is a maximal stretch inside one
+  // IMCU, so a worker materializes it with a single vectorised scan.
+  constexpr size_t kMaxCandidates = size_t{1} << 20;
+  std::pmr::vector<Run> runs(m_runs.get_allocator().resource());
+  std::pmr::vector<uint32_t> offsets(m_offsets.get_allocator().resource());
+  Imcs::Index::Art_Iterator walk(m_index);
+  walk.init_scan(nullptr, 0, true, nullptr, 0, false);
+  const uchar *key{nullptr};
+  uint32_t key_len{0};
+  row_id_t rowid{INVALID_ROW_ID};
+  size_t current_imcu = std::numeric_limits<size_t>::max();
+  uint64_t ordinal{0};
+  while (walk.next(&key, &key_len, &rowid)) {
+    if (rowid == INVALID_ROW_ID) continue;
+    const size_t imcu_idx = static_cast<size_t>(rowid / m_rows_per_imcu);
+    if (imcu_idx >= m_imcus.size() || !m_imcus[imcu_idx]) continue;
+    if (imcu_idx != current_imcu) {
+      current_imcu = imcu_idx;
+      runs.push_back({imcu_idx, ordinal, offsets.size(), 0});
+    }
+    offsets.push_back(static_cast<uint32_t>(rowid % m_rows_per_imcu));
+    ++runs.back().count;
+    ++ordinal;
+    if (ordinal > kMaxCandidates) return;  // Too large to hold: leave it serial.
+  }
+  m_offsets = std::move(offsets);
+  m_runs = std::move(runs);
+  m_max_ordinal.store(ordinal ? ordinal - 1 : 0, std::memory_order_release);
+  m_ready_runs.store(m_runs.size(), std::memory_order_release);
+}
+
+bool ParallelIndexScan::ExecuteImpl(THD *worker, ResMgmt::BoundedMemoryResource *memory,
+                                    const std::atomic<bool> &cancelled, const Consumer &consume) {
+  // The walk cannot be split, and it must not be paid before the caller has
+  // committed to a parallel phase: run it here, once.
+  std::call_once(m_collect, [&] { Collect(); });
+  if (m_runs.empty()) return false;
+  constexpr size_t capacity = ParallelSource::kBatchRows;
+  ResMgmt::BoundedMemoryResource::Reservation scratch(memory, m_storage_scratch_bytes);
+  Rapid_scan_context context;
+  context.m_thd = worker;
+  context.m_trx = m_snapshot->m_trx;
+  context.m_extra_info.m_trxid = m_snapshot->m_extra_info.m_trxid;
+  context.m_extra_info.m_scn = m_snapshot->m_extra_info.m_scn;
+  context.m_schema_name = m_snapshot->m_schema_name;
+  context.m_table_name = m_snapshot->m_table_name;
+  context.limit = 0;
+
+  std::pmr::vector<ColumnChunk> chunks(memory);
+  std::pmr::vector<uint32_t> selection(memory);
+  std::pmr::vector<uint64_t> ordinals(memory);
+  chunks.reserve(m_fields.size());
+  ordinals.reserve(capacity);
+  for (Field *field : m_fields) {
+    chunks.emplace_back(field, capacity, memory);
+    if (chunks.back().failed()) return true;
+  }
+
+  while (!cancelled.load(std::memory_order_acquire)) {
+    const size_t run_index = m_next_run.fetch_add(1, std::memory_order_relaxed);
+    if (run_index >= m_runs.size()) break;
+    const Run &run = m_runs[run_index];
+    if (run.imcu >= m_imcus.size()) return true;
+    const auto &imcu = m_imcus[run.imcu];
+    if (!imcu) continue;
+    context.rows_returned = 0;
+
+    for (size_t offset = 0; offset < run.count; offset += capacity) {
+      if (cancelled.load(std::memory_order_acquire)) return false;
+      for (auto &chunk : chunks) chunk.clear();
+      ordinals.clear();
+      const size_t count = std::min(capacity, run.count - offset);
+      // scan_rows_vectorized() reports rows in the order their offsets were
+      // given, so a single cursor over the run maps every callback back to the
+      // ordinal that candidate had in index order.
+      const uint32_t *offsets = m_offsets.data() + run.begin + offset;
+      size_t next_candidate = 0;
+      bool failed = false;
+      imcu->scan_rows_vectorized(&context, std::vector<uint32_t>(offsets, offsets + count), m_predicates, m_projection,
+                                 [&](row_id_t id, const std::vector<const uchar *> &values) {
+                                   if (failed) return;
+                                   const uint32_t offset_in_imcu = static_cast<uint32_t>(id % m_rows_per_imcu);
+                                   while (next_candidate < count && offsets[next_candidate] != offset_in_imcu)
+                                     ++next_candidate;
+                                   if (next_candidate == count) {
+                                     failed = true;
+                                     return;
+                                   }
+                                   for (size_t col = 0; col < chunks.size(); ++col) {
+                                     const uchar *value = values[col];
+                                     if (!chunks[col].add(value, value ? chunks[col].width() : 0, value == nullptr)) {
+                                       failed = true;
+                                       return;
+                                     }
+                                   }
+                                   ordinals.push_back(run.ordinal + offset + next_candidate);
+                                   ++next_candidate;
+                                 });
+      if (failed) return true;
+      if (!ordinals.empty() && consume(chunks, ordinals.size(), selection, ordinals)) return true;
+    }
+  }
+  return false;
+}
+}  // namespace Morsel
 }  // namespace Executor
 }  // namespace ShannonBase

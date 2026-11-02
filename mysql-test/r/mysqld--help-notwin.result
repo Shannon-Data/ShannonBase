@@ -1112,9 +1112,15 @@ The following options may be given as the first argument:
  --rapid-parallel-load-max[=#] 
  Max number of rows used to use parallel load for
  secondary_load from innodb to rapid engine..
+ --rapid-parallel-max-workers=# 
+ Process-wide native parallel worker limit; exhausted
+ pipelines execute serially.
  --rapid-parallel-part-load-threshold[=#] 
  Threshold number of part table used to use parallel load
  for secondary_load from innodb to rapid engine..
+ --rapid-parallel-workers=# 
+ Maximum workers per Rapid parallel pipeline; 1 keeps
+ serial execution.
  --rapid-propagation-mode[=name] 
  The synchronization mode of changes propagation:
  DIRECT_NOTIFICATION, REDO_LOG_PARSE, HYBRID
@@ -2038,7 +2044,9 @@ rapid-max-purger-timeout 30
 rapid-memory-size-max 2147483648
 rapid-min-versions-for-purge 10
 rapid-parallel-load-max 10000
+rapid-parallel-max-workers ####
 rapid-parallel-part-load-threshold 32
+rapid-parallel-workers 1
 rapid-propagation-mode DIRECT_NOTIFICATION
 rapid-purge-batch-size 64
 rapid-purge-efficiency-threshold 0.1

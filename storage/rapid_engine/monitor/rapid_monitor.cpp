@@ -188,6 +188,22 @@ void collect_rapid_monitor_metrics(Metrics &metrics) {
   metrics.query_vectorized_expression_rows_total =
       rapid_counters.query_vectorized_expression_rows_total.load(std::memory_order_relaxed);
   metrics.query_like_mask_rows_total = rapid_counters.query_like_mask_rows_total.load(std::memory_order_relaxed);
+  metrics.query_parallel_workers_total = rapid_counters.query_parallel_workers_total.load(std::memory_order_relaxed);
+  metrics.query_parallel_tasks_total = rapid_counters.query_parallel_tasks_total.load(std::memory_order_relaxed);
+  metrics.query_parallel_rows_total = rapid_counters.query_parallel_rows_total.load(std::memory_order_relaxed);
+  metrics.query_parallel_spills_total = rapid_counters.query_parallel_spills_total.load(std::memory_order_relaxed);
+  metrics.query_parallel_fallbacks_total =
+      rapid_counters.query_parallel_fallbacks_total.load(std::memory_order_relaxed);
+  metrics.query_parallel_join_build_rows_total =
+      rapid_counters.query_parallel_join_build_rows_total.load(std::memory_order_relaxed);
+  metrics.query_parallel_join_build_workers_total =
+      rapid_counters.query_parallel_join_build_workers_total.load(std::memory_order_relaxed);
+  metrics.query_parallel_join_finalize_partitions_total =
+      rapid_counters.query_parallel_join_finalize_partitions_total.load(std::memory_order_relaxed);
+  metrics.query_parallel_join_finalize_workers_total =
+      rapid_counters.query_parallel_join_finalize_workers_total.load(std::memory_order_relaxed);
+  metrics.query_parallel_join_build_fallbacks_total =
+      rapid_counters.query_parallel_join_build_fallbacks_total.load(std::memory_order_relaxed);
   metrics.query_like_scalar_rows_total = rapid_counters.query_like_scalar_rows_total.load(std::memory_order_relaxed);
   metrics.query_dictionary_predicate_rows_total =
       rapid_counters.query_dictionary_predicate_rows_total.load(std::memory_order_relaxed);

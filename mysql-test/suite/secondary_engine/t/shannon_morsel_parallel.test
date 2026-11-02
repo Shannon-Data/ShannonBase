@@ -1,0 +1,145 @@
+--source include/have_debug.inc
+--source include/have_debug_sync.inc
+--source include/no_ps_protocol.inc
+CREATE DATABASE rapid_parallel;
+USE rapid_parallel;
+SELECT @@session.rapid_parallel_workers;
+SET use_secondary_engine=OFF;
+SET cte_max_recursion_depth=70000;
+CREATE TABLE t(id INT PRIMARY KEY,g INT,n BIGINT,d DECIMAL(15,2),s VARCHAR(12) COLLATE utf8mb4_general_ci,c CHAR(2)) SECONDARY_ENGINE=rapid;
+INSERT INTO t WITH RECURSIVE seq AS (SELECT 1 n UNION ALL SELECT n+1 FROM seq WHERE n<70000)
+ SELECT n,MOD(n*7919,4000),IF(MOD(n,7)=0,NULL,n-35000),IF(MOD(n,11)=0,NULL,(n-35000)*1.25),
+ IF(MOD(n,13)=0,NULL,IF(MOD(n,2)=0,'Alpha','alpha ')),IF(MOD(n,3)=0,'x','y') FROM seq;
+ANALYZE TABLE t;
+ALTER TABLE t SECONDARY_LOAD;
+SET use_secondary_engine=FORCED;
+--disable_warnings
+SET optimizer_switch='hypergraph_optimizer=on';
+--enable_warnings
+SET secondary_engine_cost_threshold=0;
+--let $before = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_parallel_workers_total', Value, 1)
+--let $assert_query = SELECT SUM(d*2),AVG(n),COUNT(n),COUNT(*) FROM t
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_parallel_workers_total', Value, 1)
+if ($before != $after) {
+ --die Default worker count must preserve serial execution
+}
+--echo # Exact global/grouped results at 2/4/8 workers, including NULL and collation.
+--let $workers = 2
+while ($workers <= 8) {
+ eval SET SESSION rapid_parallel_workers=$workers;
+ --let $before = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_parallel_rows_total', Value, 1)
+ # 70000 rows are 72 batch windows of ParallelSource::kBatchRows and
+ # EnoughWorkForWorkers() demands 16 windows per worker, so 8 workers is past
+ # the engine's cost gate and legitimately replays serially. Assert the
+ # parallel counters only while the gate admits this worker count.
+ --let $gate = `SELECT (70000 + 4095) DIV 4096 * 4 >= 16*$workers`
+ --let $assert_query = SELECT SUM(d*(1-d)),AVG(d*2),COUNT(n*2),SUM(-n),COUNT(s),COUNT(*) FROM t
+ --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+ --let $after_global = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_parallel_rows_total', Value, 1)
+ --let $used = `SELECT IF($gate, $after_global-$before>=70000, 1)`
+ if ($used == 0) {
+  --die Global aggregate was not executed in a parallel pipeline
+ }
+ --let $assert_query = SELECT g,SUM(n),SUM(d*2),AVG(d),COUNT(n),COUNT(*) FROM t GROUP BY g
+ --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+ --let $after_group = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_parallel_rows_total', Value, 1)
+ --let $used = `SELECT IF($gate, $after_group-$after_global>=70000, 1)`
+ if ($used == 0) {
+  --die Grouped aggregate on g was not executed in a parallel pipeline
+ }
+ --let $assert_query = SELECT s,c,SUM(d),AVG(n*2),COUNT(*) FROM t GROUP BY s,c
+ --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+ --let $after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_parallel_rows_total', Value, 1)
+ --let $used = `SELECT IF($gate, $after-$after_group>=70000, 1)`
+ if ($used == 0) {
+  --die Grouped aggregate on s,c was not executed in a parallel pipeline
+ }
+ --let $workers = `SELECT $workers*2`
+}
+--echo # Preserve first-appearance group order without sorting the comparison.
+SET rapid_parallel_workers=1;
+--output $MYSQLTEST_VARDIR/log/parallel_serial.out
+SELECT g,SUM(n),SUM(d),COUNT(*) FROM t GROUP BY g;
+SET rapid_parallel_workers=4;
+--output $MYSQLTEST_VARDIR/log/parallel_workers.out
+SELECT g,SUM(n),SUM(d),COUNT(*) FROM t GROUP BY g;
+--diff_files $MYSQLTEST_VARDIR/log/parallel_serial.out $MYSQLTEST_VARDIR/log/parallel_workers.out
+SET debug='+d,rapid_parallel_tiny_budget';
+--output $MYSQLTEST_VARDIR/log/parallel_workers.out
+SELECT g,SUM(n),SUM(d),COUNT(*) FROM t GROUP BY g;
+--diff_files $MYSQLTEST_VARDIR/log/parallel_serial.out $MYSQLTEST_VARDIR/log/parallel_workers.out
+SET debug='-d,rapid_parallel_tiny_budget';
+--remove_file $MYSQLTEST_VARDIR/log/parallel_serial.out
+--remove_file $MYSQLTEST_VARDIR/log/parallel_workers.out
+--let $assert_query = SELECT g,SUM(d),AVG(n) FROM t GROUP BY g ORDER BY g DESC
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--echo # A genuine scan buffer budget refusal falls back without consuming input.
+SET debug='+d,rapid_parallel_scan_budget';
+--let $before = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_parallel_fallbacks_total', Value, 1)
+--let $assert_query = SELECT SUM(d),COUNT(*) FROM t
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_parallel_fallbacks_total', Value, 1)
+--let $retried = `SELECT $after>$before`
+if ($retried == 0) {
+ --die Scan budget refusal did not use serial replay
+}
+SET debug='-d,rapid_parallel_scan_budget';
+SET debug='+d,rapid_parallel_plan_budget';
+--let $assert_query = SELECT g,SUM(d),COUNT(*) FROM t GROUP BY g
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+SET debug='-d,rapid_parallel_plan_budget';
+--echo # Residual expression filter, empty input, prepared statement reexecution.
+--let $assert_query = SELECT g,SUM(d*n),COUNT(d*n) FROM t WHERE d>n GROUP BY g
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_query = SELECT SUM(d*2),COUNT(n) FROM t WHERE id<0
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+PREPARE stmt FROM 'SELECT SUM(d),AVG(n),COUNT(s) FROM t';
+EXECUTE stmt;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
+--echo # Local flush and partitioned merge combine repeated partial keys.
+SET SESSION debug='+d,rapid_parallel_tiny_budget';
+--let $before = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_parallel_spills_total', Value, 1)
+--let $assert_query = SELECT g,SUM(n),SUM(d*2),AVG(d),COUNT(n),COUNT(*) FROM t GROUP BY g
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_parallel_spills_total', Value, 1)
+--let $spilled = `SELECT $after>$before`
+if ($spilled == 0) {
+ --die Worker-local aggregate did not spill
+}
+SET SESSION debug='-d,rapid_parallel_tiny_budget';
+--echo # Speculative failure replays the original snapshot without duplicates.
+SET SESSION debug='+d,rapid_parallel_serial_retry';
+--let $assert_query = SELECT g,SUM(n),SUM(d),COUNT(*) FROM t GROUP BY g
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+SET SESSION debug='-d,rapid_parallel_serial_retry';
+--echo # Worker error is joined and reported; the following query can execute.
+SET SESSION debug='+d,rapid_parallel_worker_failure';
+--error ER_SECONDARY_ENGINE_PLUGIN
+SELECT SUM(d),COUNT(*) FROM t;
+SET SESSION debug='-d,rapid_parallel_worker_failure';
+--let $assert_query = SELECT SUM(d),COUNT(*) FROM t
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--echo # Killing a statement joins all workers before releasing its snapshot.
+--connect (killer,localhost,root,,rapid_parallel)
+--connection default
+--let $query_id = `SELECT CONNECTION_ID()`
+SET DEBUG_SYNC='rapid_parallel_workers_started SIGNAL parallel_started WAIT_FOR parallel_continue';
+--send SELECT SUM(d),COUNT(*) FROM t
+--connection killer
+SET DEBUG_SYNC='now WAIT_FOR parallel_started';
+--disable_query_log
+eval KILL QUERY $query_id;
+--enable_query_log
+SET DEBUG_SYNC='now SIGNAL parallel_continue';
+--connection default
+--error ER_QUERY_INTERRUPTED
+--reap
+SET DEBUG_SYNC='RESET';
+--disconnect killer
+--let $assert_query = SELECT SUM(d),COUNT(*) FROM t
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+SET use_secondary_engine=OFF;
+DROP DATABASE rapid_parallel;

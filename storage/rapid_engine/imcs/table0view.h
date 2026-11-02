@@ -64,15 +64,17 @@ struct RecieverBase {
 };
 
 struct ColumnChunkRecv : RecieverBase {
+  // Defined in table0view.cpp: the constructor resolves each projected
+  // column's storage width once, which needs a complete RapidCursor.
   ColumnChunkRecv(RapidCursor *c, const std::vector<uint32_t> &proj, std::pmr::vector<Executor::ColumnChunk> &ch,
-                  std::vector<row_id_t> &ids, size_t &cnt)
-      : cursor(c), projection_cols(proj), chunks(ch), row_ids(ids), read_cnt(cnt) {}
+                  std::vector<row_id_t> &ids, size_t &cnt);
 
   RapidCursor *cursor{nullptr};
   const std::vector<uint32_t> &projection_cols;
   std::pmr::vector<Executor::ColumnChunk> &chunks;
   std::vector<row_id_t> &row_ids;
   size_t &read_cnt;
+  std::vector<size_t> projection_lengths;
 
   /// Number of rows actually materialised into chunks (≤ rows examined).
   size_t rows_received() const { return read_cnt; }
@@ -189,6 +191,9 @@ class RapidCursor : public MemoryObject {
   int next_projected(size_t capacity, std::pmr::vector<Executor::ColumnChunk> &chunks, size_t &rows,
                      const std::vector<uint32_t> &projection);
   int complete_projection(std::pmr::vector<Executor::ColumnChunk> &chunks, const std::pmr::vector<uint32_t> &selection);
+  std::unique_ptr<Executor::Morsel::ParallelSource> create_parallel_source(ResMgmt::BoundedMemoryResource *memory,
+                                                                           const std::pmr::vector<Field *> &fields,
+                                                                           bool index_reverse = false);
 
   // Random-access / position
   int rnd_pos(uchar *buff, uchar *pos);

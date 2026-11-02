@@ -238,16 +238,18 @@ MemoryPool::Result MemoryPool::deallocate(void *ptr, size_t size [[maybe_unused]
   MemoryPool::Result res{MemoryPool::Result::OK};
   if (!ptr) return res;
 
-  std::scoped_lock lock(m_alloc_mutex);
-  auto it = m_allocations.find(ptr);
-  if (it == m_allocations.end()) return res;
-
-  const AllocationInfo info = it->second;
-  auto &subpool = m_subpools[info.pool_index];
+  AllocationInfo info;
   {
-    std::scoped_lock pool_lock(subpool->mutex);
-    insert_free_block(subpool.get(), FreeBlock{info.offset, info.aligned_size});
+    std::scoped_lock lock(m_alloc_mutex);
+    auto it = m_allocations.find(ptr);
+    if (it == m_allocations.end()) return res;
+    info = std::move(it->second);
+    m_allocations.erase(it);
   }
+  // Allocation holds the subpool lock before recording its metadata. Never
+  // acquire that lock while holding m_alloc_mutex: concurrent worker allocation
+  // and release would deadlock. Retire metadata/accounting before publishing the
+  // free block, so another worker cannot reuse this address prematurely.
 
   // Reverse exactly what record_allocation() booked. The caller's `size` is
   // advisory and routinely differs from it (align_up on the way in, a
@@ -260,7 +262,11 @@ MemoryPool::Result MemoryPool::deallocate(void *ptr, size_t size [[maybe_unused]
   m_stats.used_bytes.fetch_sub(info.actual_size, std::memory_order_relaxed);
   m_stats.allocated_bytes.fetch_sub(info.aligned_size, std::memory_order_relaxed);
   m_stats.deallocation_count.fetch_add(1, std::memory_order_relaxed);
-  m_allocations.erase(it);
+  auto &subpool = m_subpools[info.pool_index];
+  {
+    std::scoped_lock pool_lock(subpool->mutex);
+    insert_free_block(subpool.get(), FreeBlock{info.offset, info.aligned_size});
+  }
 
   return res;
 }
@@ -952,7 +958,7 @@ void *MemoryPool::aligned_alloc_portable(size_t alignment, size_t size) noexcept
 
 #if defined(_MSC_VER)
   return _aligned_malloc(adjusted_size, min_alignment);
-#elif defined(__STDC_VERSION__) && (__STDC_VERSION__ >= 201112L) && !defined(__APPLE__)
+#elif defined(__STDC_VERSION__) && (__STDC_VERSION__ >= 201112L) && !defined(SHANNON_MACOS_PLATFORM)
   return std::aligned_alloc(min_alignment, adjusted_size);
 #else
   void *ptr = nullptr;

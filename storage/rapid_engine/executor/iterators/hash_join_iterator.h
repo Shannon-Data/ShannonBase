@@ -32,6 +32,7 @@
 #include <cstdio>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <vector>
 #include "storage/rapid_engine/optimizer/runtime_bloom_filter.h"
 #include "storage/rapid_engine/resource_management/res_mgmt.h"
@@ -66,11 +67,13 @@ inline HashJoinGrowth PlanHashJoinGrowth(size_t used, size_t limit, size_t slot_
   if (old_slots > used || key_capacity > used - old_slots) return {};
 
   const auto grow = [max](size_t current, size_t required) {
+    constexpr size_t kInitialCapacity = 64;
+    constexpr size_t kGrowthFactor = 2;
     if (required <= current) return current;
-    size_t result = std::max<size_t>(64, current);
+    size_t result = std::max<size_t>(kInitialCapacity, current);
     while (result < required) {
-      if (result > max / 2) return required;
-      result *= 2;
+      if (result > max / kGrowthFactor) return required;
+      result *= kGrowthFactor;
     }
     return result;
   };
@@ -185,9 +188,36 @@ class VectorizedHashJoinIterator final : public RowIterator, public BatchReadabl
   bool SupportsBatchRead() const override;
   std::shared_ptr<Compress::Dictionary> Dictionary(const Field *field) const override;
   int ReadBatch(std::pmr::vector<ColumnChunk> &col_chunks, size_t capacity, size_t &rows_read) override;
+  std::unique_ptr<Morsel::ParallelSource> CreateParallelSource(ResMgmt::BoundedMemoryResource *memory,
+                                                               const std::pmr::vector<Field *> &fields) override;
   bool PushbackBatchTail(const std::pmr::vector<ColumnChunk> &chunks, size_t from_row, size_t total_rows) override;
 
  private:
+  // Morsel adapter that lets workers probe this join's published hash state.
+  // A build barrier precedes publication: only worker-local probe/output
+  // buffers change afterwards, and workers never drive either SQL child
+  // iterator. The definitions live in hash_join_iterator.cpp.
+  class JoinParallelSource final : public Morsel::ParallelSource {
+   public:
+    JoinParallelSource(VectorizedHashJoinIterator *join, ResMgmt::BoundedMemoryResource *memory);
+
+    // Morsel::ParallelSource interface
+    size_t tasks() const override;
+    uint64_t max_ordinal() const override { return child->max_ordinal() * ordinal_stride + ordinal_stride - 1; }
+    size_t extra_scratch_bytes() const override;
+    bool needs_serial_retry() const override;
+    void CommitStats() override;
+    bool ExecuteImpl(THD *worker, ResMgmt::BoundedMemoryResource *memory, const std::atomic<bool> &cancelled,
+                     const Consumer &consume) override;
+
+    VectorizedHashJoinIterator *join;
+    std::unique_ptr<Morsel::ParallelSource> child;
+    uint64_t ordinal_stride{1};
+    std::pmr::vector<Field *> output_fields, probe_fields, key_fields;
+    std::mutex stats_mutex;
+    PerformanceStats pending_stats;
+  };
+
   CardinalityObservation m_cardinality;
   enum class State { BUILDING_HASH_TABLE = 0, PROBING_HASH_TABLE, END_OF_ROWS };
 
@@ -203,6 +233,12 @@ class VectorizedHashJoinIterator final : public RowIterator, public BatchReadabl
 
   // Build hash table from build input
   bool BuildHashTable();
+  // -1: untouched input, use the serial/spilling builder; 0: published; 1: error.
+  int TryBuildParallelHashTable();
+  struct ParallelBuildState;
+  std::unique_ptr<ParallelBuildState> m_parallel_build;
+  // Resolve a canonical build row into its exclusively built column partition.
+  const std::pmr::vector<ColumnChunk> &BuildColumns(size_t *row) const;
   void BuildRuntimeFilter();
   void PublishBloomStats();
   Optimizer::Utils::RuntimeBloomPolicy RuntimeFilterPolicy() const;
@@ -286,7 +322,8 @@ class VectorizedHashJoinIterator final : public RowIterator, public BatchReadabl
     bool RewindForRead();
 
     ResMgmt::MemoryBudget::Reservation memory;
-    std::array<char, 4096> buffer;
+    static constexpr size_t kIoBufferBytes = 4096;
+    std::array<char, kIoBufferBytes> buffer;
     std::FILE *file{nullptr};
     uint64_t records{0};
     size_t bytes_written{0};
@@ -465,6 +502,7 @@ class VectorizedHashJoinIterator final : public RowIterator, public BatchReadabl
 
   // Target load factor (rows per bucket); trade-off between memory and probe cost.
   static constexpr size_t kTargetLoadFactor = 4;
+  static constexpr size_t kMinHashBuckets = 1024;
 
   // ResetHashTable() sizes buckets from the optimizer's estimate, the only
   // number available before the build side is read. Rehash at 4x target so

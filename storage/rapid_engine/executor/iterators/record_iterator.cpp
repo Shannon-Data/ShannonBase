@@ -184,7 +184,7 @@ bool VectorizedRecordIterator::Init() {
   size_t column_count{0}, row_bytes{sizeof(uint64_t)};
   for (const auto &entry : m_tables.tables()) column_count += entry.table->s->fields;
 
-  if (!TryReserve(m_encodings, column_count)) return BatchError();
+  if (!Reserve(m_encodings, column_count)) return BatchError();
 
   for (const auto &entry : m_tables.tables()) {
     TABLE *table = entry.table;
@@ -197,13 +197,13 @@ bool VectorizedRecordIterator::Init() {
     }
   }
 
-  if (!TryReserve(m_decode_storage, decode_width)) return BatchError();
+  if (!Reserve(m_decode_storage, decode_width)) return BatchError();
   if (m_decode_storage.size() < decode_width) m_decode_storage.resize(decode_width);
   if (!PrepareBudgetedString(&m_resume, &m_resume_storage, pack_rows::ComputeRowSizeUpperBound(m_tables)))
     return BatchError();
 
   m_batch_capacity = SelectBatchRows(row_bytes, m_memory.limit() - m_memory.used(), 2);
-  if (m_batch_capacity == 0 || !TryReserve(m_batch_nulls, m_batch_capacity)) return BatchError();
+  if (m_batch_capacity == 0 || !Reserve(m_batch_nulls, m_batch_capacity)) return BatchError();
   DBUG_EXECUTE_IF("rapid_nlj_aux_bad_alloc", { return BatchError(); });
 
   if (m_source->Init()) return true;
@@ -383,7 +383,7 @@ int VectorizedRecordIterator::Read() {
       size_t count{0};
       for (const auto &entry : m_tables.tables()) count += entry.table->s->fields;
 
-      if (!TryReserve(m_scalar_chunks, count)) return BatchError();
+      if (!Reserve(m_scalar_chunks, count)) return BatchError();
 
       for (const auto &entry : m_tables.tables())
         for (uint i = 0; i < entry.table->s->fields; ++i) {
@@ -489,7 +489,7 @@ bool VectorizedRecordIterator::PushbackBatchTailImpl(const std::pmr::vector<Colu
   if (total > m_batch_nulls.size()) return BatchError();
 
   std::pmr::vector<uint64_t> flags(&m_memory);
-  if (!TryReserve(flags, total - from + m_tail_count)) return BatchError();
+  if (!Reserve(flags, total - from + m_tail_count)) return BatchError();
   flags.insert(flags.end(), m_batch_nulls.begin() + from, m_batch_nulls.begin() + total);
   flags.insert(flags.end(), m_tail_nulls.begin() + m_tail_start, m_tail_nulls.begin() + m_tail_start + m_tail_count);
   if (PushbackBatchTailShared(chunks, from, total, &m_tail, &m_tail_start, &m_tail_count, &m_stats.bytes_copied,
@@ -646,10 +646,10 @@ int VectorizedLookup::Error(int error) {
 bool VectorizedLookup::SaveCache(const std::pmr::vector<ColumnChunk> &chunks) {
   if (m_ref->disable_cache || m_cache_disabled) return true;
   DBUG_EXECUTE_IF("rapid_batch_lookup_cache_bad_alloc", { return false; });
-  if (!TryReserve(m_key, m_ref->key_length)) return false;
+  if (!Reserve(m_key, m_ref->key_length)) return false;
   m_key.assign(m_ref->key_buff, m_ref->key_buff + m_ref->key_length);
   if (m_cached.empty()) {
-    if (!TryReserve(m_cached, chunks.size())) return false;
+    if (!Reserve(m_cached, chunks.size())) return false;
     for (const auto &chunk : chunks) {
       m_cached.emplace_back(chunk.valid() ? chunk.source_field() : nullptr, 1, &m_memory);
       if (m_cached.back().failed()) return false;

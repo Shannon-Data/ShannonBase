@@ -171,6 +171,7 @@ ENDIF()
 
 # --- Iterators and optimizer ---
 SET(SHANNON_ITERATOR_SOURCES
+    executor/executor.cpp
     executor/iterators/iterator.cpp
     executor/iterators/aggregate_iterator.cpp
     executor/iterators/expression_iterator.cpp

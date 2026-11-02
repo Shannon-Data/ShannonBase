@@ -27,21 +27,27 @@
  * from this.
  * vectorized hash join iterator impl for rapid engine.
  *
- * Vectorized, not parallelized: the whole executor is single-threaded, and
- * ColumnChunk is deliberately single-consumer (see iterator.h).
+ * Native parallel workers own their mutable buffers. Build publication separates
+ * partition-exclusive construction from read-only probing; SQL row boundaries
+ * remain on the foreground thread.
  */
-#include "sql/debug_sync.h"
-
 #include "storage/rapid_engine/executor/iterators/hash_join_iterator.h"
 
+#include <xxhash.h>
+
+#include <array>
+#include <climits>
 #include <cstdio>
 #include <cstring>
+#include <list>
+#include <new>
+#include <optional>
 
-#include <xxhash.h>
 #include "sql/current_thd.h"
+#include "sql/debug_sync.h"
 #include "sql/item_cmpfunc.h"  //Item_eq_base
+#include "sql/opt_trace.h"
 #include "storage/rapid_engine/compress/dictionary/dictionary.h"
-
 #include "storage/rapid_engine/executor/iterators/table_scan_iterator.h"
 #include "storage/rapid_engine/imcs/imcs.h"
 #include "storage/rapid_engine/monitor/rapid_monitor.h"
@@ -50,6 +56,49 @@
 namespace ShannonBase {
 namespace Executor {
 namespace {
+// Policy choices; stored-data sizes are derived from their types.
+constexpr size_t kCapacityGrowthFactor = 2;
+constexpr size_t kInitialAppendCapacity = 64;  // initial vector element count, not bytes
+constexpr size_t kBuildGrantDivisor = 2;
+constexpr size_t kAuxiliaryGrantDivisor = 4;
+constexpr size_t kInputWorkspaceDivisor = kAuxiliaryGrantDivisor * 2;
+constexpr size_t kGrowthHeadroomDivisor = 4;
+constexpr size_t kMinimumJoinGrant = 4 * SHANNON_MB;
+constexpr size_t kBucketConstructionArrays = 2;  // heads and construction-only tails
+constexpr size_t kBucketBudgetDivisor = 4;
+constexpr size_t kFinalizeCacheDivisor = 4;  // leave L2 for source tuples and other operators
+constexpr size_t kMinimumParallelWorkers = 2;
+constexpr size_t kBloomMinimumBuildRows = 128;
+constexpr double kBloomMinimumProbeRatio = 2.0;
+constexpr size_t kBloomFirstSampleRows = 4 * SHANNON_KB;
+constexpr size_t kBloomResampleRows = 64 * SHANNON_KB;
+constexpr size_t kAllocatorOverheadAllowance = CACHE_LINE_SIZE;
+// The decimal text bound also bounds its binary encoding. Include the
+// multi-column length/type byte and the NULL-safe-equality byte.
+constexpr size_t kScalarJoinKeyBufferBytes = DECIMAL_MAX_STR_LENGTH + 2 * sizeof(uint8_t);
+constexpr size_t kStringJoinKeyTagsBytes = sizeof(uint32_t) + sizeof(uint8_t);
+
+size_t CeilDivide(size_t value, size_t divisor) { return value / divisor + (value % divisor != 0); }
+size_t SaturatingMultiply(size_t left, size_t right) {
+  return right && left > SIZE_MAX / right ? SIZE_MAX : left * right;
+}
+
+size_t InitialJoinBatchRows(const pack_rows::TableCollection &build, const pack_rows::TableCollection &probe,
+                            size_t grant) {
+  size_t row_bytes = 0;
+  for (const auto *tables : {&build, &probe}) {
+    for (const auto &table : tables->tables()) {
+      for (const auto &column : table.columns) {
+        row_bytes += std::max<size_t>(column.field->pack_length(), Utils::Util::normalized_length(column.field)) +
+                     sizeof(uint8_t);
+      }
+    }
+  }
+
+  return std::max<size_t>(
+      1, std::min(Morsel::ParallelSource::kBatchRows, SelectBatchRows(row_bytes, grant / kInputWorkspaceDivisor)));
+}
+
 // Keep allocation refusal local: iterator callers use status returns, and a
 // budget refusal must not escape into the SQL executor as a C++ exception.
 template <class Allocate>
@@ -63,28 +112,58 @@ bool AllocateJoinAux(Allocate allocate) {
 
 inline size_t RetainedBuildLimit(size_t requested, size_t grant) {
   // A caller's old unlimited sentinel must not bypass the operator grant.
-  return std::min(requested == 0 ? grant : requested, grant / 2);
+  return std::min(requested == 0 ? grant : requested, grant / kBuildGrantDivisor);
 }
 
 size_t ColumnChunkStorageBytes(const ColumnChunk &chunk, size_t capacity) {
   if (!chunk.valid() || chunk.width() == 0 || capacity == 0) return 0;
   if (capacity > std::numeric_limits<size_t>::max() / chunk.width()) return std::numeric_limits<size_t>::max();
+
   const size_t data_bytes = capacity * chunk.width();
-  const size_t null_bytes = (capacity + 7) / 8;
+  const size_t null_bytes = CeilDivide(capacity, CHAR_BIT);
   if (null_bytes > SIZE_MAX - sizeof(bit_array_t) || data_bytes > SIZE_MAX - null_bytes - sizeof(bit_array_t))
     return SIZE_MAX;
+
   return data_bytes + null_bytes + sizeof(bit_array_t);
 }
 
 size_t GrowthCapacity(size_t current, size_t required) {
-  size_t capacity = current == 0 ? 64 : current;
+  size_t capacity = current == 0 ? kInitialAppendCapacity : current;
   while (capacity < required) {
-    if (capacity > std::numeric_limits<size_t>::max() / 2) return required;
-    capacity *= 2;
+    if (capacity > std::numeric_limits<size_t>::max() / kCapacityGrowthFactor) return required;
+    capacity *= kCapacityGrowthFactor;
   }
   return capacity;
 }
 }  // namespace
+
+// Final columns remain partitioned: Combine never copies all tuples through
+// the foreground. Buckets/slots keep the existing probe format. Low hash bits
+// assign each bucket to exactly one finalize task; its matching rows retain
+// source ordinal order, including duplicate keys.
+struct VectorizedHashJoinIterator::ParallelBuildState {
+  struct Partition {
+    explicit Partition(ResMgmt::BoundedMemoryResource *memory) : columns(memory) {}
+    size_t begin{0}, count{0};
+    std::pmr::vector<ColumnChunk> columns;
+  };
+  explicit ParallelBuildState(ResMgmt::BoundedMemoryResource *memory)
+      : charge(memory, sizeof(ParallelBuildState)), partitions(memory) {}
+  ResMgmt::BoundedMemoryResource::Reservation charge;
+  std::pmr::vector<Partition> partitions;
+};
+
+const std::pmr::vector<ColumnChunk> &VectorizedHashJoinIterator::BuildColumns(size_t *row) const {
+  if (!m_parallel_build) return m_build_columns;
+  const auto &parts = m_parallel_build->partitions;
+  const auto it = std::upper_bound(parts.begin(), parts.end(), *row,
+                                   [](size_t index, const auto &part) { return index < part.begin; });
+  assert(it != parts.begin());
+  const auto &part = *std::prev(it);
+  *row -= part.begin;
+  assert(*row < part.count);
+  return part.columns;
+}
 
 VectorizedHashJoinIterator::VectorizedHashJoinIterator(
     THD *thd, unique_ptr_destroy_only<RowIterator> build_input, const Prealloced_array<TABLE *, 4> &build_input_tables,
@@ -98,12 +177,12 @@ VectorizedHashJoinIterator::VectorizedHashJoinIterator(
       // Recursive 16-way partitions need workspace independently of the build
       // buffer. This is a request; global/query/operator caps still take precedence.
       m_memory_reservation(ResMgmt::reserve_query_memory(thd, ResMgmt::QueryMemoryOperator::kHashJoin,
-                                                         std::max<size_t>(max_memory_available, 4 * 1024 * 1024))),
+                                                         std::max<size_t>(max_memory_available, kMinimumJoinGrant))),
       m_spill_memory(m_memory_reservation.bytes() -
                          RetainedBuildLimit(max_memory_available, m_memory_reservation.bytes()) -
-                         m_memory_reservation.bytes() / 4,
+                         m_memory_reservation.bytes() / kAuxiliaryGrantDivisor,
                      m_memory_reservation.bytes()),
-      m_aux_memory(m_memory_reservation.bytes() / 4),
+      m_aux_memory(m_memory_reservation.bytes() / kAuxiliaryGrantDivisor),
       m_build_memory(RetainedBuildLimit(max_memory_available, m_memory_reservation.bytes())),
       m_cardinality(estimated_output_rows),
       m_build_input(std::move(build_input)),
@@ -112,7 +191,7 @@ VectorizedHashJoinIterator::VectorizedHashJoinIterator(
       m_probe_input_tables(probe_input_tables, store_rowids, store_rowids ? tables_to_get_rowid_for : 0, 0),
       m_join_type(join_type),
       m_max_memory_available(RetainedBuildLimit(max_memory_available, m_memory_reservation.bytes())),
-      m_batch_size(std::max<size_t>(128, std::min<size_t>(1024, max_memory_available / 1024))),  // Adaptive batch size
+      m_batch_size(InitialJoinBatchRows(m_build_input_tables, m_probe_input_tables, m_memory_reservation.bytes())),
       m_allow_spill_to_disk(allow_spill_to_disk),
       m_probe_input_batch_mode(probe_input_batch_mode),
       m_tables_to_get_rowid_for(store_rowids ? tables_to_get_rowid_for : 0),
@@ -186,7 +265,7 @@ bool VectorizedHashJoinIterator::TryGrowBuildBudget() {
   const size_t current = m_memory_reservation.bytes();
   if (current == 0) return false;
 
-  const size_t want = current > SIZE_MAX / 2 ? current : current * 2;
+  const size_t want = current > SIZE_MAX / kCapacityGrowthFactor ? current : current * kCapacityGrowthFactor;
   size_t granted = current;
   // The governor may allocate STL metadata while collecting eviction victims.
   // Preserve any partial grant obtained before that metadata allocation failed.
@@ -202,7 +281,7 @@ bool VectorizedHashJoinIterator::TryGrowBuildBudget() {
   const size_t build = RetainedBuildLimit(granted, granted);
   // A prior Bloom eviction may have reduced the parent grant while leaving
   // live probe buffers intact. Charge those before assigning the remainder.
-  const size_t auxiliary = std::max<size_t>(granted / 4, m_aux_memory.used());
+  const size_t auxiliary = std::max<size_t>(granted / kAuxiliaryGrantDivisor, m_aux_memory.used());
   if (auxiliary > granted - build || !m_spill_memory.set_limits(granted - build - auxiliary, granted)) {
     // A build can only grow before spilling, so no live workspace can prevent
     // this increase. Keep the prior split if that invariant ever changes.
@@ -224,7 +303,7 @@ void VectorizedHashJoinIterator::MaybeGrowBuildBudget() {
   const size_t used = m_build_memory.used();
   // Grow at three quarters so the next batch never has to unwind: a failed
   // batch read has already consumed rows from the child.
-  if (used < m_max_memory_available - m_max_memory_available / 4) return;
+  if (used < m_max_memory_available - m_max_memory_available / kGrowthHeadroomDivisor) return;
   if (!TryGrowBuildBudget()) m_build_growth_exhausted = true;
 }
 
@@ -269,8 +348,10 @@ bool VectorizedHashJoinIterator::Init() {
   m_lookahead_count = 0;
   m_lookahead_start = 0;
   m_probe_resume_row = kInvalidHashSlot;
+
   decltype(m_lookahead_chunks)(&m_aux_memory).swap(m_lookahead_chunks);
   decltype(m_chunk_map)(&m_aux_memory).swap(m_chunk_map);
+
   m_bloom.reset();
   m_bloom_active = false;
   m_bloom_sample_checks = m_bloom_sample_rejects = 0;
@@ -284,16 +365,21 @@ bool VectorizedHashJoinIterator::Init() {
   m_spilled = false;
   m_spill_output_ready = false;
   m_probe_ordinal_counter = 0;
+
   for (auto &f : m_build_partitions) f.reset();
   for (auto &f : m_probe_partitions) f.reset();
+
   decltype(m_output_runs)(&m_aux_memory).swap(m_output_runs);
+
   m_unmatched_run.reset();
+
   decltype(m_merge_heads)(&m_aux_memory).swap(m_merge_heads);
   decltype(m_probe_ordinals)(&m_aux_memory).swap(m_probe_ordinals);
   decltype(m_spill_zero_build)(&m_aux_memory).swap(m_spill_zero_build);
   decltype(m_block_prev_flags)(&m_aux_memory).swap(m_block_prev_flags);
   decltype(m_block_matched)(&m_aux_memory).swap(m_block_matched);
   decltype(m_spill_row_buffer)(&m_aux_memory).swap(m_spill_row_buffer);
+
   m_build_capacity_exceeded = false;
   m_pending_build_rows = 0;
   m_spill_rows = 0;
@@ -319,17 +405,23 @@ bool VectorizedHashJoinIterator::Init() {
   // Check for hash table reuse optimization
   if (m_hash_table_gen != nullptr && *m_hash_table_gen == m_last_hash_table_gen && !m_build_columns.empty()) {
     UpdateBuildMemoryPeak();
+
     if (BuildMemoryWouldExceed(0)) return ReportBuildMemoryLimit();
+
     BuildRuntimeFilter();
+
     m_state = State::PROBING_HASH_TABLE;
     m_curr_probe_size = 0;
+
     ResetProbeCursor();
+
     if (m_probe_input->Init()) return true;
     if (m_probe_input_batch_mode) m_probe_input->StartPSIBatchMode();
     return false;
   }
 
   if (m_build_input->Init() || m_probe_input->Init()) return true;
+  m_parallel_build.reset();
 
   m_build_batch_input = dynamic_cast<BatchReadable *>(m_build_input.get());
   if (m_build_batch_input == nullptr)
@@ -395,7 +487,7 @@ bool VectorizedHashJoinIterator::Init() {
 
   size_t key_bytes{0};
   for (const auto &condition : m_join_conditions) {
-    size_t part = 80;  // integer, double, decimal and direct-key tags
+    size_t part = kScalarJoinKeyBufferBytes;  // integer, double, decimal and direct-key tags
     auto *eq = condition.join_condition();
     if (eq->compare_type() == STRING_RESULT || eq->compare_type() == ROW_RESULT) {
       const auto *cs = eq->compare_collation();
@@ -403,7 +495,8 @@ bool VectorizedHashJoinIterator::Init() {
         my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid hash join key exceeds its memory budget");
         return true;
       }
-      part = std::max(part, size_t(cs->coll->strnxfrmlen(cs, condition.max_character_length() * cs->mbmaxlen)) + 8);
+      part = std::max(part, size_t(cs->coll->strnxfrmlen(cs, condition.max_character_length() * cs->mbmaxlen)) +
+                                kStringJoinKeyTagsBytes);
     }
 
     if (part > UINT32_MAX - key_bytes) {
@@ -429,7 +522,7 @@ bool VectorizedHashJoinIterator::PrepareInputWorkspace() {
   // Bound fixed input chunks before allocation. The build-side retained chunks
   // have their own budget; probe and child batch chunks share this allowance.
   // Half of this workspace remains available for keys, merge and lookahead.
-  const size_t limit = m_memory_reservation.bytes() / 8;
+  const size_t limit = m_memory_reservation.bytes() / kInputWorkspaceDivisor;
   const auto fits = [&](size_t capacity) {
     size_t used{0};
     size_t allowance{limit};
@@ -444,7 +537,7 @@ bool VectorizedHashJoinIterator::PrepareInputWorkspace() {
         if (!required) return true;
         const size_t width = row_image ? field->pack_length() : Utils::Util::normalized_length(field);
         if (width > (allowance - used) / capacity) return false;
-        return add(width * capacity) && add((capacity + 7) / 8) && add(sizeof(bit_array_t));
+        return add(width * capacity) && add(CeilDivide(capacity, CHAR_BIT)) && add(sizeof(bit_array_t));
       };
       if (input_layout && tables.tables().size() == 1) {
         const auto &packed = tables.tables()[0];
@@ -500,7 +593,7 @@ bool VectorizedHashJoinIterator::InitializeColumnChunks(const pack_rows::TableCo
   if (input_layout && tables.tables().size() == 1) {
     const pack_rows::Table &packed_table = tables.tables()[0];
     TABLE *table = packed_table.table;
-    if (!TryReserve(chunks, table->s->fields))
+    if (!Reserve(chunks, table->s->fields))
       return AllocationError("Rapid hash join input descriptors allocation failed");
 
     for (uint field_idx = 0; field_idx < table->s->fields; ++field_idx) {
@@ -522,7 +615,7 @@ bool VectorizedHashJoinIterator::InitializeColumnChunks(const pack_rows::TableCo
   size_t column_count{0};
   for (const auto &table : tables.tables()) column_count += table.columns.size();
 
-  if (!TryReserve(chunks, column_count)) return AllocationError("Rapid hash join column descriptors allocation failed");
+  if (!Reserve(chunks, column_count)) return AllocationError("Rapid hash join column descriptors allocation failed");
 
   for (const pack_rows::Table &table : tables.tables()) {
     for (const pack_rows::Column &column : table.columns) {
@@ -651,7 +744,7 @@ std::unique_ptr<VectorizedHashJoinIterator::SpillFile> VectorizedHashJoinIterato
   // sizeof(SpillFile) already includes its owned 4096-byte stdio buffer.
   // Charging that buffer twice exhausted the workspace while retaining many
   // ordered runs, even though the actual buffers still fit the grant.
-  constexpr size_t bytes = sizeof(SpillFile) + sizeof(std::FILE) + 64;
+  constexpr size_t bytes = sizeof(SpillFile) + sizeof(std::FILE) + kAllocatorOverheadAllowance;
   ResMgmt::MemoryBudget::Reservation memory;
   if (!TryAllocation([&] { memory = m_spill_memory.reserve(nullptr, bytes, bytes); })) {
     AllocationError("Rapid hash join spill reservation metadata allocation failed");
@@ -867,7 +960,7 @@ bool VectorizedHashJoinIterator::EnsureHashCapacity(size_t required_slots, size_
   // valid: spill now instead of failing the statement. The budget accounting
   // and the resource's own counter can disagree slightly (allocation rounding),
   // and a statement must not die for that.
-  if (!TryReserve(m_hash_slots, new_slots) || !TryReserve(m_hash_key_arena, new_keys)) {
+  if (!Reserve(m_hash_slots, new_slots) || !Reserve(m_hash_key_arena, new_keys)) {
     if (m_build_memory.last_failure() == ResMgmt::AllocationFailure::kPoolExhausted) {
       m_build_error = true;
       return AllocationError("Rapid hash join memory pool exhausted");
@@ -913,7 +1006,7 @@ std::shared_ptr<Compress::Dictionary> VectorizedHashJoinIterator::Dictionary(con
 bool VectorizedHashJoinIterator::RestoreColumn(const ColumnChunk &chunk, size_t row, bool row_image) {
   Field *field = chunk.source_field();
   if (auto dictionary = row_image ? nullptr : Dictionary(field)) {
-    if (chunk.width() != sizeof(uint32_t) || !TryReserve(m_dictionary_decode, field->pack_length()))
+    if (chunk.width() != sizeof(uint32_t) || !Reserve(m_dictionary_decode, field->pack_length()))
       return AllocationError("Rapid hash join dictionary decode allocation failed");
     m_dictionary_decode.resize(field->pack_length());
     uint32_t code;
@@ -1030,7 +1123,9 @@ int VectorizedHashJoinIterator::ReadImpl() {
       // and LoadRowFromColumnChunks() records that with set_null_row().
       // Clearing afterwards wiped it, emptying the anti-join -- TPC-H Q22.
       m_build_input->SetNullRowFlag(false);
-      if (LoadRowFromColumnChunks(m_build_columns, output_row.build_row_idx, m_build_input_tables)) return 1;
+      size_t build_row = output_row.build_row_idx;
+      const auto &columns = BuildColumns(&build_row);
+      if (LoadRowFromColumnChunks(columns, build_row, m_build_input_tables)) return 1;
       ++m_stats.output_row_materializations;
     }
     return 0;
@@ -1044,14 +1139,14 @@ bool VectorizedHashJoinIterator::ResetHashTable(double expected_rows) {
   decltype(m_hash_key_arena)(&m_build_memory).swap(m_hash_key_arena);
 
   size_t desired = static_cast<size_t>(std::max(0.0, expected_rows)) / kTargetLoadFactor;
-  desired = std::max<size_t>(1024, std::min<size_t>(desired, 1ULL << 28));
+  desired = std::max<size_t>(kMinHashBuckets, std::min<size_t>(desired, kMaxHashBuckets));
 
   if (m_max_memory_available > 0) {
     const size_t used = CurrentBuildMemoryUsage();
     if (used >= m_max_memory_available) return true;
     const size_t remaining = m_max_memory_available - used;
-    const size_t max_bucket_bytes = remaining / 4;
-    const size_t max_buckets = max_bucket_bytes / (2 * sizeof(size_t));
+    const size_t max_bucket_bytes = remaining / kBucketBudgetDivisor;
+    const size_t max_buckets = max_bucket_bytes / (kBucketConstructionArrays * sizeof(size_t));
     if (max_buckets == 0) return true;
     desired = std::min(desired, max_buckets);
   }
@@ -1059,9 +1154,10 @@ bool VectorizedHashJoinIterator::ResetHashTable(double expected_rows) {
   m_hash_table_size = 1;
   while (m_hash_table_size <= desired / 2) m_hash_table_size <<= 1;
 
-  if (m_hash_table_size > std::numeric_limits<size_t>::max() / (2 * sizeof(size_t))) return true;
+  if (m_hash_table_size > std::numeric_limits<size_t>::max() / (kBucketConstructionArrays * sizeof(size_t)))
+    return true;
   // Reserve first: a refused reserve leaves the table untouched.
-  if (!TryReserve(m_hash_buckets, m_hash_table_size) || !TryReserve(m_hash_bucket_tails, m_hash_table_size)) {
+  if (!Reserve(m_hash_buckets, m_hash_table_size) || !Reserve(m_hash_bucket_tails, m_hash_table_size)) {
     my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid vectorized hash join could not allocate hash buckets");
     return true;
   }
@@ -1090,7 +1186,7 @@ void VectorizedHashJoinIterator::GrowHashTableIfNeeded() {
   // Both tables are live at once while the new ones are filled, so the budget
   // has to cover the new pair on top of the old -- not just the delta.
   // Refusing to grow is fine: longer chains are slower, not wrong.
-  const size_t extra = new_size * 2 * sizeof(size_t);
+  const size_t extra = new_size * kBucketConstructionArrays * sizeof(size_t);
   if (BuildMemoryWouldExceed(extra)) return;
 
   // Built beside the live tables and committed with swap(). assign()-ing the
@@ -1100,7 +1196,7 @@ void VectorizedHashJoinIterator::GrowHashTableIfNeeded() {
   // unreachable, so the join silently returned too few rows.
   std::pmr::vector<size_t> new_buckets(&m_build_memory);
   std::pmr::vector<size_t> new_tails(&m_build_memory);
-  if (!TryReserve(new_buckets, new_size) || !TryReserve(new_tails, new_size)) return;
+  if (!Reserve(new_buckets, new_size) || !Reserve(new_tails, new_size)) return;
   new_buckets.assign(new_size, kInvalidHashSlot);
   new_tails.assign(new_size, kInvalidHashSlot);
   m_hash_buckets.swap(new_buckets);
@@ -1170,6 +1266,402 @@ bool VectorizedHashJoinIterator::IndexBuildRow(size_t row_idx, bool *overflowed,
   return false;
 }
 
+int VectorizedHashJoinIterator::TryBuildParallelHashTable() {
+  const auto isolation = ResMgmt::work_governor().mode();
+  if (Morsel::ParallelWorkers(thd()) <= 1 || !m_build_batch_input || m_build_row_image || m_evict_requested ||
+      m_build_input_tables.tables().size() != 1 || m_join_conditions.empty() ||
+      (m_join_type != JoinType::INNER && m_join_type != JoinType::SEMI) || isolation == ResMgmt::IsolationMode::AUTO ||
+      isolation == ResMgmt::IsolationMode::STRICT_CPU)
+    return -1;
+
+  // A refusal before publication is still speculative work, so the serial path
+  // simply rebuilds; after publication it is a hard error. Report both through
+  // the return value instead of unwinding out of this function.
+  const auto allocation_failure = [&]() -> int {
+    if (!m_parallel_build && (m_build_memory.last_failure() == ResMgmt::AllocationFailure::kBudgetExhausted ||
+                              m_aux_memory.last_failure() == ResMgmt::AllocationFailure::kBudgetExhausted)) {
+      RapidMonitor::rapid_counters.query_parallel_join_build_fallbacks_total.fetch_add(1, std::memory_order_relaxed);
+      return -1;
+    }
+    return AllocationError("Rapid parallel join build allocation failed");
+  };
+
+  // Compile immutable field metadata on the coordinator. The worker only reads
+  // normalized bytes; it never evaluates Item or stores into TABLE::record.
+  std::pmr::vector<Field *> fields(&m_aux_memory);
+  std::pmr::vector<size_t> key_columns(&m_aux_memory);
+  if (!Reserve(fields, m_build_columns.size()) || !Reserve(key_columns, m_join_conditions.size()))
+    return allocation_failure();
+
+  size_t row_bytes = 0;
+  for (const auto &column : m_build_columns) {
+    fields.push_back(column.source_field());
+    row_bytes += column.width() + 1;
+  }
+
+  for (const auto &condition : m_join_conditions) {
+    auto *eq = condition.join_condition();
+    if (!eq || eq->functype() != Item_func::EQ_FUNC || eq->argument_count() != 2) return -1;
+
+    Item *left = eq->arguments()[0]->real_item(), *right = eq->arguments()[1]->real_item();
+    if (left->type() != Item::FIELD_ITEM || right->type() != Item::FIELD_ITEM) return -1;
+
+    Field *lhs = down_cast<Item_field *>(left)->field, *rhs = down_cast<Item_field *>(right)->field;
+    if (lhs->type() != rhs->type() || lhs->is_unsigned() || rhs->is_unsigned() ||
+        (lhs->type() != MYSQL_TYPE_LONG && lhs->type() != MYSQL_TYPE_LONGLONG))
+      return -1;
+
+    const auto l = std::find(fields.begin(), fields.end(), lhs);
+    const auto r = std::find(fields.begin(), fields.end(), rhs);
+    if ((l == fields.end()) == (r == fields.end())) return -1;
+
+    key_columns.push_back((l == fields.end() ? r : l) - fields.begin());
+  }
+
+  const size_t key_bytes = key_columns.size() * (1 + sizeof(int64_t));
+  // Decide before building the source: constructing one can walk an index or
+  // enumerate partitions, which costs as much as the work it would split.
+  {
+    const size_t prospective =
+        std::min({size_t(Morsel::ParallelWorkers(thd())), ResMgmt::work_governor().parallel_limit()});
+    if (m_estimated_build_rows > 0 && !Morsel::EnoughWorkForWorkers(prospective, m_estimated_build_rows)) return -1;
+  }
+  auto source = m_build_batch_input->CreateParallelSource(&m_aux_memory, fields);
+
+  if (thd()->is_error()) return 1;
+  if (!source || source->tasks() < kMinimumParallelWorkers) return -1;
+
+  struct LocalRow {
+    uint64_t ordinal, hash;
+    size_t offset;
+  };
+  struct LocalBatch {
+    explicit LocalBatch(ResMgmt::BoundedMemoryResource *memory) : rows(memory), bytes(memory) {}
+    std::pmr::vector<LocalRow> rows;
+    std::pmr::vector<uchar> bytes;
+  };
+  struct LocalBuild {
+    explicit LocalBuild(size_t limit) : memory(limit), batches(&memory) {}
+    ResMgmt::BoundedMemoryResource memory;
+    std::pmr::list<LocalBatch> batches;
+    size_t input_rows{0};
+  };
+  struct RowRef {
+    const LocalRow *row;
+    const LocalBatch *batch;
+  };
+  // Cover local payloads + final columns/index + row-reference Combine metadata.
+  // Growth happens before any worker runs, through the existing operator grant.
+  // The estimate only guides growth; all real allocations remain hard bounded.
+  constexpr size_t batch_rows = Morsel::ParallelSource::kBatchRows;
+  constexpr size_t list_links_bytes = 2 * sizeof(void *);
+  const size_t batch_metadata = sizeof(LocalBatch) + list_links_bytes;
+  const size_t local_row_bytes = row_bytes + key_bytes + sizeof(LocalRow) + CeilDivide(batch_metadata, batch_rows);
+  const size_t bucket_bytes_per_row =
+      CeilDivide(kBucketConstructionArrays * kCapacityGrowthFactor * sizeof(size_t), kTargetLoadFactor);
+  const size_t final_row_bytes = row_bytes + key_bytes + sizeof(HashSlot) + sizeof(RowRef) + bucket_bytes_per_row;
+  const size_t per_row = local_row_bytes + final_row_bytes;
+  const uint64_t input_bound = source->max_ordinal();
+  const size_t desired = input_bound >= SIZE_MAX ? SIZE_MAX : SaturatingMultiply(input_bound + 1, per_row);
+  while (m_max_memory_available < desired && TryGrowBuildBudget()) {
+  }
+
+  // Scan chunks, their null masks/descriptors, row ordinals and key scratch.
+  // Source-specific MVCC/filter scratch is reported by the source itself.
+  const size_t chunk_metadata =
+      fields.size() * (sizeof(ColumnChunk) + sizeof(bit_array_t) + CeilDivide(batch_rows, CHAR_BIT));
+  const size_t scratch_bytes = source->extra_scratch_bytes() + chunk_metadata +
+                               batch_rows * (row_bytes + sizeof(uint64_t) + sizeof(uint32_t)) +
+                               kCapacityGrowthFactor * key_bytes;
+  const size_t available = m_build_memory.limit() - m_build_memory.used();
+  // Split according to the actual local/final row layouts instead of a fixed
+  // 40% quota. Real reservations still enforce the construction peak.
+  const size_t local_budget = (available / per_row) * local_row_bytes;
+  const size_t minimum_local_bytes = batch_metadata + batch_rows * (row_bytes + key_bytes + sizeof(LocalRow));
+  const size_t workers =
+      std::min({size_t(Morsel::ParallelWorkers(thd())), source->tasks(), ResMgmt::work_governor().parallel_limit(),
+                (m_aux_memory.limit() - m_aux_memory.used()) / scratch_bytes, local_budget / minimum_local_bytes});
+  if (workers < kMinimumParallelWorkers) return -1;
+  // Same gate as the aggregate: a worker's fixed cost has to be amortised by
+  // the rows it will actually see.
+  if (!Morsel::EnoughWorkForWorkers(
+          workers, static_cast<double>(source->tasks()) * static_cast<double>(Morsel::ParallelQueue::kClaimRows)))
+    return -1;
+
+  auto &counters = RapidMonitor::rapid_counters;
+  const auto fallback = [&]() {
+    counters.query_parallel_join_build_fallbacks_total.fetch_add(1, std::memory_order_relaxed);
+    return -1;
+  };
+  // Keep the same slots through build, coordinator combine and finalize. A
+  // competing pipeline must not force us to discard an already completed scan.
+  auto admission = ResMgmt::work_governor().try_acquire_parallel_workers(workers);
+  if (!admission) return fallback();
+  // Each resource is touched by one thread. Reservations account for all of
+  // them inside the parent's grant; no worker mutates a shared PMR resource.
+  ResMgmt::BoundedMemoryResource::Reservation local_charge(&m_build_memory, local_budget);
+  ResMgmt::BoundedMemoryResource::Reservation scratch_charge(&m_aux_memory, workers * scratch_bytes);
+  // One entry per admitted worker: the count is a property of this machine and
+  // this admission, not a compile-time ceiling.
+  std::pmr::vector<std::optional<LocalBuild>> locals(&m_aux_memory);
+  if (!Reserve(locals, workers)) return fallback();
+  for (size_t i = 0; i < workers; ++i) locals.emplace_back(std::in_place, local_budget / workers);
+
+  bool fail_build{false}, fail_finalize{false}, refuse_build{false}, refuse_finalize{false};
+
+  DBUG_EXECUTE_IF("rapid_parallel_join_build_failure", { fail_build = true; });
+  DBUG_EXECUTE_IF("rapid_parallel_join_finalize_failure", { fail_finalize = true; });
+  DBUG_EXECUTE_IF("rapid_parallel_join_build_budget", { refuse_build = true; });
+  DBUG_EXECUTE_IF("rapid_parallel_join_finalize_budget", { refuse_finalize = true; });
+
+  std::atomic<bool> retry{false};
+  DEBUG_SYNC(thd(), "rapid_before_parallel_join_build");
+  const auto built = Morsel::RunParallelWorkers(
+      thd(), admission, [&](size_t index, THD *worker, const std::atomic<bool> &cancelled) -> const char * {
+        counters.query_parallel_join_build_workers_total.fetch_add(1, std::memory_order_relaxed);
+
+        if (fail_build && index == 0) return "Rapid injected parallel join build failure";
+
+        auto &local = *locals[index];
+        ResMgmt::BoundedMemoryResource scratch(scratch_bytes);
+        // Test hook: charge the whole worker share, so the next reservation is
+        // genuinely refused. Merely reporting a refusal would be forgotten by
+        // the following successful allocation, and the build would silently
+        // succeed instead of exercising the serial-replay path.
+        std::optional<ResMgmt::BoundedMemoryResource::Reservation> withhold;
+        if (refuse_build) withhold.emplace(&local.memory, local.memory.limit() - local.memory.used());
+
+        std::pmr::string key(&scratch);
+        if (!Reserve(key, key_bytes)) {
+          retry.store(true, std::memory_order_relaxed);
+          return nullptr;
+        }
+        const bool error = source->Execute(
+            worker, &scratch, cancelled,
+            [&](const std::pmr::vector<ColumnChunk> &chunks, size_t rows, const std::pmr::vector<uint32_t> &selection,
+                const std::pmr::vector<uint64_t> &ordinals) {
+              if (cancelled.load(std::memory_order_acquire)) return false;
+              if (retry.load(std::memory_order_relaxed)) return true;
+              const size_t count = selection.empty() ? rows : selection.size();
+              local.input_rows += count;
+              // One checked allocation per transport batch: the node, the row
+              // index and the byte buffer all grow here, never inside the loop.
+              if (!TryAllocation([&] {
+                    local.batches.emplace_back(&local.memory);
+                    auto &fresh = local.batches.back();
+                    fresh.rows.reserve(count);
+                    fresh.bytes.reserve(count * (row_bytes + key_bytes));
+                  })) {
+                retry.store(true, std::memory_order_relaxed);
+                return true;
+              }
+              auto &batch = local.batches.back();
+              for (size_t pos = 0; pos < count; ++pos) {
+                if (cancelled.load(std::memory_order_relaxed)) return false;
+                const size_t row = selection.empty() ? pos : selection[pos];
+                bool null = false;
+                key.clear();
+                for (size_t col : key_columns) {
+                  if (chunks[col].nullable_fast(row)) {
+                    null = true;
+                    break;
+                  }
+                  const auto type = fields[col]->type();
+                  int64_t value = 0;
+                  if (type == MYSQL_TYPE_LONG) {
+                    int32_t number;
+                    std::memcpy(&number, chunks[col].data_fast(row), sizeof(number));
+                    value = number;
+                  } else {
+                    std::memcpy(&value, chunks[col].data_fast(row), sizeof(value));
+                  }
+                  key.push_back(static_cast<char>(type));
+                  key.append(reinterpret_cast<const char *>(&value), sizeof(value));
+                }
+                if (null) continue;  // Ordinary equality cannot match a NULL key.
+                batch.rows.push_back({ordinals[row], XXH64(key.data(), key.size(), 0), batch.bytes.size()});
+                for (const auto &chunk : chunks) {
+                  const bool is_null = chunk.nullable_fast(row);
+                  batch.bytes.push_back(is_null);
+                  if (is_null)
+                    batch.bytes.insert(batch.bytes.end(), chunk.width(), 0);
+                  else
+                    batch.bytes.insert(batch.bytes.end(), chunk.data_fast(row), chunk.data_fast(row) + chunk.width());
+                }
+                batch.bytes.insert(batch.bytes.end(), key.begin(), key.end());
+              }
+              return false;
+            });
+        if (cancelled.load(std::memory_order_acquire)) return nullptr;
+        if (source->needs_serial_retry()) retry.store(true, std::memory_order_relaxed);
+        if (retry.load(std::memory_order_relaxed)) return nullptr;
+        return error ? "Rapid parallel join build scan failed" : nullptr;
+      });
+
+  if (built == Morsel::ParallelRunResult::ERROR) return 1;
+  if (retry.load()) return fallback();
+
+  scratch_charge.reset();
+  size_t local_used{0}, rows{0}, input_rows{0}, batches{0};
+  for (size_t i = 0; i < workers; ++i) {
+    const auto &local = *locals[i];
+    local_used += local.memory.used();
+    input_rows += local.input_rows;
+    batches += local.batches.size();
+    for (const auto &batch : local.batches) rows += batch.rows.size();
+  }
+
+  local_charge.reset();
+  local_charge = ResMgmt::BoundedMemoryResource::Reservation(&m_build_memory, local_used);
+
+  // The charge reservation inside the constructor can refuse and throw, while
+  // `nothrow` only covers the allocation itself: a tight budget must fall back
+  // to the serial replay instead of terminating the server.
+  std::unique_ptr<ParallelBuildState> candidate;
+  try {
+    candidate.reset(new ParallelBuildState(&m_build_memory));
+  } catch (const std::bad_alloc &) {
+    return allocation_failure();
+  }
+  if (!candidate) return allocation_failure();
+  // Test hook, same reason as the build stage: withhold the remaining budget so
+  // the finalize reservations really fail and the serial replay is exercised.
+  std::optional<ResMgmt::BoundedMemoryResource::Reservation> withhold_finalize;
+  if (refuse_finalize) withhold_finalize.emplace(&m_build_memory, m_build_memory.limit() - m_build_memory.used());
+  const size_t cache_bytes = std::max<size_t>(1, CACHE_L2_SIZE / kFinalizeCacheDivisor);
+  const size_t cache_partitions = CeilDivide(SaturatingMultiply(rows, final_row_bytes), cache_bytes);
+  // Enough independent work for workers, without shrinking partitions below
+  // an input batch merely to chase the cache-size estimate.
+  const size_t useful_partitions = std::max(workers, CeilDivide(rows, batch_rows));
+  const size_t target_partitions = std::min(useful_partitions, std::max(workers, cache_partitions));
+  size_t partitions = 1;
+  while (partitions < target_partitions && partitions < kMaxHashBuckets) partitions <<= 1;
+
+  const bool partitions_ready = Reserve(candidate->partitions, partitions) && TryAllocation([&] {
+                                  for (size_t i = 0; i < partitions; ++i)
+                                    candidate->partitions.emplace_back(&m_build_memory);
+                                });
+  if (!partitions_ready) return allocation_failure();
+
+  for (size_t i = 0; i < workers; ++i) {
+    for (const auto &batch : locals[i]->batches) {
+      for (const auto &row : batch.rows) ++candidate->partitions[row.hash & (partitions - 1)].count;
+    }
+  }
+  size_t begin{0};
+  std::pmr::vector<size_t> next(&m_build_memory);
+  if (!Reserve(next, partitions) || !TryAllocation([&] { next.assign(partitions, 0); })) return allocation_failure();
+  for (size_t p = 0; p < partitions; ++p) {
+    auto &part = candidate->partitions[p];
+    part.begin = next[p] = begin;
+    begin += part.count;
+    if (!part.count) continue;
+    // The worker appends into these columns; their capacity is fixed here so a
+    // worker never grows a buffer on its own thread.
+    if (!Reserve(part.columns, fields.size()) || !TryAllocation([&] {
+          for (Field *field : fields) part.columns.emplace_back(field, part.count, &m_build_memory);
+        }) ||
+        part.columns.back().failed())
+      return allocation_failure();
+  }
+  std::pmr::vector<RowRef> refs(&m_build_memory);
+  if (!TryAllocation([&] { refs.resize(rows); })) return allocation_failure();
+  for (size_t i = 0; i < workers; ++i) {
+    for (const auto &batch : locals[i]->batches) {
+      for (const auto &row : batch.rows) refs[next[row.hash & (partitions - 1)]++] = {&row, &batch};
+    }
+  }
+  size_t bucket_count = std::max(kMinHashBuckets, partitions);
+  while (bucket_count < rows / kTargetLoadFactor && bucket_count < kMaxHashBuckets) bucket_count <<= 1;
+  std::pmr::vector<size_t> buckets(&m_build_memory), tails(&m_build_memory);
+  std::pmr::vector<HashSlot> slots(&m_build_memory);
+  std::pmr::vector<uchar> keys(&m_build_memory);
+  const bool finalize_ready = TryAllocation([&] {
+    buckets.assign(bucket_count, kInvalidHashSlot);
+    tails.assign(bucket_count, kInvalidHashSlot);
+    slots.resize(rows);
+    keys.resize(rows * key_bytes);
+  });
+  if (!finalize_ready) return allocation_failure();
+  std::atomic<size_t> next_partition{0};
+  DEBUG_SYNC(thd(), "rapid_before_parallel_join_finalize");
+  const auto finalized = Morsel::RunParallelWorkers(
+      thd(), admission, [&](size_t index, THD *, const std::atomic<bool> &cancelled) -> const char * {
+        counters.query_parallel_join_finalize_workers_total.fetch_add(1, std::memory_order_relaxed);
+        if (fail_finalize && index == 0) return "Rapid injected parallel join finalize failure";
+        for (;;) {
+          if (cancelled.load(std::memory_order_acquire)) return nullptr;
+
+          const size_t p = next_partition.fetch_add(1, std::memory_order_relaxed);
+          if (p >= partitions) return nullptr;
+
+          auto &part = candidate->partitions[p];
+          auto first = refs.begin() + part.begin;
+          std::sort(first, first + part.count,
+                    [](const RowRef &a, const RowRef &b) { return a.row->ordinal < b.row->ordinal; });
+          for (size_t i = part.begin; i < part.begin + part.count; ++i) {
+            if (cancelled.load(std::memory_order_relaxed)) return nullptr;
+
+            const auto &ref = refs[i];
+            const uchar *data = ref.batch->bytes.data() + ref.row->offset;
+            for (auto &column : part.columns) {
+              const bool null = *data++ != 0;
+              // Exact capacity was allocated by the coordinator. Appending
+              // cannot grow or touch its PMR resource on a worker thread.
+              if (!column.add(data, column.width(), null)) return "Rapid parallel join finalize column failed";
+              data += column.width();
+            }
+
+            std::memcpy(keys.data() + i * key_bytes, data, key_bytes);
+            slots[i] = {ref.row->hash, i * key_bytes, key_bytes, i, kInvalidHashSlot};
+            const size_t bucket = ref.row->hash & (bucket_count - 1);
+            if (buckets[bucket] == kInvalidHashSlot)
+              buckets[bucket] = i;
+            else
+              slots[tails[bucket]].next = i;
+
+            tails[bucket] = i;
+          }
+        }
+      });
+
+  if (finalized == Morsel::ParallelRunResult::ERROR) return 1;
+
+  // Publication is allocation-free. No probe can observe partially finalized
+  // buckets, and the foreground build cursor has never been advanced.
+  m_hash_buckets.swap(buckets);
+  m_hash_slots.swap(slots);
+  m_hash_key_arena.swap(keys);
+  m_hash_table_size = bucket_count;
+  m_parallel_build = std::move(candidate);
+  decltype(m_hash_bucket_tails)(&m_build_memory).swap(m_hash_bucket_tails);
+  m_stats.build_rows = input_rows;
+  m_stats.build_batches = batches;
+  m_stats.direct_join_key_rows += input_rows;
+  m_stats.key_bytes += rows * key_bytes;
+  m_stats.bytes_copied += rows * row_bytes;
+  m_stats.build_memory_limit_bytes = m_max_memory_available;
+
+  // Include the construction peak, before releasing local copies and metadata.
+  UpdateBuildMemoryPeak();
+
+  for (size_t i = 0; i < workers; ++i) locals[i].reset();
+
+  local_charge.reset();
+  decltype(refs)(&m_build_memory).swap(refs);
+  decltype(tails)(&m_build_memory).swap(tails);
+  decltype(buckets)(&m_build_memory).swap(buckets);
+
+  if (m_hash_table_gen) m_last_hash_table_gen = *m_hash_table_gen;
+
+  counters.query_parallel_join_build_rows_total.fetch_add(input_rows, std::memory_order_relaxed);
+  counters.query_parallel_join_finalize_partitions_total.fetch_add(partitions, std::memory_order_relaxed);
+
+  source->CommitStats();
+  BuildRuntimeFilter();
+  return 0;
+}
+
 bool VectorizedHashJoinIterator::BuildHashTable() {
   // A rebuild must not inherit capacity from the previous execution; retained
   // capacity is real memory and therefore part of the budget.
@@ -1181,6 +1673,9 @@ bool VectorizedHashJoinIterator::BuildHashTable() {
   m_curr_build_size = 0;
   m_build_error = false;
 
+  const int parallel = TryBuildParallelHashTable();
+  if (parallel >= 0) return parallel != 0;
+
   size_t total_build_rows = 0;
   // Another operator's eviction pass must not mutate the build from its frame;
   // it arms m_evict_requested and this loop reacts at the next capacity check,
@@ -1190,6 +1685,7 @@ bool VectorizedHashJoinIterator::BuildHashTable() {
     explicit BuildLoopScope(bool &flag) : in_loop(flag) { in_loop = true; }
     ~BuildLoopScope() { in_loop = false; }
   } build_loop_scope(m_in_build_loop);
+
   for (;;) {
     m_build_capacity_exceeded = false;
     if (!ReadBuildBatch()) {
@@ -1258,7 +1754,8 @@ void VectorizedHashJoinIterator::BuildRuntimeFilter() {
   m_bloom_active = false;
   // A partition-local filter must never reject rows for an unseen partition.
   if (m_spilled || m_join_conditions.empty() || (m_join_type != JoinType::INNER && m_join_type != JoinType::SEMI) ||
-      m_hash_slots.size() < 128 || !(m_estimated_probe_rows >= 2.0 * static_cast<double>(m_hash_slots.size())))
+      m_hash_slots.size() < kBloomMinimumBuildRows ||
+      !(m_estimated_probe_rows >= kBloomMinimumProbeRatio * static_cast<double>(m_hash_slots.size())))
     return;
 
   DBUG_EXECUTE_IF("rapid_bloom_disabled", { return; });
@@ -1317,12 +1814,12 @@ bool VectorizedHashJoinIterator::RejectRuntimeHash(uint64_t hash) {
   const bool rejected = !m_bloom.may_contain(hash);
   if (rejected) ++m_stats.bloom_rejects;
 
-  if (m_stats.bloom_checks == (4 * SHANNON_KB) || (m_stats.bloom_checks % (64 * SHANNON_KB)) == 0)
+  if (m_stats.bloom_checks == kBloomFirstSampleRows || (m_stats.bloom_checks % kBloomResampleRows) == 0)
     ReassessRuntimeFilter();
   // Observe both placements so a later selective phase can restore pushdown.
   ++m_pushdown_checks;
   m_pushdown_rejects += rejected;
-  if (m_pushdown_checks == (4 * SHANNON_KB)) {
+  if (m_pushdown_checks == kBloomFirstSampleRows) {
     m_bloom_pushdown_disabled = !Optimizer::Utils::RuntimeBloomPolicy::scan_pushdown_after_sample(
         !m_bloom_pushdown_disabled, m_pushdown_checks, m_pushdown_rejects);
     m_pushdown_checks = m_pushdown_rejects = 0;
@@ -1408,8 +1905,8 @@ bool VectorizedHashJoinIterator::BeginBuildSpill(size_t buffered_rows) {
   // the observed rows avoids trusting an optimizer underestimate at overflow.
   // Freeze the first radix here: changing it while draining input loses pairs.
   const double rows = std::max(1.0, static_cast<double>(buffered_rows));
-  const double estimated_bytes =
-      static_cast<double>(m_build_memory.used()) / rows * std::max(m_estimated_build_rows, rows * 2);
+  const double estimated_bytes = static_cast<double>(m_build_memory.used()) / rows *
+                                 std::max(m_estimated_build_rows, rows * kCapacityGrowthFactor);
   m_initial_spill_fanout = ResMgmt::initial_spill_fanout(estimated_bytes, m_max_memory_available);
   m_initial_spill_bits = 0;
   for (size_t n = m_initial_spill_fanout; n > 1; n >>= 1) ++m_initial_spill_bits;
@@ -2243,7 +2740,9 @@ int VectorizedHashJoinIterator::NextProbeOutput(OutputRow *out) {
 
       bool passes_extra_conditions = true;
       if (m_extra_condition != nullptr) {
-        if (LoadRowFromColumnChunks(m_build_columns, slot.build_row_idx, m_build_input_tables) ||
+        size_t build_row = slot.build_row_idx;
+        const auto &columns = BuildColumns(&build_row);
+        if (LoadRowFromColumnChunks(columns, build_row, m_build_input_tables) ||
             LoadRowFromColumnChunks(m_probe_columns, probe_idx, m_probe_input_tables))
           return 1;
         m_stats.extra_condition_row_materializations += 2;
@@ -2650,6 +3149,7 @@ int VectorizedHashJoinIterator::ReadBatchImpl(std::pmr::vector<ColumnChunk> &col
         }
         src_cols = build_source;
         src_row = out.build_row_idx;
+        if (!m_spilled) src_cols = &BuildColumns(&src_row);
       } else {
         src_cols = probe_source;
         src_row = out.probe_row_idx;
@@ -2683,6 +3183,264 @@ bool VectorizedHashJoinIterator::PushbackBatchTailImpl(const std::pmr::vector<Co
 
   return PushbackBatchTailShared(chunks, from_row, total_rows, &m_lookahead_chunks, &m_lookahead_start,
                                  &m_lookahead_count, &m_stats.bytes_copied, &m_aux_memory);
+}
+
+// A build barrier precedes publication. Only worker-local probe/output buffers
+// change after publication; workers never drive either SQL child iterator.
+VectorizedHashJoinIterator::JoinParallelSource::JoinParallelSource(VectorizedHashJoinIterator *join,
+                                                                   ResMgmt::BoundedMemoryResource *memory)
+    : join(join), output_fields(memory), probe_fields(memory), key_fields(memory) {
+  DBUG_EXECUTE_IF("rapid_parallel_join_budget", { m_test_budget_refusal = true; });
+}
+
+size_t VectorizedHashJoinIterator::JoinParallelSource::tasks() const { return child->tasks(); }
+
+size_t VectorizedHashJoinIterator::JoinParallelSource::extra_scratch_bytes() const {
+  const size_t descriptors = (output_fields.size() + probe_fields.size()) *
+                             (sizeof(ColumnChunk) + sizeof(bit_array_t) + sizeof(size_t) + sizeof(bool));
+  size_t bytes = child->extra_scratch_bytes() + descriptors +
+                 kCapacityGrowthFactor * Morsel::ParallelSource::kBatchRows * (sizeof(uint64_t) + sizeof(uint32_t)) +
+                 key_fields.size() * (sizeof(size_t) + kCapacityGrowthFactor * (sizeof(uint8_t) + sizeof(int64_t)));
+  for (auto *field : output_fields)
+    bytes += kCapacityGrowthFactor * Morsel::ParallelSource::kBatchRows *
+             (Utils::Util::normalized_length(field) + sizeof(uint8_t));
+  for (auto *field : probe_fields)
+    bytes += kCapacityGrowthFactor * Morsel::ParallelSource::kBatchRows *
+             (Utils::Util::normalized_length(field) + sizeof(uint8_t));
+  return bytes;
+}
+
+bool VectorizedHashJoinIterator::JoinParallelSource::needs_serial_retry() const {
+  return Morsel::ParallelSource::needs_serial_retry() || child->needs_serial_retry();
+}
+
+void VectorizedHashJoinIterator::JoinParallelSource::CommitStats() {
+  child->CommitStats();
+  auto &stats = join->m_stats;
+  stats.probe_rows += pending_stats.probe_rows;
+  stats.probe_batches += pending_stats.probe_batches;
+  stats.output_rows += pending_stats.output_rows;
+  stats.bytes_copied += pending_stats.bytes_copied;
+  stats.direct_join_key_rows += pending_stats.direct_join_key_rows;
+  stats.hash_slots_visited += pending_stats.hash_slots_visited;
+  stats.hash_key_mismatches += pending_stats.hash_key_mismatches;
+  join->m_cardinality.Finish(join->thd(), "hash_join", stats.output_rows);
+  if (join->thd()->opt_trace.is_started()) {
+    Opt_trace_object wrapper(&join->thd()->opt_trace);
+    Opt_trace_object observation(&join->thd()->opt_trace, "rapid_parallel_join_statistics");
+    observation.add("probe_rows", static_cast<ulonglong>(stats.probe_rows))
+        .add("probe_batches", static_cast<ulonglong>(stats.probe_batches))
+        .add("output_rows", static_cast<ulonglong>(stats.output_rows))
+        .add("bytes_copied", static_cast<ulonglong>(stats.bytes_copied))
+        .add("hash_probes", static_cast<ulonglong>(stats.hash_slots_visited))
+        .add("row_materializations", static_cast<ulonglong>(stats.output_row_materializations));
+  }
+}
+
+bool VectorizedHashJoinIterator::JoinParallelSource::ExecuteImpl(THD *worker, ResMgmt::BoundedMemoryResource *memory,
+                                                                 const std::atomic<bool> &cancelled,
+                                                                 const Consumer &consume) {
+  std::pmr::vector<ColumnChunk> output(memory);
+  std::pmr::vector<uint64_t> output_ids(memory);
+  std::pmr::vector<uint32_t> dense(memory);
+  std::pmr::string key(memory);
+  std::pmr::vector<size_t> key_columns(memory), output_columns(memory);
+  std::pmr::vector<bool> from_build(memory);
+  PerformanceStats local_stats;
+
+  for (auto *field : output_fields) {
+    output.emplace_back(field, Morsel::ParallelSource::kBatchRows, memory);
+    if (output.back().failed()) return true;
+
+    auto it = std::find(probe_fields.begin(), probe_fields.end(), field);
+    if (it != probe_fields.end()) {
+      from_build.push_back(false);
+      output_columns.push_back(it - probe_fields.begin());
+    } else {
+      from_build.push_back(true);
+      size_t col = 0;
+      while (col < join->m_build_columns.size() && join->m_build_columns[col].source_field() != field) ++col;
+      if (col == join->m_build_columns.size()) return true;
+      output_columns.push_back(col);
+    }
+  }
+
+  for (auto *field : key_fields) {
+    auto it = std::find(probe_fields.begin(), probe_fields.end(), field);
+    if (it == probe_fields.end()) return true;
+    key_columns.push_back(it - probe_fields.begin());
+  }
+
+  const auto flush = [&] {
+    if (output_ids.empty()) return false;
+    if (consume(output, output_ids.size(), dense, output_ids)) return true;
+    output_ids.clear();
+    for (auto &chunk : output) chunk.clear();
+    return false;
+  };
+  const bool error = child->Execute(
+      worker, memory, cancelled,
+      [&](const std::pmr::vector<ColumnChunk> &chunks, size_t rows, const std::pmr::vector<uint32_t> &selection,
+          const std::pmr::vector<uint64_t> &ordinals) {
+        const size_t count = selection.empty() ? rows : selection.size();
+        local_stats.probe_rows += count;
+        ++local_stats.probe_batches;
+        for (size_t pos = 0; pos < count; ++pos) {
+          if (cancelled.load(std::memory_order_relaxed)) return false;
+
+          const size_t row = selection.empty() ? pos : selection[pos];
+          key.clear();
+          bool null{false};
+          for (size_t k = 0; k < key_columns.size(); ++k) {
+            const auto &chunk = chunks[key_columns[k]];
+            if (chunk.nullable_fast(row)) {
+              null = true;
+              break;
+            }
+
+            const uint8_t type = static_cast<uint8_t>(key_fields[k]->type());
+            int64_t value{0};
+            if (type == MYSQL_TYPE_LONG) {
+              int32_t number{0};
+              std::memcpy(&number, chunk.data_fast(row), sizeof(number));
+              value = number;
+            } else
+              std::memcpy(&value, chunk.data_fast(row), sizeof(value));
+
+            key.push_back(type);
+            key.append(reinterpret_cast<const char *>(&value), sizeof(value));
+          }
+
+          if (null) continue;
+          ++local_stats.direct_join_key_rows;
+          if (join->m_hash_buckets.empty()) continue;
+
+          const uint64_t hash = XXH64(key.data(), key.size(), 0);
+          size_t slot_idx = join->m_hash_buckets[hash & (join->m_hash_table_size - 1)];
+          while (slot_idx != kInvalidHashSlot) {
+            if (cancelled.load(std::memory_order_relaxed)) return false;
+
+            const auto &slot = join->m_hash_slots[slot_idx];
+            ++local_stats.hash_slots_visited;
+            slot_idx = slot.next;
+            if (slot.hash != hash || slot.key_length != key.size() ||
+                std::memcmp(join->m_hash_key_arena.data() + slot.key_offset, key.data(), key.size())) {
+              ++local_stats.hash_key_mismatches;
+              continue;
+            }
+
+            for (size_t col = 0; col < output.size(); ++col) {
+              size_t input_row = from_build[col] ? slot.build_row_idx : row;
+              const auto &input =
+                  from_build[col] ? join->BuildColumns(&input_row)[output_columns[col]] : chunks[output_columns[col]];
+              const bool is_null = input.nullable_fast(input_row);
+              if (!output[col].add(is_null ? nullptr : input.data_fast(input_row), is_null ? 0 : input.width(),
+                                   is_null))
+                return true;
+              if (!is_null) local_stats.bytes_copied += input.width();
+            }
+            // Preserve probe-major, then build insertion order, including
+            // nested joins. CreateParallelSource checked overflow.
+            output_ids.push_back(ordinals[row] * ordinal_stride + (ordinal_stride == 1 ? 0 : slot.build_row_idx));
+            ++local_stats.output_rows;
+
+            if (output_ids.size() == Morsel::ParallelSource::kBatchRows && flush()) return true;
+            if (join->m_join_type == JoinType::SEMI) break;
+          }
+        }
+        return false;
+      });
+  if (error) return true;
+  if (cancelled.load()) return false;
+  if (flush()) return true;
+  // One merge per worker, outside the hot loop. Iterator stats stay untouched
+  // until the coordinator accepts the whole pipeline, including its consumer.
+  std::lock_guard lock(stats_mutex);
+  pending_stats.probe_rows += local_stats.probe_rows;
+  pending_stats.probe_batches += local_stats.probe_batches;
+  pending_stats.output_rows += local_stats.output_rows;
+  pending_stats.bytes_copied += local_stats.bytes_copied;
+  pending_stats.direct_join_key_rows += local_stats.direct_join_key_rows;
+  pending_stats.hash_slots_visited += local_stats.hash_slots_visited;
+  pending_stats.hash_key_mismatches += local_stats.hash_key_mismatches;
+  return false;
+}
+
+std::unique_ptr<Morsel::ParallelSource> VectorizedHashJoinIterator::CreateParallelSource(
+    ResMgmt::BoundedMemoryResource *memory, const std::pmr::vector<Field *> &fields) {
+  const auto isolation = ResMgmt::work_governor().mode();
+  if (isolation == ResMgmt::IsolationMode::AUTO || isolation == ResMgmt::IsolationMode::STRICT_CPU) return {};
+  if (!m_probe_batch_input || m_build_row_image || m_probe_row_image || m_extra_condition ||
+      (m_join_type != JoinType::INNER && m_join_type != JoinType::SEMI) || m_join_conditions.empty() ||
+      m_stats.probe_rows != 0 || m_spilled || m_lookahead_count != 0)
+    return {};
+
+  // TABLE itself carries no map; the pseudo-table does.
+  const auto field_map = [](const Field *field) -> table_map {
+    return (field->table != nullptr && field->table->pos_in_table_list != nullptr)
+               ? field->table->pos_in_table_list->map()
+               : 0;
+  };
+
+  auto source = std::make_unique<JoinParallelSource>(this, memory);
+  source->output_fields.assign(fields.begin(), fields.end());
+  for (auto *field : fields) {
+    if (field_map(field) & m_probe_input_tables.tables_bitmap())
+      source->probe_fields.push_back(field);
+    else {
+      bool found = false;
+      for (const auto &col : m_build_columns) {
+        if (col.source_field() == field) found = true;
+      }
+      if (!found || m_join_type == JoinType::SEMI) return {};
+    }
+  }
+
+  for (const auto &condition : m_join_conditions) {
+    auto *eq = condition.join_condition();
+    if (!eq || eq->functype() != Item_func::EQ_FUNC || eq->argument_count() != 2) return {};
+
+    Item *left = eq->arguments()[0]->real_item(), *right = eq->arguments()[1]->real_item();
+    if (left->type() != Item::FIELD_ITEM || right->type() != Item::FIELD_ITEM) return {};
+
+    Field *lhs = down_cast<Item_field *>(left)->field, *rhs = down_cast<Item_field *>(right)->field;
+    if (!lhs || !rhs || lhs->type() != rhs->type() || lhs->is_unsigned() || rhs->is_unsigned() ||
+        (lhs->type() != MYSQL_TYPE_LONG && lhs->type() != MYSQL_TYPE_LONGLONG))
+      return {};
+
+    const bool left_probe = field_map(lhs) & m_probe_input_tables.tables_bitmap();
+    const bool right_probe = field_map(rhs) & m_probe_input_tables.tables_bitmap();
+    if (left_probe == right_probe) return {};
+
+    Field *field = left_probe ? lhs : rhs;
+    source->key_fields.push_back(field);
+    if (std::find(source->probe_fields.begin(), source->probe_fields.end(), field) == source->probe_fields.end())
+      source->probe_fields.push_back(field);
+  }
+
+  source->child = m_probe_batch_input->CreateParallelSource(memory, source->probe_fields);
+
+  if (!source->child) return {};
+
+  if (m_state == State::BUILDING_HASH_TABLE) {
+    if (BuildHashTable()) return {};
+    // Preserve the established ordered spill protocol when the build cannot be
+    // retained. The serial adapter can continue from its fully prepared output.
+    if (m_spilled && RunSpilledJoin() != 0) return {};
+    m_state = State::PROBING_HASH_TABLE;
+    m_curr_probe_size = 0;
+    ResetProbeCursor();
+  }
+
+  if (m_spilled) return {};
+  if (m_join_type == JoinType::INNER) {
+    uint64_t rows = 1;
+    for (const auto &column : m_build_columns) rows = std::max<uint64_t>(rows, column.size());
+    if (m_parallel_build) rows = std::max<uint64_t>(rows, m_hash_slots.size());
+    if (source->child->max_ordinal() > (UINT64_MAX - rows) / rows) return {};
+    source->ordinal_stride = rows;
+  }
+  return source;
 }
 }  // namespace Executor
 }  // namespace ShannonBase

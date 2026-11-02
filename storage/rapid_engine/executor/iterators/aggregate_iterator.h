@@ -451,6 +451,7 @@ class VectorizedAggregateIterator final : public RowIterator, public ResMgmt::Ev
     explicit HashGroupState(std::pmr::memory_resource *resource)
         : key(resource), representative_row(resource), aggregates(resource), order_values(resource) {}
 
+    uint64_t first_ordinal{UINT64_MAX};
     std::pmr::string key;
     std::pmr::vector<uchar> representative_row;
     std::pmr::vector<HashAggregateState> aggregates;
@@ -508,6 +509,7 @@ class VectorizedAggregateIterator final : public RowIterator, public ResMgmt::Ev
     explicit SpillGroupState(std::pmr::memory_resource *resource)
         : memory(resource), key(resource), representative_row(resource), aggregates(resource), order_values(resource) {}
     std::pmr::memory_resource *memory;
+    uint64_t first_ordinal{UINT64_MAX};
     std::pmr::string key;
     std::pmr::vector<uchar> representative_row;
     std::pmr::vector<SpillAggregateState> aggregates;
@@ -610,6 +612,10 @@ class VectorizedAggregateIterator final : public RowIterator, public ResMgmt::Ev
   bool ValidateHashAggregatePlan() const;
   int ReadHashAggregate();
   int BuildHashGroups();
+  // -1: ineligible/replay serial; 0: built; 1: statement error.
+  int TryBuildParallelGroups();
+  bool m_parallel_output{false};
+  bool m_parallel_attempted{false};
   int BuildHashGroupsBatch();
   int BuildHashGroupsRow();
   int ConsumeHashRow(size_t packed_row_capacity);

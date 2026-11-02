@@ -69,6 +69,8 @@ perl;
     s/\b221184\b/262144/;
     # Replacing port number with string
     s/^port \d+/port ####/;
+    # Default is the host's CPU count, so only the name is compared
+    s/^rapid-parallel-max-workers \d+/rapid-parallel-max-workers ####/;
     # log-tc-size varies by platform
     s/^log-tc-size \d+/log-tc-size #####/;
     # Avoid test failures when adding new error message

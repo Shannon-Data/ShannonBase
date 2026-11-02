@@ -32,6 +32,8 @@ def main():
     parser.add_argument('--main-ref', default='unspecified')
     parser.add_argument('--candidate-ref', default='unspecified')
     parser.add_argument('--port', default=14750, type=int)
+    parser.add_argument('--main-workers', default=1, type=int, choices=range(1, 33), help='Main session parallel worker limit')
+    parser.add_argument('--candidate-workers', default=1, type=int, choices=range(1, 33), help='Candidate session parallel worker limit')
     parser.add_argument('--reverse', action='store_true', help='Run candidate before main for order confirmation')
     parser.add_argument('--preflight', action='store_true', help='Candidate correctness only; timings are not performance evidence')
     parser.add_argument('--candidate-only', action='store_true', help='Reuse a separately preserved main baseline')
@@ -46,6 +48,8 @@ def main():
     if output.exists() and any(output.iterdir()):
         parser.error('--output must be empty to preserve earlier evidence')
     output.mkdir(parents=True, exist_ok=True)
+    worker_limits = dict(main=args.main_workers, candidate=args.candidate_workers)
+    worker_preambles = {}
     socket = args.data.parent / 'benchmark.sock'
     records = []
     sql_queries = {q: (args.queries / f'q{q}.sql').read_text() for q in args.query_numbers}
@@ -70,6 +74,7 @@ def main():
             (output / f'probe{number}.sql').write_text(sql + '\n')
     metadata = dict(database=args.database, rounds=args.rounds, reverse=args.reverse,
                     source_refs=dict(main=args.main_ref, candidate=args.candidate_ref),
+                    parallel_workers=worker_limits,
                     client=dict(path=str(args.client.resolve()), sha256=sha256(args.client)),
                     queries={q: hashlib.sha256(sql.encode()).hexdigest() for q, sql in sql_queries.items()},
                     binaries={side: dict(path=str(binary.resolve()), sha256=sha256(binary))
@@ -99,6 +104,7 @@ def main():
         preamble = ("SET SESSION max_execution_time=180000; SET SESSION time_zone='+00:00'; "
                     f"SET SESSION optimizer_switch='hypergraph_optimizer={'off' if innodb else 'on'}'; "
                     f"SET SESSION use_secondary_engine={'OFF' if innodb else 'FORCED'};\n")
+        preamble += worker_preambles[side]
         status = ("SHOW SESSION STATUS LIKE 'Handler_read%';\n"
                   "SHOW GLOBAL STATUS LIKE 'rapid_query%';\n")
         sql = (preamble + "SELECT 'BENCH_BEFORE';\n" + status +
@@ -181,6 +187,17 @@ def main():
             else: raise RuntimeError(f'{side} server startup timeout')
             meta = client('SELECT VERSION(); SHOW VARIABLES;', database=False)
             (output / f'{side}.variables.tsv').write_text(meta.stdout)
+            workers_variable = client("SHOW VARIABLES LIKE 'rapid_parallel_workers';", database=False)
+            if workers_variable.returncode:
+                raise RuntimeError(f'{side} worker configuration lookup failed')
+            if workers_variable.stdout.strip():
+                # Set even 1 explicitly: persisted server defaults must not change
+                # the serial baseline. Older binaries remain usable with limit 1.
+                worker_preambles[side] = f"SET SESSION rapid_parallel_workers={worker_limits[side]};\n"
+            elif worker_limits[side] != 1:
+                raise RuntimeError(f'{side} binary does not support parallel workers')
+            else:
+                worker_preambles[side] = ''
             load_sql = 'SET use_secondary_engine=OFF;\n' + '\n'.join(
                 f'ALTER TABLE {table} SECONDARY_LOAD;' for table in
                 ('REGION','NATION','SUPPLIER','CUSTOMER','PART','PARTSUPP','ORDERS','LINEITEM'))
@@ -198,8 +215,9 @@ def main():
                                 PART=200000, PARTSUPP=800000, ORDERS=1500000, LINEITEM=6001215)
                 actual = {line.split('\t')[0]: int(line.split('\t')[1]) for line in counts.stdout.splitlines()}
                 if actual != expected: raise RuntimeError(f'SF=1 counts differ: {actual}')
+            worker_sql = worker_preambles[side]
             for q in args.query_numbers:
-                plan = client("SET optimizer_switch='hypergraph_optimizer=on'; SET use_secondary_engine=FORCED;\n"
+                plan = client(worker_sql + "SET optimizer_switch='hypergraph_optimizer=on'; SET use_secondary_engine=FORCED;\n"
                               'EXPLAIN FORMAT=TREE ' + sql_queries[q])
                 plans = output / side / 'plans'; plans.mkdir(parents=True, exist_ok=True)
                 (plans / f'q{q}.tree').write_text(plan.stdout + plan.stderr)
@@ -215,7 +233,7 @@ def main():
             if not args.preflight:
                 for q in (2, 20, 22):
                     if q not in sql_queries: continue
-                    analyzed = client("SET max_execution_time=180000; SET optimizer_switch='hypergraph_optimizer=on'; "
+                    analyzed = client(worker_sql + "SET max_execution_time=180000; SET optimizer_switch='hypergraph_optimizer=on'; "
                                       "SET use_secondary_engine=FORCED;\nEXPLAIN ANALYZE " + sql_queries[q])
                     plans = output / side / 'plans'
                     (plans / f'q{q}.analyze').write_text(analyzed.stdout + analyzed.stderr)

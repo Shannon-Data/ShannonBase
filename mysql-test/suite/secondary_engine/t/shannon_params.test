@@ -39,24 +39,28 @@ INSERT INTO t1 (user_name, account_status) VALUES
 ('grace', 'active'),
 ('王五', 'suspended');
 
-SHOW VARIABLES LIKE "%rapid%";
+# The worker ceiling follows the host, so it is left out of these dumps.
+SHOW VARIABLES WHERE Variable_name LIKE "%rapid%" AND Variable_name <> 'rapid_parallel_max_workers';
 --ERROR 1229
 SET rapid_async_column_threshold=11;
 
 SET GLOBAL rapid_async_column_threshold=11;
-SHOW VARIABLES LIKE "%rapid%";
+# The worker ceiling follows the host, so it is left out of these dumps.
+SHOW VARIABLES WHERE Variable_name LIKE "%rapid%" AND Variable_name <> 'rapid_parallel_max_workers';
 
 ALTER TABLE  t1 secondary_load;
 --ERROR 3877
 SET GLOBAL rapid_async_column_threshold=10;
 ALTER TABLE  t1 secondary_unload;
 SET GLOBAL rapid_async_column_threshold=10;
-SHOW VARIABLES LIKE "%rapid%";
+# The worker ceiling follows the host, so it is left out of these dumps.
+SHOW VARIABLES WHERE Variable_name LIKE "%rapid%" AND Variable_name <> 'rapid_parallel_max_workers';
 
 SET GLOBAL rapid_self_load_enabled=on;
 SET GLOBAL rapid_self_load_base_relation_fill_percentage = 80;
 SET GLOBAL rapid_self_load_interval_seconds=864;
-SHOW VARIABLES LIKE "%rapid%";
+# The worker ceiling follows the host, so it is left out of these dumps.
+SHOW VARIABLES WHERE Variable_name LIKE "%rapid%" AND Variable_name <> 'rapid_parallel_max_workers';
 
 SET GLOBAL rapid_async_column_threshold =10;
 SHOW VARIABLES LIKE "%rapid_async_column_threshold%";

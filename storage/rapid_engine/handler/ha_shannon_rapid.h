@@ -115,6 +115,9 @@ class ha_rapid : public handler {
                                size_t &rows, const std::vector<uint32_t> &projection);
   int complete_batch_projection(std::pmr::vector<ShannonBase::Executor::ColumnChunk> &chunks,
                                 const std::pmr::vector<uint32_t> &selection);
+  std::unique_ptr<ShannonBase::Executor::Morsel::ParallelSource> create_parallel_source(
+      ShannonBase::ResMgmt::BoundedMemoryResource *memory, const std::pmr::vector<Field *> &fields,
+      bool index_reverse = false);
 
   int index_next_batch(size_t batch_size, std::pmr::vector<ShannonBase::Executor::ColumnChunk> &data, size_t &read_cnt,
                        bool reverse = false);

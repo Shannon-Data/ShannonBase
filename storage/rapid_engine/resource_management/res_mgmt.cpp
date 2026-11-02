@@ -341,6 +341,23 @@ char *ap_resource_group = nullptr;
 char *sync_resource_group = nullptr;
 char *maint_resource_group = nullptr;
 char *maint_user_resource_group = nullptr;
+size_t HardwareWorkers() {
+  // Platform capability comes from rapid_arch_inf.h, like every other OS/CPU
+  // check in this file, instead of a raw compiler macro.
+#ifdef SHANNON_LINUX_PLATFORM
+  // The affinity mask is what a CPU-limited container or taskset changes; the
+  // machine's core count would overstate what this process can run.
+  cpu_set_t set;
+  CPU_ZERO(&set);
+  if (sched_getaffinity(0, sizeof(set), &set) == 0) {
+    const int cpus = CPU_COUNT(&set);
+    if (cpus > 0) return static_cast<size_t>(cpus);
+  }
+#endif
+  const unsigned cores = std::thread::hardware_concurrency();
+  return cores ? static_cast<size_t>(cores) : 1;
+}
+
 WorkGovernor &work_governor() {
   static WorkGovernor governor;
   return governor;
@@ -600,7 +617,10 @@ const char *check_plan(Pins &pins, std::unique_lock<std::mutex> &cpu_lock, unsig
                          automatic ? auto_names[2] : sync_resource_group,
                          automatic ? auto_names[3] : maint_resource_group};
   std::set<std::pair<int, int>> occupied;
+  // Filled from the TP group in the first iteration; zeroed so the source
+  // thread audit below can never read an indeterminate mask.
   cpu_set_t tp_mask;
+  CPU_ZERO(&tp_mask);
   std::unordered_map<unsigned long long, cpu_set_t> classified;
   for (size_t i = 0; i < 4; ++i) {
     auto *group = pins.get(names[i]);

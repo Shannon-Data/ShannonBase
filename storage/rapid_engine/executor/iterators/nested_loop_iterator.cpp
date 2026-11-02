@@ -24,6 +24,7 @@
    The fundmental code for imcs.
 */
 #include "storage/rapid_engine/executor/iterators/nested_loop_iterator.h"
+#include "storage/rapid_engine/executor/iterators/materialize_iterator.h"
 
 #include <utility>
 
@@ -157,6 +158,9 @@ bool BatchNestedLoop::Init() {
   m_outer_pos = m_outer_rows = m_inner_pos = m_inner_rows = 0;
   m_outer_eof = m_inner_eof = m_probe = m_found = false;
   m_output_nulls.clear();
+  m_inner_block.clear();
+  m_inner_block_rows = 0;
+  m_inner_block_bytes = 0;
   m_inner_active = nullptr;
   m_outer_batch = dynamic_cast<BatchReadable *>(m_outer->real_iterator());
   m_inner_batch = dynamic_cast<BatchReadable *>(m_inner->real_iterator());
@@ -192,8 +196,8 @@ bool BatchNestedLoop::Init() {
   if (m_capacity == 0) return AllocationError("Rapid batch nested loop row exceeds its workspace");
 
   if (!Prepare(m_outer_tables, m_outer_chunks) || !Prepare(m_inner_tables, m_inner_chunks) ||
-      !TryReserve(m_outer_nulls, m_capacity) || !TryReserve(m_inner_nulls, m_capacity) ||
-      !TryReserve(m_output_nulls, m_capacity) || !TryReserve(m_decode, decode))
+      !Reserve(m_outer_nulls, m_capacity) || !Reserve(m_inner_nulls, m_capacity) ||
+      !Reserve(m_output_nulls, m_capacity) || !Reserve(m_decode, decode))
     return AllocationError("Rapid batch nested loop buffers allocation failed");
 
   m_decode.resize(decode);
@@ -250,7 +254,7 @@ int BatchNestedLoop::ReadBatchImpl(std::pmr::vector<ColumnChunk> &chunks, size_t
   // Bind by Field identity once per batch, not by scanning both input schemas
   // for every emitted row. Store indices so input-buffer growth is harmless.
   m_output_columns.clear();
-  if (!TryReserve(m_output_columns, chunks.size()))
+  if (!Reserve(m_output_columns, chunks.size()))
     return AllocationError("Rapid nested loop output mapping allocation failed");
   for (size_t target = 0; target < chunks.size(); ++target) {
     if (!chunks[target].valid()) continue;
@@ -329,7 +333,7 @@ bool BatchNestedLoop::Prepare(const pack_rows::TableCollection &tables, std::pmr
   chunks.clear();
   size_t count = 0;
   for (const auto &entry : tables.tables()) count += entry.table->s->fields;
-  if (!TryReserve(chunks, count)) return false;
+  if (!Reserve(chunks, count)) return false;
   for (const auto &entry : tables.tables())
     for (uint i = 0; i < entry.table->s->fields; ++i) {
       chunks.emplace_back(bitmap_is_set(entry.table->read_set, i) ? entry.table->field[i] : nullptr, m_capacity,
@@ -359,6 +363,58 @@ int BatchNestedLoop::Fetch(BatchReadable *source, std::pmr::vector<ColumnChunk> 
     nulls.push_back(flags);
   }
   return 0;
+}
+
+bool BatchNestedLoop::MaterializeInnerBlock() {
+  // Only the batch path can be drained here, and only tables that cannot produce
+  // NULL rows: the parallel transport carries no per-row table NULL channel.
+  auto *batch = (m_inner_batch != nullptr && m_inner_batch->SupportsBatchRead()) ? m_inner_batch : nullptr;
+  if (batch == nullptr) return false;
+
+  constexpr size_t capacity = Morsel::ParallelSource::kBatchRows;
+  std::pmr::vector<ColumnChunk> read(&m_memory);
+  if (!Prepare(m_inner_tables, read)) return false;
+  for (auto &chunk : read)
+    if (chunk.valid() && !chunk.grow(capacity)) return false;
+
+  m_inner_block.clear();
+  m_inner_block_rows = 0;
+  m_inner_block_bytes = 0;
+  if (!Reserve(m_inner_block, read.size())) return false;
+  for (const auto &chunk : read) {
+    m_inner_block.emplace_back(chunk.valid() ? chunk.source_field() : nullptr, chunk.valid() ? capacity : 0, &m_memory);
+    if (m_inner_block.back().failed()) return false;
+  }
+
+  // The whole reservation may be spent here: the block is the only thing the
+  // parallel phase needs to keep alive.
+  const size_t budget = m_reservation.bytes();
+  for (;;) {
+    for (auto &chunk : read) chunk.clear();
+    size_t rows{0};
+    const int result = batch->ReadBatch(read, capacity, rows);
+    if (result != 0 && result != HA_ERR_END_OF_FILE) return false;
+
+    size_t row_bytes = 0;
+    for (const auto &chunk : m_inner_block)
+      if (chunk.valid()) row_bytes += chunk.width() + 1;
+    if (rows != 0 && budget != 0 && m_inner_block_bytes + rows * row_bytes > budget) return false;
+
+    if (rows != 0) {
+      const size_t needed = m_inner_block_rows + rows;
+      for (auto &chunk : m_inner_block)
+        if (chunk.valid() && chunk.capacity() < needed && !chunk.grow(std::max(needed, chunk.capacity() * 2)))
+          return false;
+      for (size_t row = 0; row < rows; ++row)
+        for (size_t col = 0; col < m_inner_block.size(); ++col)
+          if (m_inner_block[col].valid() && !m_inner_block[col].append_from(read[col], row)) return false;
+    }
+    m_inner_block_rows += rows;
+    m_inner_block_bytes += rows * row_bytes;
+    if (result == HA_ERR_END_OF_FILE) break;
+    if (rows == 0) return false;
+  }
+  return m_inner_block_rows > 0;
 }
 
 int BatchNestedLoop::FetchInnerRows() {
@@ -485,6 +541,186 @@ void BatchNestedLoop::FinishProbe() {
   if (m_pfs) m_inner->EndPSIBatchModeIfStarted();
   ++m_outer_pos;
   m_probe = false;
+}
+
+namespace {
+// DuckDB's shape for a parallel nested loop: materialize the inner side once,
+// then let each worker rescan that immutable block with its own position. The
+// outer side supplies the parallelism and the ordinals; the inner side is pure
+// data, so no cursor is ever shared and none has to be cloned.
+class ParallelNestedLoop final : public Morsel::ParallelSource {
+ public:
+  struct OutputColumn {
+    size_t target;  // Index in the consumer's chunk vector.
+    size_t source;  // Index in the outer or inner source's field list.
+    bool inner;
+  };
+
+  ParallelNestedLoop(ResMgmt::BoundedMemoryResource *memory, std::unique_ptr<Morsel::ParallelSource> outer,
+                     Morsel::ReplayableParallelSource *inner, const std::pmr::vector<Field *> &output_fields,
+                     const std::pmr::vector<Field *> &outer_fields, const std::pmr::vector<Field *> &inner_fields,
+                     const std::pmr::vector<OutputColumn> &output_columns, size_t inner_rows)
+      : m_outer(std::move(outer)),
+        m_inner(inner),
+        m_output_fields(output_fields, memory),
+        m_outer_fields(outer_fields, memory),
+        m_inner_fields(inner_fields, memory),
+        m_output_columns(output_columns, memory),
+        m_inner_rows(inner_rows) {}
+
+  size_t tasks() const override { return m_outer->tasks(); }
+  uint64_t max_ordinal() const override {
+    const uint64_t outer_count = m_outer->max_ordinal() + 1;
+    // Zero when the inner source produced no rows; the product is the ordinal count otherwise.
+    const uint64_t ordinals = outer_count * m_inner_rows;
+    return ordinals == 0 ? 0 : ordinals - 1;
+  }
+  size_t extra_scratch_bytes() const override { return m_outer->extra_scratch_bytes(); }
+
+  bool ExecuteImpl(THD *worker, ResMgmt::BoundedMemoryResource *memory, const std::atomic<bool> &cancelled,
+                   const Consumer &consume) override {
+    constexpr size_t capacity = kBatchRows;
+    std::pmr::vector<ColumnChunk> inner_chunks(memory);
+    std::pmr::vector<ColumnChunk> output(memory);
+    std::pmr::vector<uint32_t> selection(memory);
+    std::pmr::vector<uint64_t> ordinals(memory);
+    if (!Reserve(inner_chunks, m_inner_fields.size()) || !Reserve(output, m_output_fields.size())) return true;
+    for (Field *field : m_inner_fields) {
+      inner_chunks.emplace_back(field, capacity, memory);
+      if (inner_chunks.back().failed()) return true;
+    }
+    for (Field *field : m_output_fields) {
+      output.emplace_back(field, capacity, memory);
+      if (output.back().failed()) return true;
+    }
+    if (!Reserve(ordinals, capacity)) return true;
+
+    bool failed = false;
+    const auto flush = [&]() -> bool {
+      if (ordinals.empty()) return false;
+      if (consume(output, ordinals.size(), selection, ordinals)) return true;
+      for (auto &chunk : output) chunk.clear();
+      ordinals.clear();
+      return false;
+    };
+
+    const bool error = m_outer->Execute(
+        worker, memory, cancelled,
+        [&](const std::pmr::vector<ColumnChunk> &outer_chunks, size_t rows, const std::pmr::vector<uint32_t> &chosen,
+            const std::pmr::vector<uint64_t> &outer_ordinals) {
+          if (failed) return true;
+          const size_t outer_rows = chosen.empty() ? rows : chosen.size();
+          for (size_t position = 0; position < outer_rows; ++position) {
+            if (cancelled.load(std::memory_order_acquire)) return true;
+            const size_t outer_row = chosen.empty() ? position : chosen[position];
+            const uint64_t base = outer_ordinals[position] * m_inner_rows;
+            // The inner block can be larger than one transport batch, so it is
+            // replayed in slices; each slice refills only the inner chunks.
+            for (size_t start = 0; start < m_inner_rows; start += capacity) {
+              const size_t count = std::min(capacity, m_inner_rows - start);
+              for (auto &chunk : inner_chunks) chunk.clear();
+              if (!m_inner->Replay(start, count, inner_chunks)) {
+                failed = true;
+                return true;
+              }
+              for (size_t i = 0; i < count; ++i) {
+                for (const auto &column : m_output_columns) {
+                  auto &target = output[column.target];
+                  if (!target.valid()) continue;
+                  const ColumnChunk &source = column.inner ? inner_chunks[column.source] : outer_chunks[column.source];
+                  const size_t row = column.inner ? i : outer_row;
+                  const bool is_null = source.nullable_fast(row);
+                  if (!target.add(is_null ? nullptr : source.data_fast(row), is_null ? 0 : source.width(), is_null)) {
+                    failed = true;
+                    return true;
+                  }
+                }
+                ordinals.push_back(base + start + i);
+                if (ordinals.size() == capacity && flush()) {
+                  failed = true;
+                  return true;
+                }
+              }
+            }
+          }
+          return false;
+        });
+    if (error || failed) return true;
+    if (flush()) return true;
+    return false;
+  }
+
+ private:
+  std::unique_ptr<Morsel::ParallelSource> m_outer;
+  Morsel::ReplayableParallelSource *m_inner;
+  std::pmr::vector<Field *> m_output_fields, m_outer_fields, m_inner_fields;
+  std::pmr::vector<OutputColumn> m_output_columns;
+  size_t m_inner_rows{0};
+};
+}  // namespace
+
+std::unique_ptr<Morsel::ParallelSource> BatchNestedLoop::CreateParallelSource(ResMgmt::BoundedMemoryResource *memory,
+                                                                              const std::pmr::vector<Field *> &fields) {
+  const auto isolation = ResMgmt::work_governor().mode();
+  // Only a fresh inner-join probe: OUTER/ANTI also emit complement rows, and a
+  // started probe has already consumed outer rows the runs would redo.
+  if (isolation == ResMgmt::IsolationMode::AUTO || isolation == ResMgmt::IsolationMode::STRICT_CPU || !m_enabled ||
+      m_type != JoinType::INNER || m_probe || m_outer_pos != 0 || m_outer_rows != 0 || m_outer_eof)
+    return {};
+  // The parallel transport has no per-row table NULL channel, so any table that
+  // could produce NULL rows would be silently wrong here.
+  for (const auto &entry : m_outer_tables.tables())
+    if (entry.table->is_nullable()) return {};
+  for (const auto &entry : m_inner_tables.tables())
+    if (entry.table->is_nullable()) return {};
+
+  const auto belongs_to = [](const pack_rows::TableCollection &tables, const Field *field) {
+    for (const auto &entry : tables.tables())
+      if (entry.table == field->table) return true;
+    return false;
+  };
+
+  std::pmr::vector<Field *> outer_fields(memory), inner_fields(memory);
+  std::pmr::vector<ParallelNestedLoop::OutputColumn> output_columns(memory);
+  if (!Reserve(output_columns, fields.size())) return {};
+  for (Field *field : fields) {
+    if (belongs_to(m_outer_tables, field)) {
+      output_columns.push_back({output_columns.size(), outer_fields.size(), false});
+      outer_fields.push_back(field);
+    } else if (belongs_to(m_inner_tables, field)) {
+      output_columns.push_back({output_columns.size(), inner_fields.size(), true});
+      inner_fields.push_back(field);
+    } else
+      return {};
+  }
+  if (outer_fields.empty() || inner_fields.empty()) return {};
+
+  auto outer = m_outer_batch->CreateParallelSource(memory, outer_fields);
+  if (!outer || outer->tasks() < 2) return {};
+
+  // Materializing the inner side once is exactly what makes the rescan safe:
+  // the block is immutable and outer-independent by construction (the batch
+  // materializer refuses rematerialize/correlated shapes).
+  if (m_inner->Init()) return {};
+  std::unique_ptr<Morsel::ParallelSource> inner = m_inner_batch->CreateParallelSource(memory, inner_fields);
+  // No split at all means the inner is a per-outer-row lookup: it must be
+  // re-driven for every outer row, so nothing here may be materialized.
+  if (inner == nullptr) return {};
+  auto *replay = dynamic_cast<Morsel::ReplayableParallelSource *>(inner.get());
+  if (replay == nullptr || replay->replay_row_count() < 1) {
+    // Stream-shaped inner. Only a correlation-free inner is BatchReadable here:
+    // REF and dependent-subquery inners are not, so those stay native. Drain it
+    // once, as a hash join drains its build side, and let workers replay a block.
+    inner.reset();
+    if (!MaterializeInnerBlock()) return {};
+    inner = std::make_unique<Morsel::MaterializedSource>(memory, m_inner_block, m_inner_block_rows, inner_fields);
+    replay = dynamic_cast<Morsel::ReplayableParallelSource *>(inner.get());
+    if (replay == nullptr || replay->replay_row_count() < 1) return {};
+  }
+  if (replay->replay_row_count() > (UINT64_MAX / std::max<uint64_t>(1, outer->max_ordinal() + 1))) return {};
+
+  return std::make_unique<ParallelNestedLoop>(memory, std::move(outer), replay, fields, outer_fields, inner_fields,
+                                              output_columns, replay->replay_row_count());
 }
 }  // namespace detail
 

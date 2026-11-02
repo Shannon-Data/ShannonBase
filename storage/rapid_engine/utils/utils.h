@@ -62,64 +62,10 @@ namespace Compress {
 class Dictionary;
 }
 namespace Utils {
-// Overflow-checked arithmetic; true means overflow.
-#if defined(SHANNON_OVERFLOW_BUILTINS_SUPPORTED)
-#define SHANNON_ADD_OVERFLOW(a, b, r) __builtin_add_overflow((a), (b), (r))
-#define SHANNON_SUB_OVERFLOW(a, b, r) __builtin_sub_overflow((a), (b), (r))
-#define SHANNON_MUL_OVERFLOW(a, b, r) __builtin_mul_overflow((a), (b), (r))
-#else
-// Portable fallback (e.g. MSVC): same contract, slower code.
-template <typename T, typename U, typename R>
-inline bool add_overflow(T a, U b, R *r) {
-  using C = typename std::common_type<T, U, R>::type;
-  const C x = static_cast<C>(a), y = static_cast<C>(b);
-  if constexpr (std::is_signed<C>::value) {
-    if ((y > 0 && x > (std::numeric_limits<C>::max)() - y) || (y < 0 && x < (std::numeric_limits<C>::min)() - y))
-      return true;
-  } else if (x > (std::numeric_limits<C>::max)() - y) {
-    return true;
-  }
-  *r = static_cast<R>(x + y);
-  return false;
-}
-
-template <typename T, typename U, typename R>
-inline bool sub_overflow(T a, U b, R *r) {
-  using C = typename std::common_type<T, U, R>::type;
-  const C x = static_cast<C>(a), y = static_cast<C>(b);
-  if constexpr (std::is_signed<C>::value) {
-    if ((y > 0 && x < (std::numeric_limits<C>::min)() + y) || (y < 0 && x > (std::numeric_limits<C>::max)() + y))
-      return true;
-  } else if (x < y) {
-    return true;
-  }
-  *r = static_cast<R>(x - y);
-  return false;
-}
-
-template <typename T, typename U, typename R>
-inline bool mul_overflow(T a, U b, R *r) {
-  using C = typename std::common_type<T, U, R>::type;
-  const C x = static_cast<C>(a), y = static_cast<C>(b);
-  const C max = (std::numeric_limits<C>::max)();
-  if constexpr (std::is_signed<C>::value) {
-    const C min = (std::numeric_limits<C>::min)();
-    if (x == 0 || y == 0) {
-      *r = 0;
-      return false;
-    }
-    if ((x == -1 && y == min) || (y == -1 && x == min)) return true;
-    if (x > 0 ? (y > 0 ? x > max / y : y < min / x) : (y > 0 ? x < min / y : y < max / x)) return true;
-  } else if (y != 0 && x > max / y) {
-    return true;
-  }
-  *r = static_cast<R>(x * y);
-  return false;
-}
-#define SHANNON_ADD_OVERFLOW(a, b, r) ::ShannonBase::Utils::add_overflow((a), (b), (r))
-#define SHANNON_SUB_OVERFLOW(a, b, r) ::ShannonBase::Utils::sub_overflow((a), (b), (r))
-#define SHANNON_MUL_OVERFLOW(a, b, r) ::ShannonBase::Utils::mul_overflow((a), (b), (r))
-#endif
+// Overflow-checked arithmetic (SHANNON_ADD/SUB/MUL_OVERFLOW); true means
+// overflow, and the wrapped result is written through the out parameter. The
+// platform mapping -- native compiler builtins, or the portable fallback --
+// lives in rapid_arch_inf.h so every component shares one definition.
 
 // Configuration and shutdown share the wait mutex, so notifications cannot be
 // lost between checking the predicate and entering the condition-variable wait.
@@ -511,37 +457,24 @@ class Util {
     return ostr.str();
   }
 
-  // check Nth is 1 or not.
+  // Per-bit access. Bound is `rows`, not size*8: the padding bits in the last
+  // byte must stay clear, or count_ones()/is_all_true() over-report.
   static inline bool bit_array_get(bit_array_t *ba, size_t n) {
-    if (!ba || !ba->data || n >= ba->size * 8) return false;
-
-    size_t byte_index = n / 8;
-    size_t bit_index = n % 8;
-    return (ba->data[byte_index] & (1 << bit_index)) != 0;
+    return ba && ba->data && n < ba->rows && ((ba->data[n >> 3] >> (n & 7)) & 1);
   }
 
   static inline bool bit_array_get_fast(const uint8_t *data, size_t n) { return (data[n >> 3] >> (n & 7)) & 1; }
 
   // set Nth is 1.
   static inline void bit_array_set(bit_array_t *ba, size_t n) {
-    if (!ba || !ba->data || n >= ba->size * 8) return;
-
-    size_t byte_index = n / 8;
-    size_t bit_index = n % 8;
-    ba->data[byte_index] |= (1 << bit_index);
+    if (!ba || !ba->data || n >= ba->rows) return;
+    ba->data[n >> 3] |= static_cast<uint8_t>(1u << (n & 7));
   }
 
   // reset Nth is 0.
   static inline void bit_array_reset(bit_array_t *ba, size_t n) {
-    // Same guard as bit_array_get/bit_array_set above. These three are called
-    // as a matched pair throughout (is_null ? set : reset), so a caller kept
-    // safe by the set path's bounds check was writing unguarded here.
-    // bit_array_get_fast() is the deliberate no-check variant.
-    if (!ba || !ba->data || n >= ba->size * 8) return;
-
-    size_t byte_index = n / 8;
-    size_t bit_index = n % 8;
-    ba->data[byte_index] &= ~(1 << bit_index);
+    if (!ba || !ba->data || n >= ba->rows) return;
+    ba->data[n >> 3] &= static_cast<uint8_t>(~(1u << (n & 7)));
   }
 
   static inline bool is_varstring(enum_field_types type) {
