@@ -103,6 +103,8 @@ namespace Executor {
   aborts the query rather than falling back.
  */
 Item *VectorizableAggregateValueExpr(Item_sum *item);
+// Shared planning/execution gate for bare string MIN/MAX arguments.
+bool VectorizableStringExtremum(Item_sum *item);
 
 /**
   True when the vectorized hash aggregate can build a group key from a field of
@@ -328,6 +330,7 @@ class VectorizedAggregateIterator final : public RowIterator, public ResMgmt::Ev
       // be current; IsSimpleAggregate() admits only the aggregate kinds whose
       // vectorized route feeds Item_sum::add_value() directly.
       Item *value_expr{nullptr};
+      std::shared_ptr<const Compress::Dictionary::OrderRanks> dictionary_order;
       bool vectorizable;
       uint16_t source_field_table_index;                // Retained: for row-by-row path reference only,
                                                         // no longer used in batch path addressing.
@@ -432,6 +435,9 @@ class VectorizedAggregateIterator final : public RowIterator, public ResMgmt::Ev
     double real_sum{0.0};
     Utils::DecimalSum decimal_sum;
     std::pmr::vector<uchar> extremum;
+    // Optional acceleration only. The canonical row image remains authoritative
+    // across row input, spill serialization and replay.
+    uint32_t extremum_code{UINT32_MAX};
   };
 
   struct HashGroupOrderValue {

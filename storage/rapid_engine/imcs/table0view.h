@@ -183,6 +183,13 @@ class RapidCursor : public MemoryObject {
   // read the data in data in batch mode. Vectorised / batch scan
   int next(size_t batch_size, std::pmr::vector<ShannonBase::Executor::ColumnChunk> &data, size_t &read_cnt);
 
+  // Synchronous two-phase scan. The condition-column read retains physical row IDs;
+  // complete_projection must run before the next read on this cursor.
+  // HA_ERR_WRONG_COMMAND guarantees no input consumption or output writes.
+  int next_projected(size_t capacity, std::pmr::vector<Executor::ColumnChunk> &chunks, size_t &rows,
+                     const std::vector<uint32_t> &projection);
+  int complete_projection(std::pmr::vector<Executor::ColumnChunk> &chunks, const std::pmr::vector<uint32_t> &selection);
+
   // Random-access / position
   int rnd_pos(uchar *buff, uchar *pos);
   row_id_t position(const unsigned char *record);

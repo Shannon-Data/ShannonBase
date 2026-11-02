@@ -36,6 +36,7 @@
 #include <limits>
 
 #include "mysql/strings/m_ctype.h"  // my_wildcmp
+#include "sql/debug_sync.h"
 #include "sql/field.h"
 #include "sql/item.h"
 #include "sql/item_cmpfunc.h"
@@ -44,6 +45,8 @@
 #include "sql/sql_class.h"
 #include "sql/table.h"  // TABLE
 #include "storage/rapid_engine/compress/dictionary/dictionary.h"
+#include "storage/rapid_engine/executor/iterators/table_scan_iterator.h"
+#include "storage/rapid_engine/optimizer/optimizer.h"
 #include "storage/rapid_engine/utils/decimal64.h"
 
 #if defined(SHANNON_POSIX_PLATFORM)
@@ -954,6 +957,118 @@ bool VectorizedFilterIterator::CollectConditionFields() {
   return failed;
 }
 
+void VectorizedFilterIterator::CompileDictionaryPredicate(Item *condition, bool like_only) {
+  if (!condition || m_dictionary_predicate || condition->is_non_deterministic()) return;
+  if (condition->type() == Item::COND_ITEM) {
+    auto *cond = down_cast<Item_cond *>(condition);
+    if (cond->functype() != Item_func::COND_AND_FUNC) return;
+    List_iterator<Item> children(*cond->argument_list());
+    while (Item *child = children++) {
+      CompileDictionaryPredicate(child, like_only);
+      if (m_dictionary_predicate) return;
+    }
+    return;
+  }
+  if (condition->type() != Item::FUNC_ITEM) return;
+  auto *func = down_cast<Item_func *>(condition);
+  auto *match = func;
+  if (func->functype() == Item_func::NOT_FUNC) {
+    if (func->argument_count() != 1 || func->arguments()[0]->type() != Item::FUNC_ITEM) return;
+    match = down_cast<Item_func *>(func->arguments()[0]);
+    if (match->functype() != Item_func::LIKE_FUNC) return;
+  }
+  if (like_only && match->functype() != Item_func::LIKE_FUNC) return;
+  switch (match->functype()) {
+    case Item_func::LIKE_FUNC:
+    case Item_func::EQ_FUNC:
+    case Item_func::NE_FUNC:
+    case Item_func::LT_FUNC:
+    case Item_func::LE_FUNC:
+    case Item_func::GT_FUNC:
+    case Item_func::GE_FUNC:
+      break;
+    default:
+      return;
+  }
+  if (match->argument_count() < 2) return;
+  Field *field = nullptr;
+  for (uint i = 0; i < 2; ++i) {
+    Item *arg = match->arguments()[i]->real_item();
+    if (arg->type() == Item::FIELD_ITEM) field = down_cast<Item_field *>(arg)->field;
+  }
+  if (!field || !Utils::Util::is_string(field->type()) || !Dictionary(field)) return;
+  auto predicate = Optimizer::Optimizer::convert_item_to_predicate(thd(), condition);
+  if (!predicate || predicate->is_compound() || !Optimizer::Utils::is_storage_index_predicate_safe(predicate.get()))
+    return;
+  m_dictionary_predicate = std::move(predicate);
+  m_dictionary_field = field;
+  m_dictionary_residual = condition != m_condition;
+}
+
+bool VectorizedFilterIterator::EvaluateDictionaryPredicateBatch(const std::pmr::vector<ColumnChunk> &chunks,
+                                                                size_t rows) {
+  if (!m_dictionary_predicate) return false;
+  const ColumnChunk *column = nullptr;
+  for (const auto &chunk : chunks)
+    if (chunk.valid() && chunk.source_field() == m_dictionary_field) column = &chunk;
+  auto dictionary = Dictionary(m_dictionary_field);
+  if (!column || column->width() != sizeof(uint32_t) || !dictionary) return false;
+  auto *predicate = static_cast<Imcs::Simple_Predicate *>(m_dictionary_predicate.get());
+  const auto mask = predicate->dictionary_mask(dictionary);
+  m_selection.clear();
+  if (!TryReserve(m_selection, rows)) {
+    AllocationError("Rapid dictionary predicate selection allocation failed");
+    return false;
+  }
+  size_t masked = 0, scalar = 0;
+  for (size_t logical = 0; logical < rows; ++logical) {
+    const size_t row = m_input_selection.empty() ? logical : m_input_selection[logical];
+    if (column->nullable_fast(row)) continue;
+    uint32_t id;
+    std::memcpy(&id, column->data_fast(row), sizeof(id));
+    bool matched;
+    if (mask && id < mask->size()) {
+      ++masked;
+      matched = (*mask)[id];
+    } else {
+      ++scalar;
+      const auto length = dictionary->get(id, m_condition_decode.data(), m_condition_decode.size());
+      if (!length) {
+        AllocationError("Rapid dictionary predicate could not decode a value");
+        return false;
+      }
+      matched = predicate->evaluate(reinterpret_cast<const uchar *>(m_condition_decode.data()), *length) ==
+                Imcs::TruthValue::TRUE_VALUE;
+    }
+    if (matched) m_selection.push_back(row);
+  }
+  auto &counters = RapidMonitor::rapid_counters;
+  if (predicate->has_mysql_like()) {
+    counters.query_like_mask_rows_total.fetch_add(masked, std::memory_order_relaxed);
+    counters.query_like_scalar_rows_total.fetch_add(scalar, std::memory_order_relaxed);
+    counters.query_vectorized_like_rows_total.fetch_add(rows, std::memory_order_relaxed);
+  } else {
+    counters.query_dictionary_predicate_rows_total.fetch_add(masked, std::memory_order_relaxed);
+  }
+  if (m_dictionary_residual) {
+    const size_t candidates = m_selection.size();
+    size_t kept = 0;
+    for (uint32_t row : m_selection) {
+      if (MaterializeConditionRow(chunks, row)) {
+        AllocationError("Rapid dictionary predicate could not restore residual fields");
+        return false;
+      }
+      const bool matched = m_condition->val_int() != 0 && !m_condition->null_value;
+      if (thd()->is_error()) return false;
+      if (matched) m_selection[kept++] = row;
+    }
+    m_selection.resize(kept);
+    m_stats.scalar_fallback_rows += candidates;
+    counters.query_scalar_expression_rows_total.fetch_add(candidates, std::memory_order_relaxed);
+  }
+  return true;
+}
+
 void VectorizedFilterIterator::CompileSimplePredicate() {
   m_simple_predicate = SimplePredicate{};
   if (m_condition == nullptr || m_condition->type() != Item::FUNC_ITEM) return;
@@ -1155,6 +1270,13 @@ bool VectorizedFilterIterator::Init() {
   if (m_batch_source != nullptr && !m_batch_source->SupportsBatchRead()) m_batch_source = nullptr;
   if (m_batch_source && (!m_reservation || CollectConditionFields()))
     return AllocationError("Rapid filter condition fields allocation failed");
+  m_dictionary_predicate.reset();
+  m_dictionary_field = nullptr;
+  m_dictionary_residual = false;
+  if (m_condition && !m_condition->is_non_deterministic()) {
+    CompileDictionaryPredicate(m_condition, true);
+    CompileDictionaryPredicate(m_condition, false);
+  }
   CompileSimplePredicate();
   m_expression.Compile(m_simple_predicate.valid ? nullptr : m_condition);
   return false;
@@ -1429,7 +1551,24 @@ int VectorizedFilterIterator::ReadSelectedBatchImpl(std::pmr::vector<ColumnChunk
   for (;;) {
     for (ColumnChunk &chunk : col_chunks) chunk.clear();
     size_t input_rows = 0;
-    const int result = m_batch_source->ReadSelectedBatch(col_chunks, capacity, input_rows, m_input_selection);
+    auto *scan = dynamic_cast<VectorizedTableScanIterator *>(m_batch_source);
+    bool late = scan && scan->SupportsLateMaterialization() &&
+                std::any_of(col_chunks.begin(), col_chunks.end(), [&](const auto &chunk) {
+                  return chunk.valid() && std::find(m_condition_fields.begin(), m_condition_fields.end(),
+                                                    chunk.source_field()) == m_condition_fields.end();
+                });
+    m_input_selection.clear();
+    int result = late ? scan->ReadPredicateBatch(col_chunks, capacity, input_rows, m_condition_fields)
+                      : m_batch_source->ReadSelectedBatch(col_chunks, capacity, input_rows, m_input_selection);
+    // WRONG_COMMAND is a preflight rejection: neither the scan nor the cursor
+    // has consumed input. Never retry an execution/completion error, or a
+    // partially filled batch, since that would skip or duplicate rows.
+    if (late && result == HA_ERR_WRONG_COMMAND && input_rows == 0 && !thd()->is_error() &&
+        std::all_of(col_chunks.begin(), col_chunks.end(), [](const auto &chunk) { return chunk.empty(); })) {
+      late = false;
+      result = m_batch_source->ReadSelectedBatch(col_chunks, capacity, input_rows, m_input_selection);
+      DEBUG_SYNC(thd(), "rapid_late_read_fallback");
+    }
     if (result != 0 && result != HA_ERR_END_OF_FILE) return result;
     if (!m_input_selection.empty()) {
       if (m_input_selection.size() != input_rows) return 1;
@@ -1438,11 +1577,16 @@ int VectorizedFilterIterator::ReadSelectedBatchImpl(std::pmr::vector<ColumnChunk
     }
     const size_t extent = m_input_selection.empty() ? input_rows : size_t(m_input_selection.back()) + 1;
     for (const auto &chunk : col_chunks)
-      if (chunk.failed() || (chunk.valid() && chunk.size() < extent)) return 1;
+      if (chunk.failed() || (chunk.valid() && chunk.size() < extent &&
+                             (!late || std::find(m_condition_fields.begin(), m_condition_fields.end(),
+                                                 chunk.source_field()) != m_condition_fields.end())))
+        return 1;
     m_stats.rows_in += input_rows;
     ++m_stats.batches;
 
-    bool used_vector_predicate = EvaluateSimplePredicateBatch(col_chunks, input_rows);
+    bool used_vector_predicate = EvaluateDictionaryPredicateBatch(col_chunks, input_rows);
+    if (thd()->is_error()) return 1;
+    if (!used_vector_predicate) used_vector_predicate = EvaluateSimplePredicateBatch(col_chunks, input_rows);
     if (!used_vector_predicate && m_expression.Evaluate(col_chunks, input_rows, &m_input_selection)) {
       m_selection.clear();
       if (!TryReserve(m_selection, input_rows)) return 1;
@@ -1469,6 +1613,7 @@ int VectorizedFilterIterator::ReadSelectedBatchImpl(std::pmr::vector<ColumnChunk
     }
 
     if (!m_selection.empty()) {
+      if (late && scan->CompleteProjection(col_chunks, m_selection)) return 1;
       if (!TryReserve(selection, m_selection.size())) return 1;
       selection.assign(m_selection.begin(), m_selection.end());
       for (uint32_t physical : m_selection) {

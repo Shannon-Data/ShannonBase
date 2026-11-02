@@ -56,30 +56,54 @@ bool Simple_Predicate::LikeOper::matches(std::string_view text, std::string_view
                     escape, escape == '_' ? -1 : '_', escape == '%' ? -1 : '%') == 0;
 }
 
-std::shared_ptr<const std::vector<uint8_t>> Simple_Predicate::like_dictionary_mask(
+std::shared_ptr<const std::vector<uint8_t>> Simple_Predicate::dictionary_mask(
     const std::shared_ptr<Compress::Dictionary> &dictionary) const {
-  if (!m_like_oper || !dictionary || value.is_null()) return {};
+  if (!dictionary || value.is_null()) return {};
+  // Keep the kernel's own admission no wider than the production callers'
+  // safety checks. String range comparisons remain on the scalar Item path.
+  switch (op) {
+    case PredicateOperator::EQUAL:
+    case PredicateOperator::NOT_EQUAL:
+      if (m_like_oper || value.type != PredicateValueType::STRING || !field_meta.load(std::memory_order_acquire))
+        return {};
+      break;
+    case PredicateOperator::LIKE:
+    case PredicateOperator::NOT_LIKE:
+      if (!m_like_oper) return {};
+      break;
+    default:
+      return {};
+  }
   constexpr size_t kMaxMaskedEntries = 1u << 16;
   const size_t entries = dictionary->publish_next_id();
   if (entries == 0 || entries > kMaxMaskedEntries) return {};
-  std::lock_guard lock(m_like_dictionary_mutex);
-  if (m_like_dictionary == dictionary && m_like_dictionary_mask && m_like_dictionary_mask->size() == entries)
-    return m_like_dictionary_mask;
+  std::lock_guard lock(m_dictionary_mutex);
+  const uint64_t generation = dictionary->generation();
+  if (m_dictionary == dictionary && m_dictionary_mask && m_dictionary_mask->size() == entries &&
+      m_dictionary_generation == generation)
+    return m_dictionary_mask;
 
-  auto mask = std::make_shared<std::vector<uint8_t>>(entries, 0);
-  for (size_t id = 0; id < entries; ++id) {
-    std::string decoded;
-    std::string_view text = dictionary->get_view(id);
-    if (text.data() == nullptr) {
-      decoded = dictionary->get(id);
-      text = decoded;
+  try {
+    auto mask = std::make_shared<std::vector<uint8_t>>(entries, 0);
+    for (size_t id = 1; id < entries; ++id) {
+      std::string decoded;
+      std::string_view text = dictionary->get_view(id);
+      if (text.data() == nullptr) {
+        decoded = dictionary->get(id);
+        text = decoded;
+      }
+      (*mask)[id] = evaluate(reinterpret_cast<const uchar *>(text.data()), text.size()) == TruthValue::TRUE_VALUE;
     }
-    const bool matched = m_like_oper->matches(text, value.string_value);
-    (*mask)[id] = matched != (op == PredicateOperator::NOT_LIKE);
+    // A writer may publish an entry while the mask is built. Never cache a
+    // mixed generation; the caller can safely evaluate the batch scalar-wise.
+    if (dictionary->generation() != generation) return {};
+    m_dictionary_generation = generation;
+    m_dictionary = dictionary;
+    m_dictionary_mask = std::move(mask);
+    return m_dictionary_mask;
+  } catch (const std::bad_alloc &) {
+    return {};
   }
-  m_like_dictionary = dictionary;
-  m_like_dictionary_mask = std::move(mask);
-  return m_like_dictionary_mask;
 }
 
 namespace {

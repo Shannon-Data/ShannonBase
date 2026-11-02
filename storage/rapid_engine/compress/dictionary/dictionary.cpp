@@ -80,6 +80,7 @@ void Dictionary::publish_entry(uint64 strid, Entry entry) {
   // consistent.
   m_entry_pool.push_back(entry);
   slots[index].store(&m_entry_pool.back(), std::memory_order_release);
+  m_generation.fetch_add(1, std::memory_order_release);
 }
 
 const char *Dictionary::arena_append(const char *data, size_t len) {
@@ -263,6 +264,56 @@ std::string_view Dictionary::get_view(uint64 strid) const {
 size_t Dictionary::length_of(uint64 strid) const {
   const Entry *entry = lookup(strid);
   return entry == nullptr ? 0 : entry->decoded_length;
+}
+
+std::shared_ptr<const Dictionary::OrderRanks> Dictionary::order_ranks(const CHARSET_INFO *charset,
+                                                                      bool trim_char_padding) const {
+  if (!charset) return {};
+  constexpr size_t kMaxRankedEntries = 1u << 16;
+  std::lock_guard cache_lock(m_order_mutex);
+  const uint64_t version = generation();
+  if (m_order_ranks && m_order_ranks->generation == version && m_order_charset == charset &&
+      m_order_trim == trim_char_padding)
+    return m_order_ranks;
+  std::shared_lock entries_lock(m_dict_mutex);
+  const size_t count = m_next_id.load(std::memory_order_relaxed);
+  if (count > kMaxRankedEntries) return {};
+  size_t decoded_bytes = 0;
+  constexpr size_t kMaxOrderBytes = 8u << 20;
+  for (size_t id = 1; id < count; ++id) {
+    const size_t length = length_of(id);
+    if (length > kMaxOrderBytes - decoded_bytes) return {};
+    decoded_bytes += length;
+  }
+  try {
+    auto order = std::make_shared<OrderRanks>();
+    order->generation = generation();
+    order->ranks.assign(count, UINT32_MAX);
+    std::vector<uint32_t> ids;
+    std::vector<std::string> values(count);
+    for (size_t id = 1; id < count; ++id) {
+      if (!lookup(id)) continue;
+      values[id] = get(id);
+      if (trim_char_padding) values[id].resize(charset->cset->lengthsp(charset, values[id].data(), values[id].size()));
+      ids.push_back(id);
+    }
+    const auto compare = [&](uint32_t a, uint32_t b) {
+      return charset->coll->strnncollsp(charset, reinterpret_cast<const uchar *>(values[a].data()), values[a].size(),
+                                        reinterpret_cast<const uchar *>(values[b].data()), values[b].size());
+    };
+    std::sort(ids.begin(), ids.end(), [&](uint32_t a, uint32_t b) { return compare(a, b) < 0; });
+    uint32_t rank = 0;
+    for (size_t i = 0; i < ids.size(); ++i) {
+      if (i && compare(ids[i - 1], ids[i]) != 0) ++rank;
+      order->ranks[ids[i]] = rank;
+    }
+    m_order_charset = charset;
+    m_order_trim = trim_char_padding;
+    m_order_ranks = order;
+    return order;
+  } catch (const std::bad_alloc &) {
+    return {};  // Optional acceleration; retain the scalar comparator.
+  }
 }
 
 int32 Dictionary::id(uint64 strid, String &ret_val) {

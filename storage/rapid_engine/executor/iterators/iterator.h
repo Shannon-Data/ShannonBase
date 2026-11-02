@@ -48,6 +48,7 @@
 #include "sql/iterators/row_iterator.h"
 
 #include "storage/rapid_engine/executor/iterators/expression_iterator.h"
+#include "storage/rapid_engine/imcs/predicate.h"
 #include "storage/rapid_engine/include/rapid_arch_inf.h"
 #include "storage/rapid_engine/include/rapid_const.h"
 #include "storage/rapid_engine/include/rapid_types.h"
@@ -845,9 +846,9 @@ bool PushbackBatchTailShared(const std::pmr::vector<ColumnChunk> &chunks, size_t
 /**
  * Batch-preserving FILTER adapter.
  *
- * The fast path asks a BatchReadable child for a complete batch, evaluates the
- * residual predicate while only materializing fields referenced by the predicate,
- * then compacts all output columns in-place. Unsupported layouts transparently
+ * The fast path retains a physical selection. A scan can read predicate columns
+ * first and gather other columns only for survivors. ReadBatch is the explicit
+ * dense boundary; ReadSelectedBatch leaves the chunks sparse. Unsupported layouts transparently
  * use the ordinary RowIterator path but still return a batch to the parent.
  */
 class VectorizedFilterIterator final : public RowIterator, public BatchReadable {
@@ -891,6 +892,8 @@ class VectorizedFilterIterator final : public RowIterator, public BatchReadable 
 
   bool CollectConditionFields();
   void CompileSimplePredicate();
+  void CompileDictionaryPredicate(Item *condition, bool like_only);
+  bool EvaluateDictionaryPredicateBatch(const std::pmr::vector<ColumnChunk> &chunks, size_t rows);
   bool EvaluateSimplePredicateBatch(const std::pmr::vector<ColumnChunk> &chunks, size_t rows);
   bool BuildConditionChunkMap(const std::pmr::vector<ColumnChunk> &chunks);
   bool MaterializeConditionRow(const std::pmr::vector<ColumnChunk> &chunks, size_t row);
@@ -913,6 +916,9 @@ class VectorizedFilterIterator final : public RowIterator, public BatchReadable 
   std::pmr::vector<uint64_t> m_batch_nulls, m_lookahead_nulls;
   std::pmr::vector<size_t> m_simd_selection;
   SimplePredicate m_simple_predicate;
+  std::unique_ptr<Imcs::Predicate> m_dictionary_predicate;
+  Field *m_dictionary_field{nullptr};
+  bool m_dictionary_residual{false};
   VectorizedExpression m_expression{&m_memory};
 
   std::pmr::vector<ColumnChunk> m_lookahead_chunks;

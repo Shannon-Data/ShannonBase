@@ -111,6 +111,11 @@ class ha_rapid : public handler {
   int rnd_next_batch(size_t batch_size, std::pmr::vector<ShannonBase::Executor::ColumnChunk> &data, size_t &read_cnt);
 
   /** Batched ordered index read; `reverse` walks the index backwards. */
+  int rnd_next_projected_batch(size_t capacity, std::pmr::vector<ShannonBase::Executor::ColumnChunk> &chunks,
+                               size_t &rows, const std::vector<uint32_t> &projection);
+  int complete_batch_projection(std::pmr::vector<ShannonBase::Executor::ColumnChunk> &chunks,
+                                const std::pmr::vector<uint32_t> &selection);
+
   int index_next_batch(size_t batch_size, std::pmr::vector<ShannonBase::Executor::ColumnChunk> &data, size_t &read_cnt,
                        bool reverse = false);
 

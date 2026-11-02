@@ -111,6 +111,16 @@ class Dictionary {
 
   size_t size() const { return m_next_id.load(); }
 
+  // IDs are insertion ordered. These immutable ranks order IDs by MySQL
+  // collation; equivalent spellings share a rank, retaining the first MIN/MAX
+  // representative. A bounded cache is invalidated on publication/recovery.
+  struct OrderRanks {
+    uint64_t generation{0};
+    std::vector<uint32_t> ranks;  // UINT32_MAX for holes in recovered dictionaries
+  };
+  std::shared_ptr<const OrderRanks> order_ranks(const CHARSET_INFO *charset, bool trim_char_padding) const;
+  uint64_t generation() const { return m_generation.load(std::memory_order_acquire); }
+
   // Reverse lookup without allocating a temporary string for a scalar probe.
   int64 find_id(std::string_view value) const;
 
@@ -235,6 +245,11 @@ class Dictionary {
   std::atomic<size_t> m_content_bytes{0};
 
   mutable std::shared_mutex m_dict_mutex;
+  std::atomic<uint64_t> m_generation{0};
+  mutable std::mutex m_order_mutex;
+  mutable const CHARSET_INFO *m_order_charset{nullptr};
+  mutable bool m_order_trim{false};
+  mutable std::shared_ptr<const OrderRanks> m_order_ranks;
 
   // hash(decoded value) -> id. Multimap because two values may collide; the
   // candidates are then compared against the arena bytes. Holding the hash

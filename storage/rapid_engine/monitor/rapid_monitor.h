@@ -138,6 +138,13 @@ struct Metrics {
   uint64_t query_vectorized_sort_batch_rows_total{0};
   uint64_t query_vectorized_ref_batch_rows_total{0};
   uint64_t query_vectorized_expression_rows_total{0};
+  uint64_t query_like_mask_rows_total{0};
+  uint64_t query_like_scalar_rows_total{0};
+  uint64_t query_dictionary_predicate_rows_total{0};
+  uint64_t query_vectorized_like_rows_total{0};
+  uint64_t query_vectorized_dictionary_minmax_rows_total{0};
+  uint64_t query_late_predicate_rows_total{0};
+  uint64_t query_late_projection_cells_total{0};
   uint64_t query_scalar_expression_rows_total{0};
   uint64_t query_vectorized_stream_batch_rows_total{0};
   uint64_t query_vectorized_materialize_batch_rows_total{0};
@@ -209,6 +216,13 @@ struct RapidCounters {
   std::atomic<uint64_t> query_vectorized_sort_batch_rows_total{0};
   std::atomic<uint64_t> query_vectorized_ref_batch_rows_total{0};
   std::atomic<uint64_t> query_vectorized_expression_rows_total{0};
+  std::atomic<uint64_t> query_like_mask_rows_total{0};
+  std::atomic<uint64_t> query_like_scalar_rows_total{0};
+  std::atomic<uint64_t> query_dictionary_predicate_rows_total{0};
+  std::atomic<uint64_t> query_vectorized_like_rows_total{0};
+  std::atomic<uint64_t> query_vectorized_dictionary_minmax_rows_total{0};
+  std::atomic<uint64_t> query_late_predicate_rows_total{0};
+  std::atomic<uint64_t> query_late_projection_cells_total{0};
   std::atomic<uint64_t> query_scalar_expression_rows_total{0};
   std::atomic<uint64_t> query_vectorized_stream_batch_rows_total{0};
   std::atomic<uint64_t> query_vectorized_materialize_batch_rows_total{0};

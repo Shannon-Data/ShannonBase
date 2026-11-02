@@ -40,6 +40,9 @@
 
 #include "storage/rapid_engine/compress/dictionary/dictionary.h"
 #include "storage/rapid_engine/imcs/predicate.h"
+#include "unittest/gunit/fake_table.h"
+#include "unittest/gunit/temptable/mock_field_varstring.h"
+#include "unittest/gunit/test_utils.h"
 
 namespace shannon_storage_index_unittest {
 
@@ -359,13 +362,13 @@ TEST(LikePredicateTest, DictionaryMaskRefreshesAndKeepsPriorSnapshotValid) {
   const auto second = store("beta");
   Simple_Predicate like(0, PredicateOperator::LIKE, PredicateValue(std::string("a%")), MYSQL_TYPE_VARCHAR,
                         &my_charset_utf8mb4_0900_ai_ci, '\\');
-  auto mask = like.like_dictionary_mask(dictionary);
+  auto mask = like.dictionary_mask(dictionary);
   ASSERT_TRUE(mask);
   EXPECT_EQ(1, mask->at(first));
   EXPECT_EQ(0, mask->at(second));
-  EXPECT_EQ(mask, like.like_dictionary_mask(dictionary));
+  EXPECT_EQ(mask, like.dictionary_mask(dictionary));
   const auto added = store("ALPINE");
-  auto refreshed = like.like_dictionary_mask(dictionary);
+  auto refreshed = like.dictionary_mask(dictionary);
   ASSERT_TRUE(refreshed);
   EXPECT_NE(mask, refreshed);
   EXPECT_EQ(1, refreshed->at(added));
@@ -373,7 +376,7 @@ TEST(LikePredicateTest, DictionaryMaskRefreshesAndKeepsPriorSnapshotValid) {
   auto replacement = std::make_shared<ShannonBase::Compress::Dictionary>();
   const std::string other = "beta";
   const auto id = replacement->store(reinterpret_cast<const uchar *>(other.data()), other.size());
-  EXPECT_EQ(0, like.like_dictionary_mask(replacement)->at(id));
+  EXPECT_EQ(0, like.dictionary_mask(replacement)->at(id));
 }
 
 TEST(LikePredicateTest, CollationMultibyteAndEmbeddedNull) {
@@ -399,10 +402,129 @@ TEST(LikePredicateTest, CharDictionaryTrimsOnlyTextPadding) {
   Simple_Predicate text(0, PredicateOperator::LIKE, PredicateValue(std::string("alpha")), MYSQL_TYPE_STRING,
                         &my_charset_utf8mb4_0900_ai_ci, '\\');
   EXPECT_EQ(TruthValue::TRUE_VALUE, text.evaluate(reinterpret_cast<const uchar *>(padded.data()), padded.size()));
-  ASSERT_TRUE(text.like_dictionary_mask(dictionary));
-  EXPECT_EQ(1, text.like_dictionary_mask(dictionary)->at(id));
+  ASSERT_TRUE(text.dictionary_mask(dictionary));
+  EXPECT_EQ(1, text.dictionary_mask(dictionary)->at(id));
   Simple_Predicate binary(0, PredicateOperator::LIKE, PredicateValue(std::string("alpha")), MYSQL_TYPE_STRING,
                           &my_charset_bin, '\\');
   EXPECT_EQ(TruthValue::FALSE_VALUE, binary.evaluate(reinterpret_cast<const uchar *>(padded.data()), padded.size()));
 }
 }  // namespace shannon_like_predicate_unittest
+
+
+namespace shannon_dictionary_mask_unittest {
+using namespace ShannonBase::Imcs;
+
+class DictionaryMaskTest : public ::testing::Test {
+ protected:
+  void SetUp() override { server.SetUp(); }
+  void TearDown() override { server.TearDown(); }
+  my_testing::Server_initializer server;
+};
+
+TEST_F(DictionaryMaskTest, AdmitsEqualityButRejectsStringRangesWithBoundMetadata) {
+  Fake_TABLE_SHARE share(1);
+  Mock_field_varstring field(&share, "value", 16, true);
+  auto dictionary = std::make_shared<ShannonBase::Compress::Dictionary>();
+  const auto alpha = dictionary->store(reinterpret_cast<const uchar *>("alpha"), 5);
+  const auto beta = dictionary->store(reinterpret_cast<const uchar *>("beta"), 4);
+  for (auto op : {PredicateOperator::EQUAL, PredicateOperator::NOT_EQUAL}) {
+    Simple_Predicate predicate(0, op, PredicateValue(std::string("ALPHA")), MYSQL_TYPE_VARCHAR);
+    predicate.set_column_name_from_field(&field);
+    auto mask = predicate.dictionary_mask(dictionary);
+    ASSERT_TRUE(mask);
+    EXPECT_EQ(op == PredicateOperator::EQUAL, mask->at(alpha));
+    EXPECT_EQ(op == PredicateOperator::NOT_EQUAL, mask->at(beta));
+    EXPECT_EQ(0, mask->at(0));  // Reserved NULL ID never matches, including NE.
+  }
+  for (auto op : {PredicateOperator::LESS_THAN, PredicateOperator::LESS_EQUAL,
+                  PredicateOperator::GREATER_THAN, PredicateOperator::GREATER_EQUAL}) {
+    Simple_Predicate predicate(0, op, PredicateValue(std::string("alpha")), MYSQL_TYPE_VARCHAR);
+    predicate.set_column_name_from_field(&field);
+    EXPECT_FALSE(predicate.dictionary_mask(dictionary));
+  }
+}
+}  // namespace shannon_dictionary_mask_unittest
+
+namespace shannon_dictionary_order_unittest {
+using ShannonBase::Compress::Dictionary;
+TEST(DictionaryOrder, CollationRanksGrowthRecoveryAndStableSnapshots) {
+  Dictionary dictionary;
+  auto put = [&](std::string_view text) { return dictionary.store(reinterpret_cast<const uchar *>(text.data()), text.size()); };
+  const auto z = put("z"), a = put("a"), upper = put("A"), accent = put("á"), padded = put("a ");
+  const auto empty = put("");
+  auto order = dictionary.order_ranks(&my_charset_utf8mb4_0900_ai_ci, false);
+  ASSERT_TRUE(order);
+  EXPECT_LT(order->ranks[a], order->ranks[z]);  // IDs have the opposite order.
+  EXPECT_EQ(order->ranks[a], order->ranks[upper]);
+  EXPECT_EQ(order->ranks[a], order->ranks[accent]);
+  EXPECT_LT(order->ranks[a], order->ranks[padded]);  // NO PAD
+  EXPECT_LT(order->ranks[empty], order->ranks[a]);
+  EXPECT_EQ(order, dictionary.order_ranks(&my_charset_utf8mb4_0900_ai_ci, false));
+  auto trimmed = dictionary.order_ranks(&my_charset_utf8mb4_0900_ai_ci, true);
+  ASSERT_TRUE(trimmed);
+  EXPECT_EQ(trimmed->ranks[a], trimmed->ranks[padded]);
+  auto binary = dictionary.order_ranks(&my_charset_bin, false);
+  ASSERT_TRUE(binary);
+  EXPECT_LT(binary->ranks[upper], binary->ranks[a]);
+  const auto new_id = put("0");
+  auto grown = dictionary.order_ranks(&my_charset_utf8mb4_0900_ai_ci, false);
+  ASSERT_TRUE(grown);
+  EXPECT_LT(grown->ranks[new_id], grown->ranks[a]);
+  EXPECT_EQ(UINT32_MAX, grown->ranks[0]);
+  dictionary.restore_entry(z, reinterpret_cast<const uchar *>("!"), 1);
+  auto restored = dictionary.order_ranks(&my_charset_utf8mb4_0900_ai_ci, false);
+  ASSERT_TRUE(restored);
+  EXPECT_LT(restored->ranks[z], restored->ranks[a]);
+  EXPECT_LT(order->ranks[a], order->ranks[z]);  // Previous snapshots remain immutable.
+  dictionary.restore_entry(new_id + 3, reinterpret_cast<const uchar *>("x"), 1);
+  auto sparse = dictionary.order_ranks(&my_charset_bin, false);
+  ASSERT_TRUE(sparse);
+  EXPECT_EQ(UINT32_MAX, sparse->ranks[new_id + 1]);
+}
+
+TEST(DictionaryOrder, CompressedEntriesUseDecodedCollationValues) {
+  using ShannonBase::Compress::ENCODING_TYPE;
+  auto dictionary = std::make_shared<Dictionary>(ENCODING_TYPE::SORTED);
+  const std::string z(256, 'z'), a(256, 'a');
+  const auto z_id = dictionary->store(reinterpret_cast<const uchar *>(z.data()), z.size(), ENCODING_TYPE::SORTED);
+  const auto a_id = dictionary->store(reinterpret_cast<const uchar *>(a.data()), a.size(), ENCODING_TYPE::SORTED);
+  ASSERT_EQ(nullptr, dictionary->get_view(z_id).data());
+  auto order = dictionary->order_ranks(&my_charset_bin, false);
+  ASSERT_TRUE(order);
+  EXPECT_LT(order->ranks[a_id], order->ranks[z_id]);
+  using namespace ShannonBase::Imcs;
+  Simple_Predicate pred(0, PredicateOperator::LIKE, PredicateValue(std::string("a%")), MYSQL_TYPE_VARCHAR,
+                        &my_charset_bin, 92);
+  auto mask = pred.dictionary_mask(dictionary);
+  ASSERT_TRUE(mask);
+  EXPECT_EQ(1, mask->at(a_id));
+  EXPECT_EQ(0, mask->at(z_id));
+}
+
+TEST(DictionaryOrder, LikeMaskInvalidatesOnReplacementWithoutSizeChange) {
+  using namespace ShannonBase::Imcs;
+  auto dictionary = std::make_shared<Dictionary>();
+  auto id = dictionary->store(reinterpret_cast<const uchar *>("alpha"), 5);
+  Simple_Predicate pred(0, PredicateOperator::LIKE, PredicateValue(std::string("a%")), MYSQL_TYPE_VARCHAR,
+                        &my_charset_utf8mb4_0900_ai_ci, '\\');
+  auto before = pred.dictionary_mask(dictionary);
+  ASSERT_TRUE(before);
+  EXPECT_EQ(1, before->at(id));
+  dictionary->restore_entry(id, reinterpret_cast<const uchar *>("beta"), 4);
+  auto after = pred.dictionary_mask(dictionary);
+  ASSERT_TRUE(after);
+  EXPECT_EQ(0, after->at(id));
+  EXPECT_EQ(1, before->at(id));
+}
+
+TEST(DictionaryOrder, HighCardinalityUsesScalarFallback) {
+  using namespace ShannonBase::Imcs;
+  auto dictionary = std::make_shared<Dictionary>();
+  dictionary->restore_entry(1u << 16, reinterpret_cast<const uchar *>("alpha"), 5);
+  EXPECT_FALSE(dictionary->order_ranks(&my_charset_bin, false));
+  Simple_Predicate pred(0, PredicateOperator::NOT_LIKE, PredicateValue(std::string("b%")), MYSQL_TYPE_VARCHAR,
+                        &my_charset_bin, '\\');
+  EXPECT_FALSE(pred.dictionary_mask(dictionary));
+  EXPECT_EQ(TruthValue::TRUE_VALUE, pred.evaluate(reinterpret_cast<const uchar *>("alpha"), 5));
+}
+}  // namespace shannon_dictionary_order_unittest

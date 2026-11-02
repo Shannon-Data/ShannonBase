@@ -24,6 +24,7 @@
    The fundmental code for imcs.
 */
 #include "storage/rapid_engine/imcs/table0view.h"
+#include "storage/rapid_engine/monitor/rapid_monitor.h"
 #include "storage/rapid_engine/populate/log_binlog_parser.h"
 
 #include <limits>
@@ -637,6 +638,93 @@ int RapidCursor::next(size_t batch_size, std::pmr::vector<ShannonBase::Executor:
     return ShannonBase::SHANNON_SUCCESS;
   }
   return HA_ERR_END_OF_FILE;
+}
+
+int RapidCursor::next_projected(size_t capacity, std::pmr::vector<Executor::ColumnChunk> &chunks, size_t &rows,
+                                const std::vector<uint32_t> &projection) {
+  rows = 0;
+  // Every WRONG_COMMAND return precedes any cursor movement or chunk write.
+  DBUG_EXECUTE_IF("rapid_late_read_unsupported", { return HA_ERR_WRONG_COMMAND; });
+  if (m_scan_limit != HA_POS_ERROR || m_scan_offset != 0 || !m_scan_context) return HA_ERR_WRONG_COMMAND;
+  if (m_scan_state.exhausted.load(std::memory_order_acquire)) return HA_ERR_END_OF_FILE;
+  for (uint32_t col : projection)
+    if (col >= chunks.size() || !chunks[col].valid()) return HA_ERR_GENERIC;
+  ColumnChunkRecv receiver{this, projection, chunks, m_batch_row_ids, rows};
+  scan_batch_internal(capacity, projection, receiver);
+  for (uint32_t col : projection)
+    if (chunks[col].failed() || chunks[col].size() != rows) return HA_ERR_GENERIC;
+  m_rows_returned += rows;
+  return rows ? 0 : HA_ERR_END_OF_FILE;
+}
+
+int RapidCursor::complete_projection(std::pmr::vector<Executor::ColumnChunk> &chunks,
+                                     const std::pmr::vector<uint32_t> &selection) {
+  if (!m_scan_context || selection.empty()) return HA_ERR_GENERIC;
+  std::vector<uint32_t> projection;
+  for (size_t col = 0; col < chunks.size(); ++col)
+    if (chunks[col].valid() && chunks[col].size() == 0) projection.push_back(col);
+  if (projection.empty()) return 0;
+  const size_t extent = size_t(selection.back()) + 1;
+  if (extent > m_batch_row_ids.size()) return HA_ERR_GENERIC;
+  for (uint32_t col : projection) {
+    auto &chunk = chunks[col];
+    if (extent > chunk.capacity() || chunk.width() != m_rpd_table->meta().fields[col].normalized_length)
+      return HA_ERR_GENERIC;
+    chunk.resize(extent);
+    std::memset(chunk.mutable_null_mask_data(), 0xff, (extent + 7) / 8);
+  }
+  const size_t rows_per_imcu = m_rpd_table->meta().rows_per_imcu;
+  const std::vector<std::unique_ptr<Predicate>> no_predicates;
+  std::vector<uint32_t> offsets;
+  size_t start = 0;
+  while (start < selection.size()) {
+    if (selection[start] >= m_batch_row_ids.size()) return HA_ERR_GENERIC;
+    const size_t imcu_index = m_batch_row_ids[selection[start]] / rows_per_imcu;
+    if (imcu_index >= m_scan_imcus.size() || !m_scan_imcus[imcu_index]) return HA_ERR_GENERIC;
+    offsets.clear();
+    size_t end = start;
+    for (; end < selection.size(); ++end) {
+      const uint32_t physical = selection[end];
+      if (physical >= m_batch_row_ids.size() || (end && physical <= selection[end - 1])) return HA_ERR_GENERIC;
+      const row_id_t id = m_batch_row_ids[physical];
+      if (id / rows_per_imcu != imcu_index) break;
+      offsets.push_back(id % rows_per_imcu);
+    }
+    size_t received = start;
+    bool failed = false;
+    const auto collect = [&](row_id_t id, const std::vector<const uchar *> &values) {
+      // Dropping the final callback reaches the missing-row check after the
+      // gather; changing the first ID reaches the separate alignment check.
+      DBUG_EXECUTE_IF("rapid_late_projection_missing_row", {
+        if (received + 1 == end) return;
+      });
+      DBUG_EXECUTE_IF("rapid_late_projection_misaligned_row", {
+        if (received == start) id = INVALID_ROW_ID;
+      });
+      if (failed || received >= end || id != m_batch_row_ids[selection[received]]) {
+        failed = true;
+        return;
+      }
+      const uint32_t physical = selection[received++];
+      for (size_t j = 0; j < projection.size(); ++j) {
+        auto &chunk = chunks[projection[j]];
+        // Preserve physical selection indexes. Rejected positions carry only
+        // NULL placeholders; no CU reads or payload copies are made for them.
+        if (values[j]) {
+          std::memcpy(chunk.mutable_data(physical), values[j], chunk.width());
+          chunk.mutable_null_mask_data()[physical >> 3] &= ~(uint8_t{1} << (physical & 7));
+        }
+      }
+    };
+    const auto returned = m_scan_context->rows_returned;
+    m_scan_imcus[imcu_index]->scan_rows_vectorized(m_scan_context.get(), offsets, no_predicates, projection, collect);
+    m_scan_context->rows_returned = returned;
+    if (failed || received != end) return HA_ERR_GENERIC;
+    start = end;
+  }
+  RapidMonitor::rapid_counters.query_late_projection_cells_total.fetch_add(selection.size() * projection.size(),
+                                                                           std::memory_order_relaxed);
+  return 0;
 }
 
 // Random access (position / rnd_pos)
