@@ -38,7 +38,7 @@ ShannonBase Agent is a database-oriented conversational agent whose entry point 
 
 **Key capabilities / 核心能力：**
 
-- 34 built-in tools, defined by a single registry (`register_tool()` in `lib_tool_registry.js`): core SQL (`query_db`, `explain_sql`, `plan_sql`, `update_data`, `run_ddl`), transactions (`begin_tx`/`commit_tx`/`rollback_tx`), schema (`list_tables`, `describe_table`, `check_secondary_load`), retrieval (`ml_rag`, `generate_text`), the `ml_*` AutoML family, and memory (`remember_fact`, `recall_memory`, `forget_memory`). `CALL sys.shannon_agent_selfcheck('tools', NULL, NULL)` prints the live contract.
+- 34 built-in tools, defined by a single registry (`register_tool()` in `lib_tool_registry.js`): core SQL (`query_db`, `explain_sql`, `plan_sql`, `update_data`, `run_ddl`), transactions (`begin_tx`/`commit_tx`/`rollback_tx`), schema (`list_tables`, `describe_table`, `check_secondary_load`), retrieval (`ml_rag`, `generate_text`), the `ml_*` AutoML family, and memory (`remember_fact`, `recall_memory`, `forget_memory`). `sys.shannon_agent_selfcheck('tools', NULL, NULL)` from `agent/devtools/` prints the live contract; the dev routines are not installed in the shipped schema.
 - 4-layer memory: working (per call) / short-term (rolling summary + recent turns) / long-term episodic + procedural (vector) / long-term semantic facts — all isolated per SQL principal
 - 4 execution routes: Catalog exact-match, Rule Planner, RAG/HeatWave, LLM Agent Loop
 - 4-level dispatcher chain: session variable → plugin table → db-local function → built-in
@@ -305,10 +305,11 @@ Only `ml` is on demand today. A category with no policy is always expanded, so a
 
 That the table below still matches the implementation is checked by
 `CALL sys.shannon_agent_selfcheck('tools', NULL, NULL)` — read-only, a single
-`OK` row when everything agrees, and the one self-check an operator has a reason
-to run after an upgrade. The remaining self-checks are development tooling that
-runs the agent against a scripted model or writes fixture rows; they are not part
-of the agent's interface and are documented in [SELFCHECK.md](SELFCHECK.md).
+`OK` row when everything agrees. The routines are development tooling: install
+them with `agent/devtools/install_dev_routines.sh`, or run
+`agent/devtools/run_checks.sh`, which installs them and runs every check. They
+are not part of the shipped `sys` schema and are documented in
+[SELFCHECK.md](SELFCHECK.md).
 
 | Tool | Category | Description | Constraints |
 |------|----------|-------------|-------------|

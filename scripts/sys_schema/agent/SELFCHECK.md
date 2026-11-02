@@ -1,8 +1,24 @@
 # ShannonBase Agent — self-checks / 自检程序
 
-Development and operator tooling. **Not part of the agent's interface**: nothing
-here answers a question a user of `sys.shannon_chat` has, and two of the three
-write rows. For the agent itself see [HOW_TO_USE.md](HOW_TO_USE.md).
+Development and CI tooling. **Not part of the agent's interface and not part of
+the shipped `sys` schema**: nothing here answers a question a user of
+`sys.shannon_chat` has, two of the three write rows, and the two routines were
+together about half of the generated agent schema. For the agent itself see
+[HOW_TO_USE.md](HOW_TO_USE.md).
+
+## Installing them
+
+The routines live in [devtools/](devtools/) and are installed on demand:
+
+```sh
+scripts/sys_schema/agent/devtools/install_dev_routines.sh \
+    --socket /tmp/mysql.sock -u root
+```
+
+Everything below is then callable exactly as shown. `devtools/run_checks.sh`
+installs them and runs every check in one go; `devtools/check_syntax.sh` needs
+no server. The MTR suite installs them per test through
+`mysql-test/suite/agent/include/agent_dev_routines.inc`.
 
 ## The write opt-in
 
@@ -22,16 +38,18 @@ not one per entry point.
 `mysql-test/suite/agent/t/shannon_loop.test` asserts the refusal before opting in,
 because a gate nobody tests is a gate that quietly stops being one.
 
-A caveat on the word "internal". All of these are declared exactly like
+A caveat on the word "internal". These are declared exactly like
 `sys.shannon_chat` — `DEFINER='mysql.sys'@'localhost' … SQL SECURITY INVOKER` in
-`sys` — so the gate above is what stops them mutating anything, not a privilege.
-They remain callable by anyone who can call the agent; the read-only
-`selfcheck('tools')` needs no opt-in and is meant to be callable. Restricting
-*execution* is a separate privileges decision that has not been made.
+`sys` — so once installed, the gate above is what stops them mutating anything,
+not a privilege: they are callable by anyone who can call the agent. That is one
+more reason they are not installed by default; on a release server they simply
+do not exist. Restricting *execution* is a separate privileges decision that has
+not been made.
 
 ## sys.shannon_agent_selfcheck('tools', NULL, NULL)
 
-Read-only, and the one an operator may legitimately want: it verifies that the
+Read-only, and the one an operator may legitimately want after an upgrade, once
+the dev routines are installed: it verifies that the
 registry, the rendered catalogue, `validate_tool_call()` and `execute_tool()`
 still agree, and returns a single `OK` row when they do. It is also what
 `mysql-test/suite/agent/t/shannon_tool_contract.test` asserts, so the contract cannot

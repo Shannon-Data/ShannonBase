@@ -1,3 +1,6 @@
+# The self-check routines are dev tooling; install them before the first CALL.
+--source ../include/agent_dev_routines.inc
+
 # ShannonBase Agent: tool-contract self-check.
 #
 # The agent's tools used to be described in six independent places -- the
@@ -24,3 +27,5 @@ CALL sys.shannon_agent_selfcheck('tools', NULL, NULL);
 --echo # An unrecognised self-check kind is reported, not silently ignored
 --echo #
 CALL sys.shannon_agent_selfcheck('no_such_kind', NULL, NULL);
+
+--source ../include/agent_dev_routines_cleanup.inc

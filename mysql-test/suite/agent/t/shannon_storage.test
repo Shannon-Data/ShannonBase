@@ -1,3 +1,6 @@
+# The self-check routines are dev tooling; install them before the first CALL.
+--source ../include/agent_dev_routines.inc
+
 # ShannonBase Agent: the storage capabilities underneath the memory layer.
 #
 # Covers what the layered memory could not do before: find a row by a name the
@@ -346,3 +349,6 @@ DROP USER storuser@localhost;
 DELETE FROM mysql.agent_memory_audit WHERE store LIKE '%agent_%';
 SET @chat_options = NULL;
 SET @shannon_agent_selfcheck_allow_writes = NULL;
+
+--source ../include/agent_dev_routines_cleanup.inc
+

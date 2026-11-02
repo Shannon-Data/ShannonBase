@@ -59,13 +59,33 @@ cmake_minimum_required(VERSION 3.10)
 
 if(NOT JS_SRC_DIR OR NOT ENTRY OR NOT TEMPLATE OR NOT OUTPUT)
   message(FATAL_ERROR
-    "Usage: cmake -D JS_SRC_DIR=.. -D ENTRY=.. -D TEMPLATE=.. -D OUTPUT=.. -P run_genagentjsfile.cmake")
+    [=[Usage: cmake -D JS_SRC_DIR=.. [-D JS_INCLUDE_DIRS="dir1;dir2"] -D ENTRY=.. -D TEMPLATE=.. -D OUTPUT=.. -P run_genagentjsfile.cmake]=])
+endif()
+
+# Where //@include names are looked up. Defaults to JS_SRC_DIR so older
+# invocations keep working; the dev tooling adds its own directory.
+if(NOT JS_INCLUDE_DIRS)
+  set(JS_INCLUDE_DIRS "${JS_SRC_DIR}")
 endif()
 
 set(_seen_files "")
 
 function(expand_one_file rel_path out_var)
-  get_filename_component(_abs_path "${JS_SRC_DIR}/${rel_path}" ABSOLUTE)
+  # First directory in the list wins, so a caller can shadow a file on purpose.
+  set(_abs_path "")
+  foreach(_dir IN LISTS JS_INCLUDE_DIRS)
+    if(_abs_path STREQUAL "")
+      get_filename_component(_cand "${_dir}/${rel_path}" ABSOLUTE)
+      if(EXISTS "${_cand}")
+        set(_abs_path "${_cand}")
+      endif()
+    endif()
+  endforeach()
+  if(_abs_path STREQUAL "")
+    get_filename_component(_abs_path "${JS_SRC_DIR}/${rel_path}" ABSOLUTE)
+    message(FATAL_ERROR
+      "Include not found: ${_abs_path} (searched: ${JS_INCLUDE_DIRS})")
+  endif()
 
   list(FIND _seen_files "${_abs_path}" _idx)
   if(NOT _idx EQUAL -1)

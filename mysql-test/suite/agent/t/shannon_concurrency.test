@@ -1,3 +1,6 @@
+# The self-check routines are dev tooling; install them before the first CALL.
+--source ../include/agent_dev_routines.inc
+
 # What happens when more than one user is using the agent at once.
 #
 # The agent grew up as one session talking to one instance, and the parts
@@ -255,3 +258,5 @@ DELETE FROM mysql.agent_rollback_log  WHERE conversation_id LIKE CONCAT(@prefix,
 DELETE FROM mysql.agent_usage         WHERE principal_prefix = @prefix;
 DELETE FROM mysql.agent_tx_lease;
 DROP DATABASE eval_db;
+
+--source ../include/agent_dev_routines_cleanup.inc

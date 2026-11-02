@@ -1,3 +1,6 @@
+# The self-check routines are dev tooling; install them before the first CALL.
+--source ../include/agent_dev_routines.inc
+
 # The operator policy baseline (mysql.agent_policy), end to end.
 #
 # Every approval and ceiling the agent honours used to be read from
@@ -131,3 +134,5 @@ DELETE FROM mysql.agent_policy WHERE policy_key='max_turns';
 DROP TABLE eval_orders;
 DROP DATABASE eval_db;
 USE test;
+
+--source ../include/agent_dev_routines_cleanup.inc

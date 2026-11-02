@@ -1,3 +1,6 @@
+# The self-check routines are dev tooling; install them before the first CALL.
+--source ../include/agent_dev_routines.inc
+
 # ShannonBase Agent: layered memory.
 #
 # Covers the four properties the previous single-layer memory did not have:
@@ -311,3 +314,5 @@ DROP USER memuser1@localhost;
 DROP USER memuser2@localhost;
 DROP USER memnogrant@localhost;
 SET @chat_options = NULL;
+
+--source ../include/agent_dev_routines_cleanup.inc
