@@ -38,6 +38,7 @@
 #include "include/my_base.h"
 
 #include "sql/dd/cache/dictionary_client.h"
+#include "sql/debug_sync.h"
 #include "sql/sql_class.h"
 #include "storage/innobase/include/dict0dd.h"
 #include "storage/rapid_engine/handler/ha_shannon_rapid.h"
@@ -45,6 +46,7 @@
 #include "storage/rapid_engine/imcs/varlen0data.h"
 #include "storage/rapid_engine/include/rapid_config.h"
 #include "storage/rapid_engine/include/rapid_const.h"
+#include "storage/rapid_engine/monitor/rapid_monitor.h"
 
 namespace ShannonBase {
 namespace Executor {
@@ -594,6 +596,44 @@ int VectorizedTableScanIterator::ReadBatch(std::pmr::vector<ColumnChunk> &col_ch
   m_operator_stats.rows_out += rows_read;
   ++m_operator_stats.batches;
   return 0;
+}
+
+bool VectorizedTableScanIterator::SupportsLateMaterialization() const {
+  // Buffered rows already carry a full projection. ART/partition cursors and
+  // pushed LIMIT/OFFSET retain their existing cursor contracts.
+  return m_index_no < 0 && table()->part_info == nullptr && SupportsRuntimeFilter() && m_lookahead_count == 0 &&
+         (m_batch_exhausted || m_curr_row_in_batch >= m_curr_batch_size);
+}
+
+int VectorizedTableScanIterator::ReadPredicateBatch(std::pmr::vector<ColumnChunk> &chunks, size_t capacity,
+                                                    size_t &rows, const std::pmr::vector<Field *> &fields) {
+  rows = 0;
+  if (!SupportsLateMaterialization() || chunks.size() != table()->s->fields) return HA_ERR_WRONG_COMMAND;
+  if (m_eof_reached) return HA_ERR_END_OF_FILE;
+  std::vector<uint32_t> projection;
+  for (Field *field : fields) {
+    if (field->table != table()) continue;  // Bound outer parameters are not scan columns.
+    const uint32_t col = field->field_index();
+    if (col >= chunks.size() || !chunks[col].valid() || chunks[col].source_field() != field) return HA_ERR_GENERIC;
+    projection.push_back(col);
+  }
+  const int result = down_cast<ha_rapid *>(table()->file)->rnd_next_projected_batch(capacity, chunks, rows, projection);
+  if (result != 0 && result != HA_ERR_END_OF_FILE) return result;
+  if (result == HA_ERR_END_OF_FILE) m_eof_reached = true;
+  m_operator_stats.rows_in += rows;
+  m_operator_stats.rows_out += rows;
+  ++m_operator_stats.batches;
+  RapidMonitor::rapid_counters.query_late_predicate_rows_total.fetch_add(rows, std::memory_order_relaxed);
+  if (m_eof_reached) m_cardinality.Finish(thd(), "scan", m_operator_stats.rows_in);
+  if (rows) {
+    DEBUG_SYNC(thd(), "rapid_late_predicate_batch");
+  }
+  return result;
+}
+
+int VectorizedTableScanIterator::CompleteProjection(std::pmr::vector<ColumnChunk> &chunks,
+                                                    const std::pmr::vector<uint32_t> &selection) {
+  return down_cast<ha_rapid *>(table()->file)->complete_batch_projection(chunks, selection);
 }
 
 // Compact in scan order, before the parent copies columns into probe storage.

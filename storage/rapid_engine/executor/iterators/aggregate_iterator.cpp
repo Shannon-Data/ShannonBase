@@ -2127,6 +2127,7 @@ int VectorizedAggregateIterator::UpdateHashGroup(HashGroupState *group) {
       if (is_null) continue;
 
       if (info.type == Item_sum::MIN_FUNC || info.type == Item_sum::MAX_FUNC) {
+        state.extremum_code = UINT32_MAX;
         if (!state.has_value) {
           state.extremum.assign(field->field_ptr(), field->field_ptr() + field->pack_length());
           state.has_value = true;
@@ -2217,6 +2218,20 @@ int VectorizedAggregateIterator::UpdateHashGroupFromBatch(HashGroupState *group,
       if (is_null) continue;
 
       if (info.type == Item_sum::MIN_FUNC || info.type == Item_sum::MAX_FUNC) {
+        uint32_t dict_code = UINT32_MAX;
+        if (info.dictionary_order && chunk.width() == sizeof(uint32_t)) {
+          std::memcpy(&dict_code, chunk.data_fast(row_idx), sizeof(dict_code));
+          const auto &ranks = info.dictionary_order->ranks;
+          if (dict_code >= ranks.size() || ranks[dict_code] == UINT32_MAX) dict_code = UINT32_MAX;
+          if (dict_code != UINT32_MAX && state.has_value && state.extremum_code < ranks.size() &&
+              ranks[state.extremum_code] != UINT32_MAX) {
+            RapidMonitor::rapid_counters.query_vectorized_dictionary_minmax_rows_total.fetch_add(
+                1, std::memory_order_relaxed);
+            const bool better = info.type == Item_sum::MIN_FUNC ? ranks[dict_code] < ranks[state.extremum_code]
+                                                                : ranks[dict_code] > ranks[state.extremum_code];
+            if (!better) continue;
+          }
+        }
         // ColumnChunk contains IMCS normalized bytes, not a generic MySQL Field
         // image. Convert this one aggregate field through Field::pack() before
         // using Field::cmp(), while keeping the rest of the row columnar.
@@ -2225,11 +2240,14 @@ int VectorizedAggregateIterator::UpdateHashGroupFromBatch(HashGroupState *group,
         const uchar *value = field->field_ptr();
         if (!state.has_value) {
           state.extremum.assign(value, value + bytes);
+          state.extremum_code = dict_code;
           state.has_value = true;
         } else {
           const int cmp = field->cmp(value, state.extremum.data());
-          if ((info.type == Item_sum::MIN_FUNC && cmp < 0) || (info.type == Item_sum::MAX_FUNC && cmp > 0))
+          if ((info.type == Item_sum::MIN_FUNC && cmp < 0) || (info.type == Item_sum::MAX_FUNC && cmp > 0)) {
             state.extremum.assign(value, value + bytes);
+            state.extremum_code = dict_code;
+          }
         }
         continue;
       }
@@ -2738,6 +2756,40 @@ int VectorizedAggregateIterator::ProcessVectorizedAggregates(const std::pmr::vec
       case Item_sum::MAX_FUNC: {
         if (non_null == 0) break;
         const bool is_min = info.type == Item_sum::MIN_FUNC;
+        if (Utils::Util::is_string(info.source_field->type())) {
+          size_t best = SIZE_MAX;
+          uint32_t best_rank = 0;
+          bool ranked = info.dictionary_order && chunk.width() == sizeof(uint32_t);
+          if (ranked) {
+            const auto &ranks = info.dictionary_order->ranks;
+            for (size_t row = 0; row < row_count; ++row) {
+              if (chunk.nullable_fast(row)) continue;
+              uint32_t code;
+              std::memcpy(&code, chunk.data_fast(row), sizeof(code));
+              if (code >= ranks.size() || ranks[code] == UINT32_MAX) {
+                ranked = false;
+                break;
+              }
+              if (best == SIZE_MAX || (is_min ? ranks[code] < best_rank : ranks[code] > best_rank)) {
+                best = row;
+                best_rank = ranks[code];
+              }
+            }
+          }
+          if (ranked && best != SIZE_MAX) {
+            if (RestoreFieldFromChunk(info.source_field, chunk, best) || info.item->aggregator_add())
+              return kFatalError;
+            RapidMonitor::rapid_counters.query_vectorized_dictionary_minmax_rows_total.fetch_add(
+                non_null, std::memory_order_relaxed);
+          } else {
+            for (size_t row = 0; row < row_count; ++row) {
+              if (chunk.nullable_fast(row)) continue;
+              if (RestoreFieldFromChunk(info.source_field, chunk, row) || info.item->aggregator_add())
+                return kFatalError;
+            }
+          }
+          break;
+        }
         bool reduced = true;
         bool fixed_width_simd_candidate = false;
         auto store_reduced_value = [&](const auto &store) -> bool {
@@ -3081,7 +3133,7 @@ bool VectorizedAggregateIterator::SetupColumnChunks() {
       const size_t limit = m_aux_memory.limit();
       DBUG_EXECUTE_IF("rapid_aggregate_column_allocation_failure", { m_aux_memory.set_limit(m_aux_memory.used()); });
       m_vectorizer.current_batch.column_chunks.emplace_back(info.source_field, m_vectorizer.current_batch.capacity,
-                                                            &m_aux_memory);
+                                                            info.source_field->pack_length(), &m_aux_memory);
       m_aux_memory.set_limit(limit);
       if (m_vectorizer.current_batch.column_chunks.back().failed())
         return AllocationError("Rapid aggregate column allocation failed");
@@ -3361,6 +3413,7 @@ bool VectorizedAggregateIterator::IsSimpleAggregate(Item_sum *item) const {
     case Item_sum::MIN_FUNC:
     case Item_sum::MAX_FUNC: {
       if (field == nullptr || field->is_flag_set(UNSIGNED_FLAG)) return false;
+      if (VectorizableStringExtremum(item)) return true;
       switch (field->type()) {
         case MYSQL_TYPE_LONG:
         case MYSQL_TYPE_LONGLONG:
@@ -3494,6 +3547,17 @@ bool IsStorableArithmeticTree(const Item *item, int depth = 0) {
 
 Item *VectorizedAggregateIterator::GetAggregateValueExpr(Item_sum *item) const {
   return VectorizableAggregateValueExpr(item);
+}
+
+bool VectorizableStringExtremum(Item_sum *item) {
+  if (!item || item->has_with_distinct() || item->arg_count != 1 ||
+      (item->sum_func() != Item_sum::MIN_FUNC && item->sum_func() != Item_sum::MAX_FUNC))
+    return false;
+  Item *arg = item->get_arg(0)->real_item();
+  if (arg->type() != Item::FIELD_ITEM) return false;
+  Field *field = down_cast<Item_field *>(arg)->field;
+  return field && Utils::Util::is_string(field->type()) && !Utils::IsOffPageField(field) &&
+         field->real_type() != MYSQL_TYPE_ENUM && field->real_type() != MYSQL_TYPE_SET;
 }
 
 Item *VectorizableAggregateValueExpr(Item_sum *item) {
@@ -3635,6 +3699,18 @@ int VectorizedAggregateIterator::ReadSourceBatch(size_t &rows, bool selected) {
     m_expression_chunk_scratch.pop_back();
   }
   if (result != 0 && result != HA_ERR_END_OF_FILE) return result;
+  if (rows) {
+    for (auto &info : m_vectorizer.aggregate_infos) {
+      info.dictionary_order.reset();
+      if (info.type != Item_sum::MIN_FUNC && info.type != Item_sum::MAX_FUNC) continue;
+      Field *field = info.source_field;
+      auto dictionary = m_batch_dictionaries.find(field);
+      if (dictionary == m_batch_dictionaries.end()) continue;
+      if (field->type() == MYSQL_TYPE_STRING && (thd()->variables.sql_mode & MODE_PAD_CHAR_TO_FULL_LENGTH)) continue;
+      info.dictionary_order = dictionary->second->order_ranks(
+          field->charset(), field->type() == MYSQL_TYPE_STRING && field->charset() != &my_charset_bin);
+    }
+  }
   if (rows && HasExpressionAggregate() && BuildExpressionChunksFromBatch(rows)) {
     if (!thd()->is_error())
       my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid aggregate could not evaluate its input expressions");

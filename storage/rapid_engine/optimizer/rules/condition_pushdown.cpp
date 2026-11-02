@@ -310,6 +310,12 @@ Plan PredicatePushDown::push_into_scan(Plan &scan, std::vector<Item *> &pending_
         ++unsafe_count;
         continue;
       }
+      DBUG_EXECUTE_IF("rapid_keep_like_filter", {
+        if (static_cast<Imcs::Simple_Predicate *>(child_pre.get())->has_mysql_like()) {
+          to_filter_node.push_back(f);
+          continue;
+        }
+      });
       const bool already_pushed = std::any_of(
           predicates->children.begin(), predicates->children.end(),
           [&](const std::unique_ptr<Imcs::Predicate> &pushed) { return same_condition(*pushed, *child_pre); });

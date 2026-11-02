@@ -593,6 +593,8 @@ TruthValue Imcu::evaluate_predicate_truth_at_row(Rapid_scan_context *context, co
     if (dict && (cu->real_type() == MYSQL_TYPE_ENUM || cu->real_type() == MYSQL_TYPE_SET)) dict = nullptr;
 
     if (dict) {
+      if (simple->has_mysql_like())
+        RapidMonitor::rapid_counters.query_like_scalar_rows_total.fetch_add(1, std::memory_order_relaxed);
       uint32 str_id = 0;
       std::memcpy(&str_id, cell.slot, sizeof(str_id));
       std::string_view str_val = dict->get_view(str_id);
@@ -714,7 +716,8 @@ void Imcu::evaluate_simple_predicate_vectorized(Rapid_scan_context *context, con
   auto dict = cu->dictionary();
   if (dict && (cu->real_type() == MYSQL_TYPE_ENUM || cu->real_type() == MYSQL_TYPE_SET)) dict = nullptr;
   if (dict) {
-    const auto like_mask = pred->like_dictionary_mask(cu->shared_dictionary());
+    const auto mask = pred->dictionary_mask(cu->shared_dictionary());
+    size_t masked_rows = 0, scalar_rows = 0;
     for (size_t i = 0; i < num_rows; ++i) {
       const row_id_t local_row_id = start_row + i;
       const bool is_null = col_id < m_header.null_masks.size() && m_header.null_masks[col_id] &&
@@ -734,10 +737,12 @@ void Imcu::evaluate_simple_predicate_vectorized(Rapid_scan_context *context, con
       }
       uint32 str_id = 0;
       std::memcpy(&str_id, data_guard.get(), sizeof(str_id));
-      if (like_mask && str_id < like_mask->size()) {
-        (*like_mask)[str_id] ? Utils::Util::bit_array_set(&result, i) : Utils::Util::bit_array_reset(&result, i);
+      if (mask && str_id < mask->size()) {
+        ++masked_rows;
+        (*mask)[str_id] ? Utils::Util::bit_array_set(&result, i) : Utils::Util::bit_array_reset(&result, i);
         continue;
       }
+      ++scalar_rows;
       std::string_view decoded = dict->get_view(str_id);
       SHANNON_THREAD_LOCAL std::string decode_buf;
       if (decoded.data() == nullptr) {  // compressed entry: nothing to borrow
@@ -748,6 +753,13 @@ void Imcu::evaluate_simple_predicate_vectorized(Rapid_scan_context *context, con
       const TruthValue tv = pred->evaluate(value, decoded.size());
       (tv == TruthValue::TRUE_VALUE) ? Utils::Util::bit_array_set(&result, i)
                                      : Utils::Util::bit_array_reset(&result, i);
+    }
+    auto &counters = RapidMonitor::rapid_counters;
+    if (pred->has_mysql_like()) {
+      counters.query_like_mask_rows_total.fetch_add(masked_rows, std::memory_order_relaxed);
+      counters.query_like_scalar_rows_total.fetch_add(scalar_rows, std::memory_order_relaxed);
+    } else {
+      counters.query_dictionary_predicate_rows_total.fetch_add(masked_rows, std::memory_order_relaxed);
     }
     return;
   }

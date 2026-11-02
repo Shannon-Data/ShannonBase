@@ -134,10 +134,9 @@ bool SelectVectorizedLookup(THD *thd, AccessPath *path, bool costed_batch_consum
   using Optimizer::RapidCostConstants;
   const auto work = Optimizer::RpdCostEstimator::NestedLoopBatchEstimator::estimate(
       path->num_output_rows(), columns, strings, width, record_width,
-      std::min<size_t>(Utils::Util::hash_join_memory_budget(thd), 2 * 1024 * 1024),
-      RapidCostConstants::kHashBuildPerRow, RapidCostConstants::kVectorDecompCostPerCell,
-      RapidCostConstants::kHashLookupPerRow, RapidCostConstants::kArtRangeSetupCost,
-      RapidCostConstants::kHashBuildCopyPerByte);
+      std::min<size_t>(Utils::Util::hash_join_memory_budget(thd), 2 * SHANNON_MB), RapidCostConstants::kHashBuildPerRow,
+      RapidCostConstants::kVectorDecompCostPerCell, RapidCostConstants::kHashLookupPerRow,
+      RapidCostConstants::kArtRangeSetupCost, RapidCostConstants::kHashBuildCopyPerByte);
   // A selected batch NLJ already prices transport for all of its probes.
   // Requiring each single-key EQ_REF to amortize a whole batch's setup would
   // undo that decision and force the parent to restore/re-encode SQL rows.

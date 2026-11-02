@@ -501,7 +501,8 @@ AccessPath *LocalAgg::ToAccessPath(THD *thd) {
     // functions and DISTINCT still require row transport at this boundary.
     for (Item_func *function : aggregates) {
       auto *sum = down_cast<Item_sum *>(function);
-      if (Executor::VectorizableAggregateValueExpr(sum) != nullptr) continue;
+      if (Executor::VectorizableAggregateValueExpr(sum) != nullptr || Executor::VectorizableStringExtremum(sum))
+        continue;
       Item *argument = sum->arg_count == 0 ? nullptr : sum->get_arg(0)->real_item();
       Field *field = argument != nullptr && argument->type() == Item::FIELD_ITEM
                          ? down_cast<Item_field *>(argument)->field

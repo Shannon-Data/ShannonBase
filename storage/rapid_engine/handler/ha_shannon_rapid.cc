@@ -655,6 +655,20 @@ int ha_rapid::rnd_next_batch(size_t batch_size, std::pmr::vector<ShannonBase::Ex
   return error;
 }
 
+int ha_rapid::rnd_next_projected_batch(size_t capacity, std::pmr::vector<ShannonBase::Executor::ColumnChunk> &chunks,
+                                       size_t &rows, const std::vector<uint32_t> &projection) {
+  if (inited != handler::RND) return HA_ERR_WRONG_COMMAND;
+  const int error = m_cursor->next_projected(capacity, chunks, rows, projection);
+  if (!error) ha_statistic_increment(&System_status_var::ha_read_rnd_next_count);
+  return error;
+}
+
+int ha_rapid::complete_batch_projection(std::pmr::vector<ShannonBase::Executor::ColumnChunk> &chunks,
+                                        const std::pmr::vector<uint32_t> &selection) {
+  if (inited != handler::RND) return HA_ERR_WRONG_COMMAND;
+  return m_cursor->complete_projection(chunks, selection);
+}
+
 int ha_rapid::index_next_batch(size_t batch_size, std::pmr::vector<ShannonBase::Executor::ColumnChunk> &data,
                                size_t &read_cnt, bool reverse) {
   if (inited != handler::INDEX) return HA_ERR_END_OF_FILE;
@@ -1722,6 +1736,13 @@ static const char *rapid_propagation_mode_names[] = {"DIRECT_NOTIFICATION", "RED
   X(query_vectorized_sort_batch_rows_total, query_vectorized_sort_batch_rows_total)                                 \
   X(query_vectorized_ref_batch_rows_total, query_vectorized_ref_batch_rows_total)                                   \
   X(query_vectorized_expression_rows_total, query_vectorized_expression_rows_total)                                 \
+  X(query_like_mask_rows_total, query_like_mask_rows_total)                                                         \
+  X(query_like_scalar_rows_total, query_like_scalar_rows_total)                                                     \
+  X(query_dictionary_predicate_rows_total, query_dictionary_predicate_rows_total)                                   \
+  X(query_vectorized_like_rows_total, query_vectorized_like_rows_total)                                             \
+  X(query_vectorized_dictionary_minmax_rows_total, query_vectorized_dictionary_minmax_rows_total)                   \
+  X(query_late_predicate_rows_total, query_late_predicate_rows_total)                                               \
+  X(query_late_projection_cells_total, query_late_projection_cells_total)                                           \
   X(query_scalar_expression_rows_total, query_scalar_expression_rows_total)                                         \
   X(query_vectorized_stream_batch_rows_total, query_vectorized_stream_batch_rows_total)                             \
   X(query_vectorized_materialize_batch_rows_total, query_vectorized_materialize_batch_rows_total)                   \

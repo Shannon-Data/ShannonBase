@@ -555,7 +555,7 @@ class Simple_Predicate : public Predicate {
   /** Bind MySQL field metadata and set column_name, e.g. "t1.grp_low". */
   void set_column_name_from_field(const Field *field);
   bool has_mysql_like() const { return m_like_oper.has_value(); }
-  std::shared_ptr<const std::vector<uint8_t>> like_dictionary_mask(
+  std::shared_ptr<const std::vector<uint8_t>> dictionary_mask(
       const std::shared_ptr<Compress::Dictionary> &dictionary) const;
 
  private:
@@ -619,9 +619,10 @@ class Simple_Predicate : public Predicate {
     bool matches(std::string_view text, std::string_view pattern) const;
   };
   std::optional<LikeOper> m_like_oper;
-  mutable std::mutex m_like_dictionary_mutex;
-  mutable std::shared_ptr<Compress::Dictionary> m_like_dictionary;
-  mutable std::shared_ptr<const std::vector<uint8_t>> m_like_dictionary_mask;
+  mutable uint64_t m_dictionary_generation{0};
+  mutable std::mutex m_dictionary_mutex;
+  mutable std::shared_ptr<Compress::Dictionary> m_dictionary;
+  mutable std::shared_ptr<const std::vector<uint8_t>> m_dictionary_mask;
 };
 
 /**

@@ -1,0 +1,79 @@
+SET NAMES utf8mb4 COLLATE utf8mb4_0900_ai_ci;
+SET use_secondary_engine=OFF;
+CREATE TABLE encoded_late (
+id INT PRIMARY KEY, g INT, s VARCHAR(80), c CHAR(12), b VARBINARY(20), d DECIMAL(15,2)
+) SECONDARY_ENGINE=rapid;
+INSERT INTO encoded_late WITH RECURSIVE n AS
+(SELECT 0 i UNION ALL SELECT i+1 FROM n WHERE i<255)
+SELECT a.i*256+b.i,MOD(a.i*256+b.i,1024),
+ELT(1+MOD(b.i,8),'zebra','alpha','ALPHA','éclair','猫咪','','alpha  ',NULL),
+ELT(1+MOD(b.i,4),'z','a','猫',NULL),
+ELT(1+MOD(b.i,4),'Z','a','a ',NULL),IF(MOD(b.i,11)=0,NULL,(a.i-b.i)*1.25)
+FROM n a JOIN n b;
+ANALYZE TABLE encoded_late;
+Table	Op	Msg_type	Msg_text
+test.encoded_late	analyze	status	OK
+ALTER TABLE encoded_late SECONDARY_LOAD;
+SET use_secondary_engine=FORCED;
+SET optimizer_switch='hypergraph_optimizer=on';
+# Global and grouped extrema preserve collation, padding, NULL and ties.
+# Encoded extrema survive hash spill and row replay.
+SET debug='+d,rapid_hash_aggregate_tiny_budget';
+SET debug='-d,rapid_hash_aggregate_tiny_budget';
+# String ranges retain scalar Item semantics, including collation and padding.
+# Equality/inequality dictionary masks use SQL collation, not insertion IDs.
+# A residual string expression reads only condition columns before selection.
+# A cursor preflight rejection falls back without losing or duplicating rows.
+SET DEBUG_SYNC='rapid_late_read_fallback SIGNAL late_fallback EXECUTE 1';
+SET debug='+d,rapid_late_read_unsupported';
+SET DEBUG_SYNC='now WAIT_FOR late_fallback TIMEOUT 1';
+SET debug='-d,rapid_late_read_unsupported';
+SET DEBUG_SYNC='RESET';
+# Missing and misaligned projection rows abort instead of retrying consumed input.
+SET debug='+d,rapid_late_projection_missing_row';
+SELECT SUM(id),SUM(d),MIN(c),MAX(b) FROM encoded_late WHERE LENGTH(s)=0;
+ERROR HY000: Rapid filter could not preserve its batch input or predicate
+SET debug='-d,rapid_late_projection_missing_row';
+SET debug='+d,rapid_late_projection_misaligned_row';
+SELECT SUM(id),SUM(d),MIN(c),MAX(b) FROM encoded_late WHERE LENGTH(s)=0;
+ERROR HY000: Rapid filter could not preserve its batch input or predicate
+SET debug='-d,rapid_late_projection_misaligned_row';
+# The same query succeeds with complete, aligned projection rows.
+# LIKE conjunctions retain residual string fields and are observable.
+SET debug='+d,rapid_keep_like_filter';
+SET debug='-d,rapid_keep_like_filter';
+# Empty selections, NULL-only groups, and prepared reexecution.
+PREPARE enc FROM 'SELECT MIN(s),MAX(c),SUM(id) FROM encoded_late WHERE s LIKE ? AND LENGTH(c)>0';
+SET @p='a%';
+EXECUTE enc USING @p;
+MIN(s)	MAX(c)	SUM(id)
+alpha	猫	805281792
+SET @p='z%';
+EXECUTE enc USING @p;
+MIN(s)	MAX(c)	SUM(id)
+zebra	z	268402688
+DEALLOCATE PREPARE enc;
+SET @saved_mode=@@sql_mode;
+SET sql_mode='PAD_CHAR_TO_FULL_LENGTH';
+Warnings:
+Warning	3090	Changing sql mode 'PAD_CHAR_TO_FULL_LENGTH' is deprecated. It will be removed in a future release.
+SET sql_mode=@saved_mode;
+# Concurrent updates between predicate reads and projection use the same snapshot.
+SET use_secondary_engine=OFF;
+SET use_secondary_engine=FORCED;
+SET optimizer_switch='hypergraph_optimizer=on';
+SET DEBUG_SYNC='rapid_late_predicate_batch SIGNAL late_ready WAIT_FOR late_continue EXECUTE 1';
+SELECT SUM(d)=20640.00 AS same_snapshot FROM encoded_late WHERE LENGTH(s)=0;
+SET DEBUG_SYNC='now WAIT_FOR late_ready';
+UPDATE encoded_late SET d=90000,s='changed' WHERE LENGTH(s)=0;
+SET use_secondary_engine=FORCED;
+SET DEBUG_SYNC='now SIGNAL late_continue';
+same_snapshot
+1
+SET DEBUG_SYNC='RESET';
+SET DEBUG_SYNC='RESET';
+SET use_secondary_engine=FORCED;
+# Growth and updated values cannot reuse stale dictionary masks or ranks.
+INSERT INTO encoded_late VALUES (70000,0,'!first','0','0',1.25),(70001,0,'zzlast','zz','zz',NULL);
+SET use_secondary_engine=OFF;
+DROP TABLE encoded_late;

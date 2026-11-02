@@ -323,7 +323,9 @@ bool CanUseHashAggregate(const JOIN *join) {
       if (ShannonBase::Executor::VectorizableAggregateValueExpr(agg) == nullptr) return false;
       continue;
     }
-    if (!IsHashAggregateValueField(down_cast<Item_field *>(argument)->field)) return false;
+    if (!IsHashAggregateValueField(down_cast<Item_field *>(argument)->field) &&
+        !Executor::VectorizableStringExtremum(agg))
+      return false;
   }
   return true;
 }
@@ -2568,6 +2570,9 @@ std::unique_ptr<Imcs::Predicate> Optimizer::convert_comparison_to_predicate(cons
   Field *field = field_item->field;
   uint32 col_idx = field->field_index();
   enum_field_types field_type = field->type();
+  if (field_type == MYSQL_TYPE_STRING && field->charset() != &my_charset_bin &&
+      (thd->variables.sql_mode & MODE_PAD_CHAR_TO_FULL_LENGTH))
+    return nullptr;
   if (field_type == MYSQL_TYPE_STRING || field_type == MYSQL_TYPE_VARCHAR || field_type == MYSQL_TYPE_VAR_STRING) {
     // Assignment coercion is not comparison coercion: VARCHAR = 1 compares
     // numerically in MySQL, so '01' and '1.0' also match. Storage predicates

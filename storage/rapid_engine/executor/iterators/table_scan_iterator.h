@@ -96,6 +96,11 @@ class VectorizedTableScanIterator final : public TableRowIterator, public BatchR
    * Drains internal lookahead buffer first if non-empty.
    */
   int ReadBatch(std::pmr::vector<ColumnChunk> &col_chunks, size_t capacity, size_t &rows_read) override;
+  bool SupportsLateMaterialization() const;
+  int ReadPredicateBatch(std::pmr::vector<ColumnChunk> &chunks, size_t capacity, size_t &rows,
+                         const std::pmr::vector<Field *> &fields);
+  int CompleteProjection(std::pmr::vector<ColumnChunk> &chunks, const std::pmr::vector<uint32_t> &selection);
+
   // Synchronous consumer: the callback and its owner never escape this call.
   // 1 keeps the row, 0 rejects it, and -1 reports an execution error.
   using RuntimeFilter = int (*)(void *, const std::pmr::vector<ColumnChunk> &, size_t);
