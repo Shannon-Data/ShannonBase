@@ -43,15 +43,48 @@ ADD_CUSTOM_COMMAND(
   -D "ENTRY=${AGENT_JS_ENTRY}"
   -D "TEMPLATE=${AGENT_SQL_TEMPLATE}"
   -D "OUTPUT=${AGENT_SQL_GENERATED}"
-  -P ${CMAKE_CURRENT_SOURCE_DIR}/run_genagentjsfile.cmake
+  -P ${CMAKE_CURRENT_SOURCE_DIR}/agent/run_genagentjsfile.cmake
   DEPENDS ${AGENT_JS_SOURCES} ${AGENT_SQL_TEMPLATE}
-          ${CMAKE_CURRENT_SOURCE_DIR}/run_genagentjsfile.cmake
+          ${CMAKE_CURRENT_SOURCE_DIR}/agent/run_genagentjsfile.cmake
   WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
   COMMENT "Expanding shannon_agent JS includes to ml_agent_chat.sql"
   VERBATIM
 )
 
 MY_ADD_CUSTOM_TARGET(gen_agent_js DEPENDS ${AGENT_SQL_GENERATED})
+
+# Dev-only agent self-check routines (sys.shannon_agent_selfcheck and
+# sys.shannon_agent_loopcheck). They are half of the generated schema and are
+# writable entry points the agent never needs, so they are not part of the sys
+# schema at all. They are generated here so the devtools scripts and the MTR
+# suite can install them on demand.
+set(AGENT_DEVTOOLS_DIR      ${CMAKE_CURRENT_SOURCE_DIR}/agent/devtools)
+set(AGENT_JS_INCLUDE_DIRS   ${AGENT_JS_SRC_DIR};${AGENT_DEVTOOLS_DIR}/js)
+set(AGENT_DEV_TEMPLATE      ${AGENT_DEVTOOLS_DIR}/ml_agent_dev.sql.in)
+set(AGENT_DEV_GENERATED     ${CMAKE_CURRENT_BINARY_DIR}/agent/devtools/ml_agent_dev.sql)
+
+file(GLOB AGENT_DEVTOOLS_JS_SOURCES CONFIGURE_DEPENDS ${AGENT_DEVTOOLS_DIR}/js/*.js)
+ADD_CUSTOM_COMMAND(
+  OUTPUT ${AGENT_DEV_GENERATED}
+  COMMAND ${CMAKE_COMMAND}
+  -D "JS_SRC_DIR=${AGENT_JS_SRC_DIR}"
+  -D "JS_INCLUDE_DIRS=${AGENT_JS_INCLUDE_DIRS}"
+  -D "ENTRY=${AGENT_JS_ENTRY}"
+  -D "TEMPLATE=${AGENT_DEV_TEMPLATE}"
+  -D "OUTPUT=${AGENT_DEV_GENERATED}"
+  -P ${CMAKE_CURRENT_SOURCE_DIR}/agent/run_genagentjsfile.cmake
+  DEPENDS ${AGENT_JS_SOURCES} ${AGENT_DEVTOOLS_JS_SOURCES} ${AGENT_DEV_TEMPLATE}
+          ${CMAKE_CURRENT_SOURCE_DIR}/agent/run_genagentjsfile.cmake
+  WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+  COMMENT "Expanding shannon_agent devtools JS includes to ml_agent_dev.sql"
+  VERBATIM
+)
+
+MY_ADD_CUSTOM_TARGET(gen_agent_devtools DEPENDS ${AGENT_DEV_GENERATED})
+
+# Test fixture, not a server artifact: it is installed with the MTR suite so an
+# installed tree can run the agent tests, and stays out of bin/ lib/ share/.
+INSTALL(FILES ${AGENT_DEV_GENERATED} DESTINATION mysql-test/suite/agent/include)
 
 
 SET(SYS_SCHEMA_SOURCES
@@ -261,6 +294,7 @@ MY_ADD_CUSTOM_TARGET(all_sys_schema
   DEPENDS ALL_SYS_SCHEMA.sql)
 
 add_dependencies(all_sys_schema gen_agent_js)
+add_dependencies(all_sys_schema gen_agent_devtools)
 
 ADD_CUSTOM_COMMAND(
   OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/sql_commands.h

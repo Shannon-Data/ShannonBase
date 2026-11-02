@@ -1,3 +1,6 @@
+# The self-check routines are dev tooling; install them before the first CALL.
+--source ../include/agent_dev_routines.inc
+
 ##############################################################################
 # ShannonBase Agent write-path review state machine.
 #
@@ -45,3 +48,5 @@ CALL sys.shannon_agent_selfcheck('review', 'stuck', 'mtrrev3');
 CALL sys.shannon_agent_selfcheck('review', 'cleanup', 'mtrrev1');
 CALL sys.shannon_agent_selfcheck('review', 'cleanup', 'mtrrev2');
 CALL sys.shannon_agent_selfcheck('review', 'cleanup', 'mtrrev3');
+
+--source ../include/agent_dev_routines_cleanup.inc
