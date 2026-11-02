@@ -88,7 +88,7 @@ bool VectorizedLimitIterator::Init() {
     size_t columns = 0;
     for (const auto &entry : m_tables.tables()) columns += entry.table->s->fields;
 
-    if (!TryReserve(m_discard, columns)) return Error();
+    if (!Reserve(m_discard, columns)) return Error();
 
     for (const auto &entry : m_tables.tables()) {
       TABLE *table = entry.table;

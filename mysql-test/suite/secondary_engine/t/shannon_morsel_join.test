@@ -1,0 +1,63 @@
+--source include/have_debug.inc
+--source include/no_ps_protocol.inc
+CREATE DATABASE rapid_parallel_join;
+USE rapid_parallel_join;
+SET use_secondary_engine=OFF;
+SET cte_max_recursion_depth=140000;
+CREATE TABLE fact(id INT PRIMARY KEY,k INT,v DECIMAL(15,2),n BIGINT) SECONDARY_ENGINE=rapid;
+CREATE TABLE dim(id INT PRIMARY KEY,k INT,g INT,v DECIMAL(10,2)) SECONDARY_ENGINE=rapid;
+INSERT INTO fact WITH RECURSIVE seq AS (SELECT 1 n UNION ALL SELECT n+1 FROM seq WHERE n<140000)
+ SELECT n,IF(MOD(n,17)=0,NULL,MOD(n,19)),IF(MOD(n,11)=0,NULL,(n-70000)*1.25),n-70000 FROM seq;
+INSERT INTO dim SELECT id,MOD(id,19),MOD(30-id,9),IF(MOD(id,5)=0,NULL,id/10) FROM fact WHERE id<=30;
+ANALYZE TABLE fact,dim;
+ALTER TABLE fact SECONDARY_LOAD;
+ALTER TABLE dim SECONDARY_LOAD;
+SET use_secondary_engine=FORCED;
+--disable_warnings
+SET optimizer_switch='hypergraph_optimizer=on';
+--enable_warnings
+SET secondary_engine_cost_threshold=0;
+# Group on both sides so the grouping-side optimization does not swap the
+# 30-row dimension into the probe side (only one parallel).
+--echo # Read-only shared build with duplicate keys, fanout, unmatched and NULL keys.
+--let $workers = 2
+while ($workers <= 8) {
+ SET rapid_parallel_workers=1;
+ --output $MYSQLTEST_VARDIR/log/parallel_join_serial.out
+ SELECT fact.k,dim.g,SUM(fact.v*dim.v),AVG(fact.n),COUNT(dim.v),COUNT(*) FROM fact JOIN dim ON fact.k=dim.k GROUP BY fact.k,dim.g;
+ eval SET rapid_parallel_workers=$workers;
+ --let $before = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_parallel_rows_total', Value, 1)
+ --output $MYSQLTEST_VARDIR/log/parallel_join_parallel.out
+ SELECT fact.k,dim.g,SUM(fact.v*dim.v),AVG(fact.n),COUNT(dim.v),COUNT(*) FROM fact JOIN dim ON fact.k=dim.k GROUP BY fact.k,dim.g;
+ --diff_files $MYSQLTEST_VARDIR/log/parallel_join_serial.out $MYSQLTEST_VARDIR/log/parallel_join_parallel.out
+ --let $after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_parallel_rows_total', Value, 1)
+ --let $active = `SELECT $after>$before`
+ if ($active == 0) {
+  --die Hash join parallel pipeline was not executed
+ }
+ --let $assert_query = SELECT fact.k,dim.g,SUM(fact.v*dim.v),AVG(fact.n),COUNT(dim.v),COUNT(*) FROM fact JOIN dim ON fact.k=dim.k GROUP BY fact.k,dim.g
+ --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+ --let $assert_query = SELECT SUM(fact.v*dim.v),AVG(fact.n),COUNT(*) FROM fact JOIN dim ON fact.k=dim.k
+ --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+ --let $workers = `SELECT $workers*2`
+}
+--remove_file $MYSQLTEST_VARDIR/log/parallel_join_serial.out
+--remove_file $MYSQLTEST_VARDIR/log/parallel_join_parallel.out
+--let $parallel_check = join_stats
+--source suite/secondary_engine/include/rapid_parallel_checks.inc
+--echo # Join output buffer refusal joins workers and replays the same build/probe snapshot.
+SET debug='+d,rapid_parallel_join_budget';
+--let $before = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_parallel_fallbacks_total', Value, 1)
+--let $assert_query = SELECT fact.k,dim.g,SUM(fact.v*dim.v),AVG(fact.n),COUNT(*) FROM fact JOIN dim ON fact.k=dim.k GROUP BY fact.k,dim.g
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_parallel_fallbacks_total', Value, 1)
+--let $retried = `SELECT $after>$before`
+if ($retried == 0) {
+ --die Join budget refusal did not use serial replay
+}
+SET debug='-d,rapid_parallel_join_budget';
+--let $assert_query = SELECT fact.k,dim.g,SUM(fact.v*dim.v),AVG(fact.n),COUNT(*) FROM fact JOIN dim ON fact.k=dim.k GROUP BY fact.k,dim.g ORDER BY fact.k,dim.g
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+SET use_secondary_engine=OFF;
+DROP DATABASE rapid_parallel_join;

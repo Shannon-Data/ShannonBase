@@ -3,6 +3,7 @@
 #include <gtest/gtest.h>
 
 #include <atomic>
+#include <barrier>
 #include <chrono>
 #include <cstring>
 #include <future>
@@ -89,6 +90,41 @@ TEST_F(RapidSystemPoolTest, ExplicitAllocationReportsRealPoolExhaustion) {
   occupied.reset();
   ASSERT_TRUE(bits.grow(1));
   EXPECT_EQ(AllocationFailure::kNone, resource.last_failure());
+}
+
+TEST_F(RapidSystemPoolTest, ConcurrentWorkerAllocationAndReleaseReusePool) {
+  // Seed the free list with the entire range; the pool keeps untouched bump
+  // capacity separate from returned blocks.
+  auto entire_pool = allocate_system_buffer(system_pool_stats().capacity);
+  ASSERT_TRUE(entire_pool);
+  entire_pool.reset();
+  constexpr size_t worker_count = 8;
+  std::barrier start(worker_count);
+  std::atomic<bool> failed{false};
+  std::vector<std::thread> workers;
+  for (size_t worker = 0; worker < worker_count; ++worker) {
+    workers.emplace_back([&, worker] {
+      BoundedMemoryResource memory(64 * 1024);
+      start.arrive_and_wait();
+      try {
+        for (size_t iteration = 0; iteration < 1000; ++iteration) {
+          std::pmr::vector<uint64_t> values(&memory);
+          values.resize(16 + (iteration + worker) % 97, worker);
+          values.reserve(values.size() * 2);
+          for (auto value : values)
+            if (value != worker) failed.store(true);
+        }
+      } catch (...) {
+        failed.store(true);
+      }
+      if (memory.used() != 0) failed.store(true);
+    });
+  }
+  for (auto &worker : workers) worker.join();
+  EXPECT_FALSE(failed.load());
+  EXPECT_EQ(0u, system_pool_stats().used);
+  // All concurrently returned blocks must coalesce into reusable capacity.
+  EXPECT_TRUE(allocate_system_buffer(system_pool_stats().capacity));
 }
 
 TEST_F(RapidSystemPoolTest, ExhaustionHasNoHeapFallbackAndFreeAllowsReuse) {
@@ -574,9 +610,9 @@ TEST(RapidResourcesTest, ExplicitAllocationDistinguishesBudgetAndUpstreamFailure
   EXPECT_EQ(0u, resource.used());
   EXPECT_EQ(0u, resource.peak());
   std::pmr::vector<char> buffer(&resource);
-  EXPECT_FALSE(Executor::TryReserve(buffer, 17));
+  EXPECT_FALSE(Executor::Reserve(buffer, 17));
   EXPECT_EQ(AllocationFailure::kBudgetExhausted, resource.last_failure());
-  EXPECT_FALSE(Executor::TryReserve(buffer, 8));
+  EXPECT_FALSE(Executor::Reserve(buffer, 8));
   EXPECT_EQ(AllocationFailure::kPoolExhausted, resource.last_failure());
 }
 
@@ -586,7 +622,7 @@ TEST(RapidResourcesTest, AppendGrowthIsAmortizedAndPreservesValues) {
   size_t reallocations = 0;
   for (size_t i = 0; i < 4096; ++i) {
     const size_t capacity = groups.capacity();
-    ASSERT_TRUE(Executor::TryGrow(groups, i + 1));
+    ASSERT_TRUE(Executor::Grow(groups, i + 1));
     reallocations += groups.capacity() != capacity;
     groups.push_back(i);
   }
@@ -800,5 +836,71 @@ TEST(RapidAutoResourcesTest, ReconfigurationCanPauseAdmissionUntilSetupFinishes)
   ASSERT_TRUE(governor.configure(IsolationMode::AUTO, {1, 1, 1}));
   EXPECT_FALSE(governor.stopping());
   EXPECT_TRUE(governor.try_acquire(WorkClass::AP));
+}
+}  // namespace ShannonBase::ResMgmt
+
+namespace ShannonBase::ResMgmt {
+TEST(RapidResourcesTest, ParallelWorkerAdmissionIsGlobalAndNonblockingEvenWhenOff) {
+  WorkGovernor governor;
+  ASSERT_TRUE(governor.configure(IsolationMode::OFF, {4, 2, 1}));
+  ASSERT_TRUE(governor.configure_parallel_limit(8));
+  {
+    auto first = governor.try_acquire_parallel_workers(4);
+    ASSERT_TRUE(first);
+    auto second = governor.try_acquire_parallel_workers(4);
+    ASSERT_TRUE(second);
+    EXPECT_FALSE(governor.try_acquire_parallel_workers(2));
+    EXPECT_FALSE(governor.configure_parallel_limit(1));
+    EXPECT_EQ(8u, governor.parallel_snapshot().active);
+    auto moved = std::move(first);
+    EXPECT_FALSE(first);
+    EXPECT_EQ(0u, first.size());
+    EXPECT_EQ(4u, moved.size());
+    EXPECT_EQ(8u, governor.parallel_snapshot().active);
+    moved.reset();
+    EXPECT_EQ(0u, moved.size());
+    EXPECT_EQ(4u, governor.parallel_snapshot().active);
+    EXPECT_TRUE(governor.try_acquire_parallel_workers(2));
+  }
+  EXPECT_EQ(0u, governor.parallel_snapshot().active);
+  EXPECT_EQ(8u, governor.parallel_snapshot().peak);
+  const auto rejected = governor.parallel_snapshot().rejected;
+  EXPECT_FALSE(governor.try_acquire_parallel_workers(0));
+  EXPECT_EQ(rejected, governor.parallel_snapshot().rejected);
+  EXPECT_TRUE(governor.configure_parallel_limit(2));
+  EXPECT_FALSE(governor.try_acquire_parallel_workers(std::numeric_limits<size_t>::max()));
+  EXPECT_EQ(rejected + 1, governor.parallel_snapshot().rejected);
+  governor.stop();
+  EXPECT_FALSE(governor.try_acquire_parallel_workers(2));
+  EXPECT_EQ(rejected + 1, governor.parallel_snapshot().rejected);
+}
+
+class BudgetParallelSource final : public Executor::Morsel::ParallelSource {
+ public:
+  size_t tasks() const override { return 2; }
+  uint64_t max_ordinal() const override { return 1; }
+  bool ExecuteImpl(THD *, BoundedMemoryResource *memory, const std::atomic<bool> &, const Consumer &) override {
+    // A refusal is a return value, never an exception: the resource records why.
+    return memory->try_allocate(4096) == nullptr;
+  }
+};
+TEST_F(RapidSystemPoolTest, ParallelBudgetRefusalRetriesButPoolExhaustionIsFatal) {
+  std::atomic<bool> cancelled{false};
+  BudgetParallelSource source;
+  BoundedMemoryResource too_small(1024);
+  EXPECT_TRUE(source.Execute(nullptr, &too_small, cancelled, {}));
+  EXPECT_TRUE(source.needs_serial_retry());
+  EXPECT_EQ(0u, too_small.used());
+  BudgetParallelSource stopped;
+  cancelled = true;
+  EXPECT_FALSE(stopped.Execute(nullptr, &too_small, cancelled, {}));
+  EXPECT_FALSE(stopped.needs_serial_retry());
+  cancelled = false;
+  auto occupied = allocate_system_buffer(system_pool_stats().capacity);
+  ASSERT_TRUE(occupied);
+  BoundedMemoryResource enough(8192);
+  BudgetParallelSource no_pool;
+  EXPECT_TRUE(no_pool.Execute(nullptr, &enough, cancelled, {}));
+  EXPECT_FALSE(no_pool.needs_serial_retry());
 }
 }  // namespace ShannonBase::ResMgmt

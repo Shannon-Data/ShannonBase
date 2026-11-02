@@ -1,0 +1,252 @@
+#
+# optimizer_trace reports the planning-time parallel decision: whether
+# this pipeline may use parallel workers, and what plan shape blocks it
+# when it may not. Execution is deliberately not traced.
+#
+CREATE DATABASE rapid_parallel_trace;
+USE rapid_parallel_trace;
+SET use_secondary_engine=OFF;
+SET cte_max_recursion_depth=30000;
+CREATE TABLE t(id INT PRIMARY KEY, g INT, n BIGINT, d DECIMAL(15,2),
+s VARCHAR(12)) SECONDARY_ENGINE=rapid;
+INSERT INTO t WITH RECURSIVE seq AS (SELECT 1 n UNION ALL SELECT n+1 FROM seq
+WHERE n<20000)
+SELECT n, MOD(n,97), n*3, n*1.25, CONCAT('s',MOD(n,50)) FROM seq;
+CREATE TABLE dim(k INT PRIMARY KEY) SECONDARY_ENGINE=rapid;
+INSERT INTO dim VALUES (1),(2),(3),(4),(5);
+ANALYZE TABLE t, dim;
+Table	Op	Msg_type	Msg_text
+rapid_parallel_trace.t	analyze	status	OK
+rapid_parallel_trace.dim	analyze	status	OK
+ALTER TABLE t SECONDARY_LOAD;
+ALTER TABLE dim SECONDARY_LOAD;
+SET use_secondary_engine=FORCED;
+SET secondary_engine_cost_threshold=0;
+SET optimizer_switch='hypergraph_optimizer=on';
+SET SESSION optimizer_trace_max_mem_size=1048576;
+#
+# Batch pipeline over a plain scan: capable, one candidate, no gate.
+#
+SET SESSION rapid_parallel_workers=8;
+SET @parallel_capable='yes', @parallel_blocked_by='absent',
+@parallel_operators='["aggregate"]',
+@parallel_reasons='["batch_pipeline"]';
+SET SESSION optimizer_trace='enabled=on,one_line=off';
+SELECT SUM(n) FROM t;
+SUM(n)
+600030000
+SET SESSION optimizer_trace='enabled=off';
+SET @parallel_ok = (SELECT
+JSON_VALUE(TRACE,'$.steps[*].rapid_parallel.parallel_capable')
+= @parallel_capable
+AND IFNULL(JSON_VALUE(TRACE,'$.steps[*].rapid_parallel.blocked_by'),'absent')
+= @parallel_blocked_by
+AND JSON_EXTRACT(TRACE,'$.steps[*].rapid_parallel.candidates[*].operator')
+= CAST(@parallel_operators AS JSON)
+AND JSON_EXTRACT(TRACE,'$.steps[*].rapid_parallel.candidates[*].reason')
+= CAST(@parallel_reasons AS JSON)
+AND IFNULL(JSON_LENGTH(TRACE,'$**.rapid_parallel'),0) = 1
+AND IFNULL(JSON_LENGTH(TRACE,
+'$.steps[*].rapid_optimizer_rules[*].rapid_parallel'),0) = 0
+FROM information_schema.OPTIMIZER_TRACE);
+SELECT JSON_VALUE(TRACE,'$.steps[*].rapid_parallel.parallel_capable') AS parallel_capable,
+IFNULL(JSON_VALUE(TRACE,'$.steps[*].rapid_parallel.blocked_by'),'absent')
+AS blocked_by,
+JSON_EXTRACT(TRACE,'$.steps[*].rapid_parallel.candidates[*].operator')
+AS candidates,
+JSON_EXTRACT(TRACE,'$.steps[*].rapid_parallel.candidates[*].reason')
+AS reasons,
+@parallel_ok AS as_expected
+FROM information_schema.OPTIMIZER_TRACE;
+parallel_capable	blocked_by	candidates	reasons	as_expected
+yes	absent	["aggregate"]	["batch_pipeline"]	1
+#
+# A one-worker limit blocks the run without changing the plan verdict:
+# the candidate stays capable, only the answer flips.
+#
+SET SESSION rapid_parallel_workers=1;
+SET @parallel_capable='no', @parallel_blocked_by='parallel_workers_le_1',
+@parallel_operators='["aggregate"]',
+@parallel_reasons='["batch_pipeline"]';
+SET SESSION optimizer_trace='enabled=on,one_line=off';
+SELECT SUM(n) FROM t;
+SUM(n)
+600030000
+SET SESSION optimizer_trace='enabled=off';
+SET @parallel_ok = (SELECT
+JSON_VALUE(TRACE,'$.steps[*].rapid_parallel.parallel_capable')
+= @parallel_capable
+AND IFNULL(JSON_VALUE(TRACE,'$.steps[*].rapid_parallel.blocked_by'),'absent')
+= @parallel_blocked_by
+AND JSON_EXTRACT(TRACE,'$.steps[*].rapid_parallel.candidates[*].operator')
+= CAST(@parallel_operators AS JSON)
+AND JSON_EXTRACT(TRACE,'$.steps[*].rapid_parallel.candidates[*].reason')
+= CAST(@parallel_reasons AS JSON)
+AND IFNULL(JSON_LENGTH(TRACE,'$**.rapid_parallel'),0) = 1
+AND IFNULL(JSON_LENGTH(TRACE,
+'$.steps[*].rapid_optimizer_rules[*].rapid_parallel'),0) = 0
+FROM information_schema.OPTIMIZER_TRACE);
+SELECT JSON_VALUE(TRACE,'$.steps[*].rapid_parallel.parallel_capable') AS parallel_capable,
+IFNULL(JSON_VALUE(TRACE,'$.steps[*].rapid_parallel.blocked_by'),'absent')
+AS blocked_by,
+JSON_EXTRACT(TRACE,'$.steps[*].rapid_parallel.candidates[*].operator')
+AS candidates,
+JSON_EXTRACT(TRACE,'$.steps[*].rapid_parallel.candidates[*].reason')
+AS reasons,
+@parallel_ok AS as_expected
+FROM information_schema.OPTIMIZER_TRACE;
+parallel_capable	blocked_by	candidates	reasons	as_expected
+no	parallel_workers_le_1	["aggregate"]	["batch_pipeline"]	1
+#
+# An aggregate the batch path cannot fold blocks its candidate.
+#
+SET SESSION rapid_parallel_workers=8;
+SET @parallel_capable='no', @parallel_blocked_by='plan_shape',
+@parallel_operators='["aggregate"]',
+@parallel_reasons='["unsupported_aggregate"]';
+SET SESSION optimizer_trace='enabled=on,one_line=off';
+SELECT MAX(n) FROM t;
+MAX(n)
+60000
+SET SESSION optimizer_trace='enabled=off';
+SET @parallel_ok = (SELECT
+JSON_VALUE(TRACE,'$.steps[*].rapid_parallel.parallel_capable')
+= @parallel_capable
+AND IFNULL(JSON_VALUE(TRACE,'$.steps[*].rapid_parallel.blocked_by'),'absent')
+= @parallel_blocked_by
+AND JSON_EXTRACT(TRACE,'$.steps[*].rapid_parallel.candidates[*].operator')
+= CAST(@parallel_operators AS JSON)
+AND JSON_EXTRACT(TRACE,'$.steps[*].rapid_parallel.candidates[*].reason')
+= CAST(@parallel_reasons AS JSON)
+AND IFNULL(JSON_LENGTH(TRACE,'$**.rapid_parallel'),0) = 1
+AND IFNULL(JSON_LENGTH(TRACE,
+'$.steps[*].rapid_optimizer_rules[*].rapid_parallel'),0) = 0
+FROM information_schema.OPTIMIZER_TRACE);
+SELECT JSON_VALUE(TRACE,'$.steps[*].rapid_parallel.parallel_capable') AS parallel_capable,
+IFNULL(JSON_VALUE(TRACE,'$.steps[*].rapid_parallel.blocked_by'),'absent')
+AS blocked_by,
+JSON_EXTRACT(TRACE,'$.steps[*].rapid_parallel.candidates[*].operator')
+AS candidates,
+JSON_EXTRACT(TRACE,'$.steps[*].rapid_parallel.candidates[*].reason')
+AS reasons,
+@parallel_ok AS as_expected
+FROM information_schema.OPTIMIZER_TRACE;
+parallel_capable	blocked_by	candidates	reasons	as_expected
+no	plan_shape	["aggregate"]	["unsupported_aggregate"]	1
+#
+# A materialized derived table blocks the aggregate reading from it.
+#
+SET @parallel_capable='no', @parallel_blocked_by='plan_shape',
+@parallel_operators='["aggregate","materialized_derived"]',
+@parallel_reasons='["materialized_derived","materialized_derived"]';
+SET SESSION optimizer_trace='enabled=on,one_line=off';
+SELECT SUM(x.s) FROM (SELECT g, SUM(n) s FROM t GROUP BY g) x;
+SUM(x.s)
+600030000
+SET SESSION optimizer_trace='enabled=off';
+SET @parallel_ok = (SELECT
+JSON_VALUE(TRACE,'$.steps[*].rapid_parallel.parallel_capable')
+= @parallel_capable
+AND IFNULL(JSON_VALUE(TRACE,'$.steps[*].rapid_parallel.blocked_by'),'absent')
+= @parallel_blocked_by
+AND JSON_EXTRACT(TRACE,'$.steps[*].rapid_parallel.candidates[*].operator')
+= CAST(@parallel_operators AS JSON)
+AND JSON_EXTRACT(TRACE,'$.steps[*].rapid_parallel.candidates[*].reason')
+= CAST(@parallel_reasons AS JSON)
+AND IFNULL(JSON_LENGTH(TRACE,'$**.rapid_parallel'),0) = 1
+AND IFNULL(JSON_LENGTH(TRACE,
+'$.steps[*].rapid_optimizer_rules[*].rapid_parallel'),0) = 0
+FROM information_schema.OPTIMIZER_TRACE);
+SELECT JSON_VALUE(TRACE,'$.steps[*].rapid_parallel.parallel_capable') AS parallel_capable,
+IFNULL(JSON_VALUE(TRACE,'$.steps[*].rapid_parallel.blocked_by'),'absent')
+AS blocked_by,
+JSON_EXTRACT(TRACE,'$.steps[*].rapid_parallel.candidates[*].operator')
+AS candidates,
+JSON_EXTRACT(TRACE,'$.steps[*].rapid_parallel.candidates[*].reason')
+AS reasons,
+@parallel_ok AS as_expected
+FROM information_schema.OPTIMIZER_TRACE;
+parallel_capable	blocked_by	candidates	reasons	as_expected
+no	plan_shape	["aggregate", "materialized_derived"]	["materialized_derived", "materialized_derived"]	1
+#
+# A nested loop join blocks the pipeline above it, and the leaf left on
+# the native executor is reported on its own.
+#
+SET @parallel_capable='no', @parallel_blocked_by='plan_shape',
+@parallel_operators='["aggregate","nested_loop_join","mysql_native"]',
+@parallel_reasons='["nested_loop_join","nested_loop_join","mysql_native_island"]';
+SET optimizer_switch='hypergraph_optimizer=off,block_nested_loop=off';
+SET SESSION optimizer_trace='enabled=on,one_line=off';
+SELECT SUM(t.n) FROM t, dim WHERE t.id < dim.k;
+SUM(t.n)
+60
+SET SESSION optimizer_trace='enabled=off';
+SET @parallel_ok = (SELECT
+JSON_VALUE(TRACE,'$.steps[*].rapid_parallel.parallel_capable')
+= @parallel_capable
+AND IFNULL(JSON_VALUE(TRACE,'$.steps[*].rapid_parallel.blocked_by'),'absent')
+= @parallel_blocked_by
+AND JSON_EXTRACT(TRACE,'$.steps[*].rapid_parallel.candidates[*].operator')
+= CAST(@parallel_operators AS JSON)
+AND JSON_EXTRACT(TRACE,'$.steps[*].rapid_parallel.candidates[*].reason')
+= CAST(@parallel_reasons AS JSON)
+AND IFNULL(JSON_LENGTH(TRACE,'$**.rapid_parallel'),0) = 1
+AND IFNULL(JSON_LENGTH(TRACE,
+'$.steps[*].rapid_optimizer_rules[*].rapid_parallel'),0) = 0
+FROM information_schema.OPTIMIZER_TRACE);
+SELECT JSON_VALUE(TRACE,'$.steps[*].rapid_parallel.parallel_capable') AS parallel_capable,
+IFNULL(JSON_VALUE(TRACE,'$.steps[*].rapid_parallel.blocked_by'),'absent')
+AS blocked_by,
+JSON_EXTRACT(TRACE,'$.steps[*].rapid_parallel.candidates[*].operator')
+AS candidates,
+JSON_EXTRACT(TRACE,'$.steps[*].rapid_parallel.candidates[*].reason')
+AS reasons,
+@parallel_ok AS as_expected
+FROM information_schema.OPTIMIZER_TRACE;
+parallel_capable	blocked_by	candidates	reasons	as_expected
+no	plan_shape	["aggregate", "nested_loop_join", "mysql_native"]	["nested_loop_join", "nested_loop_join", "mysql_native_island"]	1
+SET optimizer_switch='hypergraph_optimizer=on';
+#
+# Without the secondary engine there is no Rapid plan, so no section.
+#
+SET SESSION use_secondary_engine=OFF;
+SET SESSION optimizer_trace='enabled=on,one_line=off';
+SELECT SUM(n) FROM t;
+SUM(n)
+600030000
+SET SESSION optimizer_trace='enabled=off';
+SELECT IFNULL(JSON_LENGTH(TRACE,'$**.rapid_parallel'),0) AS sections,
+IFNULL(JSON_LENGTH(TRACE,'$**.rapid_parallel'),0) = 0 AS as_expected
+FROM information_schema.OPTIMIZER_TRACE;
+sections	as_expected
+0	1
+SET SESSION use_secondary_engine=FORCED;
+#
+# The knobs the decision rests on are traced alongside it.
+#
+SET SESSION optimizer_trace='enabled=on,one_line=off';
+SELECT SUM(n) FROM t;
+SUM(n)
+600030000
+SET SESSION optimizer_trace='enabled=off';
+SELECT JSON_VALUE(TRACE,'$.steps[*].rapid_parallel.session_workers') AS workers,
+JSON_VALUE(TRACE,'$.steps[*].rapid_parallel.worker_limit') >= 1 AS limit_set,
+JSON_VALUE(TRACE,'$.steps[*].rapid_parallel.isolation') AS isolation
+FROM information_schema.OPTIMIZER_TRACE;
+workers	limit_set	isolation
+#	1	off
+#
+# It stays a planning answer: nothing is emitted while the plan runs.
+#
+SET SESSION optimizer_trace='enabled=on,one_line=off';
+SELECT SUM(n) FROM t;
+SUM(n)
+600030000
+SET SESSION optimizer_trace='enabled=off';
+SELECT IFNULL(JSON_LENGTH(TRACE,'$**.rapid_parallel'),0) AS sections,
+IFNULL(JSON_LENGTH(TRACE,'$.steps[*].join_execution[*].rapid_parallel'),0)
+AS while_executing
+FROM information_schema.OPTIMIZER_TRACE;
+sections	while_executing
+1	0
+DROP DATABASE rapid_parallel_trace;

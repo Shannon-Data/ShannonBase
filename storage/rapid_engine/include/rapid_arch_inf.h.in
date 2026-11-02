@@ -27,6 +27,11 @@
 #ifndef __SHANNONBASE_RAPID_ARCH_INFO_H__
 #define __SHANNONBASE_RAPID_ARCH_INFO_H__
 
+// Overflow-checked arithmetic below is expressed with templates when the
+// compiler has no builtins, so these are needed on every platform.
+#include <limits>
+#include <type_traits>
+
 #define ALIGN_WORD(WORD, TYPE_SIZE) ((WORD + TYPE_SIZE - 1) & ~(TYPE_SIZE - 1))
 
 // OS platform: POSIX (Linux/macOS) vs Windows. Independent of the CPU arch below.
@@ -41,9 +46,16 @@
 #define SHANNON_LINUX_PLATFORM
 #endif
 
+// macOS-only APIs (mach/sysctl, libc quirks) must use this centralized macro.
+// Defined for every Apple build, independently of the CPU arch selected below.
+#if defined(__APPLE__)
+#define SHANNON_MACOS_PLATFORM
+#endif
+
 // clang-format off
 #if defined(__APPLE__) && defined(__arm64__)
-    #define SHANNON_APPLE_PLATFORM
+    // Apple silicon: NEON is mandatory. The OS is already identified by
+    // SHANNON_MACOS_PLATFORM above; this block only selects the CPU features.
     #define SHANNON_ARM_PLATFORM
 
     static_assert(__ARM_NEON, "Expected NEON on Apple arm64 but __ARM_NEON is unset");
@@ -135,7 +147,16 @@
 #endif
 // clang-format on
 
-// Compiler builtins for overflow-checked arithmetic; see utils/utils.h for the helpers.
+// ---------------------------------------------------------------------------
+// Overflow-checked arithmetic.
+//
+// Contract, identical to the GCC/Clang __builtin_*_overflow family: *RESULT
+// receives the wrapped result, and the expression is true only when the
+// mathematical result does not fit in *RESULT's type.
+//
+// Engine code goes through these macros instead of spelling a builtin, so a
+// platform without builtins keeps exactly the same semantics.
+// ---------------------------------------------------------------------------
 #if defined(__has_builtin)
     #if __has_builtin(__builtin_add_overflow)
         #define SHANNON_OVERFLOW_BUILTINS_SUPPORTED
@@ -143,6 +164,77 @@
 #elif defined(__GNUC__) && (__GNUC__ >= 5)
     #define SHANNON_OVERFLOW_BUILTINS_SUPPORTED
 #endif
+
+// clang-format off
+#if defined(SHANNON_OVERFLOW_BUILTINS_SUPPORTED)
+    // GCC >= 5, Clang and Apple clang. *RESULT selects the result type, so any
+    // mix of operand widths and signedness is handled natively.
+    #define SHANNON_ADD_OVERFLOW(a, b, r) __builtin_add_overflow((a), (b), (r))
+    #define SHANNON_SUB_OVERFLOW(a, b, r) __builtin_sub_overflow((a), (b), (r))
+    #define SHANNON_MUL_OVERFLOW(a, b, r) __builtin_mul_overflow((a), (b), (r))
+#else
+    // MSVC and every other compiler: same primitive, same contract, slower.
+    #define SHANNON_ADD_OVERFLOW(a, b, r) ::ShannonBase::Arch::add_overflow((a), (b), (r))
+    #define SHANNON_SUB_OVERFLOW(a, b, r) ::ShannonBase::Arch::sub_overflow((a), (b), (r))
+    #define SHANNON_MUL_OVERFLOW(a, b, r) ::ShannonBase::Arch::mul_overflow((a), (b), (r))
+#endif
+// clang-format on
+
+// Portable form of the three operations above: *RESULT receives the wrapped
+// result and true is returned on overflow. Always compiled so the code stays
+// type-checked on platforms that use the builtins; instantiated only on those
+// that do not.
+namespace ShannonBase {
+namespace Arch {
+template <typename T, typename U, typename R>
+inline bool add_overflow(T a, U b, R *r) {
+  using C = typename std::common_type<T, U, R>::type;
+  const C x = static_cast<C>(a), y = static_cast<C>(b);
+  if constexpr (std::is_signed<C>::value) {
+    if ((y > 0 && x > (std::numeric_limits<C>::max)() - y) || (y < 0 && x < (std::numeric_limits<C>::min)() - y))
+      return true;
+  } else if (x > (std::numeric_limits<C>::max)() - y) {
+    return true;
+  }
+  *r = static_cast<R>(x + y);
+  return false;
+}
+
+template <typename T, typename U, typename R>
+inline bool sub_overflow(T a, U b, R *r) {
+  using C = typename std::common_type<T, U, R>::type;
+  const C x = static_cast<C>(a), y = static_cast<C>(b);
+  if constexpr (std::is_signed<C>::value) {
+    if ((y > 0 && x < (std::numeric_limits<C>::min)() + y) || (y < 0 && x > (std::numeric_limits<C>::max)() + y))
+      return true;
+  } else if (x < y) {
+    return true;
+  }
+  *r = static_cast<R>(x - y);
+  return false;
+}
+
+template <typename T, typename U, typename R>
+inline bool mul_overflow(T a, U b, R *r) {
+  using C = typename std::common_type<T, U, R>::type;
+  const C x = static_cast<C>(a), y = static_cast<C>(b);
+  const C max = (std::numeric_limits<C>::max)();
+  if constexpr (std::is_signed<C>::value) {
+    const C min = (std::numeric_limits<C>::min)();
+    if (x == 0 || y == 0) {
+      *r = 0;
+      return false;
+    }
+    if ((x == -1 && y == min) || (y == -1 && x == min)) return true;
+    if (x > 0 ? (y > 0 ? x > max / y : y < min / x) : (y > 0 ? x < min / y : y < max / x)) return true;
+  } else if (y != 0 && x > max / y) {
+    return true;
+  }
+  *r = static_cast<R>(x * y);
+  return false;
+}
+}  // namespace Arch
+}  // namespace ShannonBase
 
 // cache line size
 #define CACHE_LINE_SIZE @CACHE_LINE_SIZE@

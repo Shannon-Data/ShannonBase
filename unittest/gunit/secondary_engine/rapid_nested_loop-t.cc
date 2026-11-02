@@ -43,30 +43,24 @@ TEST(RapidNestedLoopCost, DictionaryAndProjectionWorkAffectTheComparison) {
 }
 
 TEST(RapidBatchPolicy, HardwareAlignmentNeverExceedsMemoryAndWidthControlsRows) {
-  using ShannonBase::Executor::BatchHardware;
   using ShannonBase::Executor::SelectBatchRows;
-  const BatchHardware hardware{64, 512 * 1024, 32};
-  const size_t narrow = SelectBatchRows(8, 1024 * 1024, 2, hardware);
-  const size_t wide = SelectBatchRows(128, 1024 * 1024, 2, hardware);
+  constexpr size_t kAlignment = CACHE_LINE_SIZE > SHANNON_SIMD_ALIGN ? CACHE_LINE_SIZE : SHANNON_SIMD_ALIGN;
+  const size_t narrow = SelectBatchRows(8, 1024 * 1024, 2);
+  const size_t wide = SelectBatchRows(128, 1024 * 1024, 2);
   EXPECT_GT(narrow, wide);
-  EXPECT_EQ(0U, narrow % 64);
-  EXPECT_EQ(0U, wide % 64);
-  EXPECT_EQ(0U, SelectBatchRows(8, 7, 1, hardware));
-  EXPECT_EQ(3U, SelectBatchRows(8, 24, 1, hardware));
-  EXPECT_EQ(0U, SelectBatchRows(SIZE_MAX, SIZE_MAX, 2, hardware));
+  EXPECT_EQ(0U, narrow % kAlignment);
+  EXPECT_EQ(0U, wide % kAlignment);
+  EXPECT_EQ(0U, SelectBatchRows(8, 7, 1));
+  EXPECT_EQ(3U, SelectBatchRows(8, 24, 1));
+  EXPECT_EQ(0U, SelectBatchRows(SIZE_MAX, SIZE_MAX, 2));
   for (size_t budget : {size_t{1}, size_t{31}, size_t{1000}, size_t{1048576}}) {
-    const size_t rows = SelectBatchRows(17, budget, 3, hardware);
+    const size_t rows = SelectBatchRows(17, budget, 3);
     EXPECT_LE(rows * 17 * 3, budget);
   }
 }
-TEST(RapidBatchPolicy, CacheHintsAndLiveBuffersChangeTheWorkingSet) {
-  using ShannonBase::Executor::BatchHardware;
+TEST(RapidBatchPolicy, LiveBuffersShrinkTheWorkingSet) {
   using ShannonBase::Executor::SelectBatchRows;
-  const BatchHardware small{64, 128 * 1024, 16}, large{64, 1024 * 1024, 32};
-  EXPECT_LT(SelectBatchRows(32, 8 * 1024 * 1024, 1, small),
-            SelectBatchRows(32, 8 * 1024 * 1024, 1, large));
-  EXPECT_LT(SelectBatchRows(32, 8 * 1024 * 1024, 4, large),
-            SelectBatchRows(32, 8 * 1024 * 1024, 1, large));
+  EXPECT_LT(SelectBatchRows(32, 8 * 1024 * 1024, 4), SelectBatchRows(32, 8 * 1024 * 1024, 1));
 }
 
 class DataRows final : public RowIterator {

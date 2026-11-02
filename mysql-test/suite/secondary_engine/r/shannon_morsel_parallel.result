@@ -1,0 +1,61 @@
+CREATE DATABASE rapid_parallel;
+USE rapid_parallel;
+SELECT @@session.rapid_parallel_workers;
+@@session.rapid_parallel_workers
+1
+SET use_secondary_engine=OFF;
+SET cte_max_recursion_depth=70000;
+CREATE TABLE t(id INT PRIMARY KEY,g INT,n BIGINT,d DECIMAL(15,2),s VARCHAR(12) COLLATE utf8mb4_general_ci,c CHAR(2)) SECONDARY_ENGINE=rapid;
+INSERT INTO t WITH RECURSIVE seq AS (SELECT 1 n UNION ALL SELECT n+1 FROM seq WHERE n<70000)
+SELECT n,MOD(n*7919,4000),IF(MOD(n,7)=0,NULL,n-35000),IF(MOD(n,11)=0,NULL,(n-35000)*1.25),
+IF(MOD(n,13)=0,NULL,IF(MOD(n,2)=0,'Alpha','alpha ')),IF(MOD(n,3)=0,'x','y') FROM seq;
+ANALYZE TABLE t;
+Table	Op	Msg_type	Msg_text
+rapid_parallel.t	analyze	status	OK
+ALTER TABLE t SECONDARY_LOAD;
+SET use_secondary_engine=FORCED;
+SET optimizer_switch='hypergraph_optimizer=on';
+SET secondary_engine_cost_threshold=0;
+# Exact global/grouped results at 2/4/8 workers, including NULL and collation.
+SET SESSION rapid_parallel_workers=2;
+SET SESSION rapid_parallel_workers=4;
+SET SESSION rapid_parallel_workers=8;
+# Preserve first-appearance group order without sorting the comparison.
+SET rapid_parallel_workers=1;
+SET rapid_parallel_workers=4;
+SET debug='+d,rapid_parallel_tiny_budget';
+SET debug='-d,rapid_parallel_tiny_budget';
+# A genuine scan buffer budget refusal falls back without consuming input.
+SET debug='+d,rapid_parallel_scan_budget';
+SET debug='-d,rapid_parallel_scan_budget';
+SET debug='+d,rapid_parallel_plan_budget';
+SET debug='-d,rapid_parallel_plan_budget';
+# Residual expression filter, empty input, prepared statement reexecution.
+PREPARE stmt FROM 'SELECT SUM(d),AVG(n),COUNT(s) FROM t';
+EXECUTE stmt;
+SUM(d)	AVG(n)	COUNT(s)
+27842.50	0.0000	64616
+EXECUTE stmt;
+SUM(d)	AVG(n)	COUNT(s)
+27842.50	0.0000	64616
+DEALLOCATE PREPARE stmt;
+# Local flush and partitioned merge combine repeated partial keys.
+SET SESSION debug='+d,rapid_parallel_tiny_budget';
+SET SESSION debug='-d,rapid_parallel_tiny_budget';
+# Speculative failure replays the original snapshot without duplicates.
+SET SESSION debug='+d,rapid_parallel_serial_retry';
+SET SESSION debug='-d,rapid_parallel_serial_retry';
+# Worker error is joined and reported; the following query can execute.
+SET SESSION debug='+d,rapid_parallel_worker_failure';
+SELECT SUM(d),COUNT(*) FROM t;
+ERROR HY000: Rapid injected parallel worker failure
+SET SESSION debug='-d,rapid_parallel_worker_failure';
+# Killing a statement joins all workers before releasing its snapshot.
+SET DEBUG_SYNC='rapid_parallel_workers_started SIGNAL parallel_started WAIT_FOR parallel_continue';
+SELECT SUM(d),COUNT(*) FROM t;
+SET DEBUG_SYNC='now WAIT_FOR parallel_started';
+SET DEBUG_SYNC='now SIGNAL parallel_continue';
+ERROR 70100: Query execution was interrupted
+SET DEBUG_SYNC='RESET';
+SET use_secondary_engine=OFF;
+DROP DATABASE rapid_parallel;

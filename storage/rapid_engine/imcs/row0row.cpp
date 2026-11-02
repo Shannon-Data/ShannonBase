@@ -686,7 +686,18 @@ void RowDirectory::get_offsets_for_rows(const std::vector<row_id_t> &row_ids, ui
   for (size_t s = 0; s < NUM_SHARDS; ++s)
     if (touched[s]) locks[s] = std::shared_lock<std::shared_mutex>(m_shards[s].mutex);
 
+  // Index scans hand over arbitrary row ids, so m_entries[] is a random walk
+  // over a multi-megabyte table; hide part of that latency with a software
+  // prefetch pipeline. It accounts for ~12% of one TPC-H query's cycles.
   for (size_t idx = 0; idx < row_ids.size(); ++idx) {
+    constexpr size_t kPrefetchDistance = 16;
+    if (idx + kPrefetchDistance < row_ids.size()) {
+      const row_id_t ahead = row_ids[idx + kPrefetchDistance];
+      // SHANNON_PREFETCH_L3 is the per-platform form of
+      // __builtin_prefetch(addr, 0, 1) and compiles to nothing on a target
+      // without a prefetch instruction.
+      if (ahead < m_capacity) SHANNON_PREFETCH_L3(&m_entries[ahead]);
+    }
     row_id_t rid = row_ids[idx];
     if (rid >= m_capacity) {
       offsets[idx] = 0;

@@ -1,0 +1,30 @@
+CREATE DATABASE rapid_parallel_join;
+USE rapid_parallel_join;
+SET use_secondary_engine=OFF;
+SET cte_max_recursion_depth=140000;
+CREATE TABLE fact(id INT PRIMARY KEY,k INT,v DECIMAL(15,2),n BIGINT) SECONDARY_ENGINE=rapid;
+CREATE TABLE dim(id INT PRIMARY KEY,k INT,g INT,v DECIMAL(10,2)) SECONDARY_ENGINE=rapid;
+INSERT INTO fact WITH RECURSIVE seq AS (SELECT 1 n UNION ALL SELECT n+1 FROM seq WHERE n<140000)
+SELECT n,IF(MOD(n,17)=0,NULL,MOD(n,19)),IF(MOD(n,11)=0,NULL,(n-70000)*1.25),n-70000 FROM seq;
+INSERT INTO dim SELECT id,MOD(id,19),MOD(30-id,9),IF(MOD(id,5)=0,NULL,id/10) FROM fact WHERE id<=30;
+ANALYZE TABLE fact,dim;
+Table	Op	Msg_type	Msg_text
+rapid_parallel_join.fact	analyze	status	OK
+rapid_parallel_join.dim	analyze	status	OK
+ALTER TABLE fact SECONDARY_LOAD;
+ALTER TABLE dim SECONDARY_LOAD;
+SET use_secondary_engine=FORCED;
+SET optimizer_switch='hypergraph_optimizer=on';
+SET secondary_engine_cost_threshold=0;
+# Read-only shared build with duplicate keys, fanout, unmatched and NULL keys.
+SET rapid_parallel_workers=1;
+SET rapid_parallel_workers=2;
+SET rapid_parallel_workers=1;
+SET rapid_parallel_workers=4;
+SET rapid_parallel_workers=1;
+SET rapid_parallel_workers=8;
+# Join output buffer refusal joins workers and replays the same build/probe snapshot.
+SET debug='+d,rapid_parallel_join_budget';
+SET debug='-d,rapid_parallel_join_budget';
+SET use_secondary_engine=OFF;
+DROP DATABASE rapid_parallel_join;

@@ -64,12 +64,10 @@ Boundaries that must be respected:
                              the only data carrier; [data][null_bitmap]
   BatchReadable              executor/iterators/iterator.h
                              ReadBatch / ReadSelectedBatch delivery
-  Morsel / MorselSource      executor/executor.h
+  Morsel / ParallelSource    executor/executor.h
                              physical splitting; maps onto blocks/grids
   ResMgmt::MemoryBudget      resource_management/res_mgmt.h
                              every byte must be charged here
-  BatchHardware              executor/iterators/iterator.h
-                             the natural place for device traits
 
 
 2. Data contract
@@ -156,7 +154,7 @@ Tier 3, do not offload.
   2. SQL semantics stay on the host: three-valued NULL logic, my_decimal
      exactness, collation and charset, Field error codes. A kernel is
      speculative: claim, or refuse, never partially write.
-  3. Determinism: Morsel ordinals define reproducible parallel output order, and
+  3. Determinism: source ordinals define reproducible parallel output order, and
      float reduction is order dependent. Fix the reduction tree, or the TPC-H
      digest comparison drifts.
   4. A backend must not read IMCUs. Scans consume the RapidCursor pinned
@@ -193,8 +191,8 @@ expression program plus the aggregate reduction, submitted as one unit.
       Gate: identical results and unchanged behaviour with no device; MTR green.
   P1  Filter / Project / Sum kernels with the row threshold.
       Gate: assert_rapid_matches_innodb digest parity.
-  P2  aggregate reduction offload with spill fallback, device-level morsels
-      (BatchHardware gains SM count and HBM bandwidth, reusing
+  P2  aggregate reduction offload with spill fallback, device-level work units
+      (device traits such as SM count and HBM bandwidth extend
       SelectBatchRows()).
   P3  VECTOR distance kernels wired into ml/ retrieval; this is where TPU/NPU
       becomes relevant and where the graph boundary is required.

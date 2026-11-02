@@ -135,7 +135,7 @@ bool VectorizedSortIterator::ResetState() {
   std::pmr::vector<uchar>(&m_sort_memory).swap(m_keys);
   std::pmr::vector<uchar>(&m_sort_memory).swap(m_payload);
   std::pmr::vector<size_t>(&m_sort_memory).swap(m_payload_offsets);
-  if (!TryReserve(m_payload_offsets, 1)) return AllocationError("Rapid sort payload offsets allocation failed");
+  if (!Reserve(m_payload_offsets, 1)) return AllocationError("Rapid sort payload offsets allocation failed");
   m_payload_offsets.push_back(0);
   std::pmr::vector<uint32_t>(&m_sort_memory).swap(m_order);
   decltype(m_topn_payload)(&m_sort_memory).swap(m_topn_payload);
@@ -196,7 +196,7 @@ bool VectorizedSortIterator::SortBuffered() {
   const size_t rows = m_payload_offsets.size() - 1;
   const size_t width = m_key_width;
   const uchar *keys = m_keys.data();
-  if (!TryReserve(m_order, rows)) return AllocationError("Rapid sort order buffer allocation failed");
+  if (!Reserve(m_order, rows)) return AllocationError("Rapid sort order buffer allocation failed");
   m_order.resize(rows);
   std::iota(m_order.begin(), m_order.end(), 0u);
   std::sort(m_order.begin(), m_order.end(), [keys, width](uint32_t a, uint32_t b) {
@@ -252,8 +252,8 @@ bool VectorizedSortIterator::SetupBatch() {
   for (const auto &input : m_tables.tables()) {
     TABLE *table = input.table;
     if (table->is_nullable()) return false;
-    if (!TryReserve(m_batch_dictionaries, index + table->s->fields) ||
-        !TryGrow(m_payload_fields, m_payload_fields.size() + input.columns.size())) {
+    if (!Reserve(m_batch_dictionaries, index + table->s->fields) ||
+        !Grow(m_payload_fields, m_payload_fields.size() + input.columns.size())) {
       AllocationError("Rapid sort batch schema allocation failed");
       return false;
     }
@@ -286,7 +286,7 @@ bool VectorizedSortIterator::SetupBatch() {
   m_batch_capacity = SelectBatchRows(m_key_width + m_row_width, m_memory_budget, 4);
   if (m_batch_capacity == 0) return false;
 
-  if (!TryReserve(m_chunks, index)) {
+  if (!Reserve(m_chunks, index)) {
     AllocationError("Rapid sort input descriptors allocation failed");
     return false;
   }
@@ -327,7 +327,7 @@ bool VectorizedSortIterator::RestoreDictionaryField(Field *field, uint32_t code)
   if (value.data() == nullptr) {
     // Compressed entries need a decode buffer; an existing empty entry has a
     // non-null data pointer, so it stays on the zero-copy path.
-    if (!TryReserve(m_dictionary_decode_scratch, field->field_length + 1)) {
+    if (!Reserve(m_dictionary_decode_scratch, field->field_length + 1)) {
       AllocationError("Rapid sort dictionary_decode_scratch allocation failed");
       return true;
     }
@@ -368,7 +368,7 @@ bool VectorizedSortIterator::EncodeDictionaryVarstringKey(const KeyPart &key_par
 
   std::string_view decoded = dictionary->get_view(code);
   if (decoded.data() == nullptr) {
-    if (!TryReserve(m_dictionary_decode_scratch, field->field_length + 1)) {
+    if (!Reserve(m_dictionary_decode_scratch, field->field_length + 1)) {
       AllocationError("Rapid sort dictionary_decode_scratch allocation failed");
       return true;
     }
@@ -398,7 +398,7 @@ bool VectorizedSortIterator::EncodeDictionaryVarstringKey(const KeyPart &key_par
 // already byte-comparable; anything else goes through Field::make_sort_key.
 bool VectorizedSortIterator::EncodeBatchKeys(size_t rows) {
   const size_t width = m_key_width;
-  if (!TryReserve(m_block_keys, rows * width)) {
+  if (!Reserve(m_block_keys, rows * width)) {
     AllocationError("Rapid sort block_keys allocation failed");
     return true;
   }
@@ -476,7 +476,7 @@ long VectorizedSortIterator::FetchBlock() {
     if (err == -1) return 0;
     if (err != 0) return -1;
 
-    if (!TryReserve(m_block_keys, m_key_width)) {
+    if (!Reserve(m_block_keys, m_key_width)) {
       AllocationError("Rapid sort block_keys allocation failed");
       return -1;
     }
@@ -576,7 +576,7 @@ bool VectorizedSortIterator::Sink() {
           if (required <= buffer.capacity()) return true;
           size_t capacity = buffer.capacity();
           if (capacity <= SIZE_MAX / 2) capacity *= 2;
-          return TryReserve(buffer, std::max(required, capacity));
+          return Reserve(buffer, std::max(required, capacity));
         };
 
         if (m_keys.size() > SIZE_MAX - m_key_width || m_payload.size() > SIZE_MAX - length ||
@@ -619,8 +619,8 @@ bool VectorizedSortIterator::SinkTopN() {
   const size_t limit = static_cast<size_t>(m_limit);
   const size_t width = m_key_width;
   std::pmr::vector<uint32_t> heap(&m_sort_memory);
-  if (!TryReserve(heap, limit) || !TryReserve(m_keys, limit * width) || !TryReserve(m_topn_payload, limit) ||
-      !TryReserve(m_order, limit))
+  if (!Reserve(heap, limit) || !Reserve(m_keys, limit * width) || !Reserve(m_topn_payload, limit) ||
+      !Reserve(m_order, limit))
     return AllocationError("Rapid sort top-N slots allocation failed");
   auto slot_key = [this, width](uint32_t slot) { return m_keys.data() + size_t{slot} * width; };
   auto worse = [&](uint32_t a, uint32_t b) {
@@ -655,8 +655,7 @@ bool VectorizedSortIterator::SinkTopN() {
       const uchar *payload = BlockPayload(r, &length);
       if (payload == nullptr) return true;
       memcpy(m_keys.data() + size_t{slot} * width, key, width);
-      if (!TryReserve(m_topn_payload[slot], length))
-        return AllocationError("Rapid sort top-N payload allocation failed");
+      if (!Reserve(m_topn_payload[slot], length)) return AllocationError("Rapid sort top-N payload allocation failed");
       m_topn_payload[slot].assign(pointer_cast<const char *>(payload), length);
       heap.push_back(slot);
       std::push_heap(heap.begin(), heap.end(), worse);
@@ -793,7 +792,7 @@ bool VectorizedSortIterator::SpillRun() {
   std::pmr::vector<uchar>(&m_sort_memory).swap(m_keys);
   std::pmr::vector<uchar>(&m_sort_memory).swap(m_payload);
   std::pmr::vector<size_t>(&m_sort_memory).swap(m_payload_offsets);
-  if (!TryReserve(m_payload_offsets, 1)) return AllocationError("Rapid sort payload offsets allocation failed");
+  if (!Reserve(m_payload_offsets, 1)) return AllocationError("Rapid sort payload offsets allocation failed");
   m_payload_offsets.push_back(0);
   std::pmr::vector<uint32_t>(&m_sort_memory).swap(m_order);
   return false;
@@ -841,14 +840,14 @@ bool VectorizedSortIterator::AdvanceRun(Run *run) {
   }
 
   uint32_t length{0};
-  if (!TryReserve(run->key, m_key_width)) return AllocationError("Rapid sort merge key allocation failed");
+  if (!Reserve(run->key, m_key_width)) return AllocationError("Rapid sort merge key allocation failed");
   run->key.resize(m_key_width);
   if (ReadRunBytes(run, run->key.data(), m_key_width) || ReadRunBytes(run, &length, sizeof(length))) return true;
 
   const size_t head_limit = m_memory_budget / (4 * kMaxOpenRuns);
   if (m_key_width > head_limit || length > head_limit - m_key_width) return true;
 
-  if (!TryReserve(run->payload, length)) return AllocationError("Rapid sort merge payload allocation failed");
+  if (!Reserve(run->payload, length)) return AllocationError("Rapid sort merge payload allocation failed");
   run->payload.resize(length);
   if (ReadRunBytes(run, run->payload.data(), length)) return true;
 
@@ -867,7 +866,7 @@ bool VectorizedSortIterator::MergePass() {
   for (uint64_t first = 0; first < m_spool_run_count; first += MergeFanIn()) {
     const size_t count = static_cast<size_t>(std::min<uint64_t>(MergeFanIn(), m_spool_run_count - first));
     std::pmr::vector<Run> inputs(&m_aux_memory);
-    if (!TryReserve(inputs, count)) return AllocationError("Rapid sort merge inputs allocation failed");
+    if (!Reserve(inputs, count)) return AllocationError("Rapid sort merge inputs allocation failed");
 
     for (size_t i = 0; i < count; ++i) inputs.emplace_back(&m_aux_memory);
     for (auto &input : inputs) {
@@ -926,8 +925,8 @@ bool VectorizedSortIterator::StartMerge() {
   }
 
   m_runs.clear();
-  if (!TryReserve(m_runs, static_cast<size_t>(m_spool_run_count)) ||
-      !TryReserve(m_merge_heap, static_cast<size_t>(m_spool_run_count)))
+  if (!Reserve(m_runs, static_cast<size_t>(m_spool_run_count)) ||
+      !Reserve(m_merge_heap, static_cast<size_t>(m_spool_run_count)))
     return AllocationError("Rapid sort merge heads allocation failed");
   for (size_t i = 0; i < m_spool_run_count; ++i) m_runs.emplace_back(&m_aux_memory);
   for (size_t i = 0; i < m_runs.size(); ++i) {
@@ -1009,7 +1008,7 @@ bool VectorizedSortIterator::InitImpl() {
       kp.reverse = sf.reverse;
       kp.maybe_null = kp.field->is_nullable() || kp.field->table->is_nullable();
       m_key_width += kp.width + (kp.maybe_null ? 1 : 0);
-      if (!TryGrow(m_key_parts, m_key_parts.size() + 1))
+      if (!Grow(m_key_parts, m_key_parts.size() + 1))
         return AllocationError("Rapid sort key descriptors allocation failed");
       m_key_parts.push_back(kp);
     }
@@ -1031,7 +1030,7 @@ bool VectorizedSortIterator::InitImpl() {
   m_batch_eof = false;
   SetupBatch();
   if (thd()->is_error()) return true;
-  if (!TryReserve(m_row_image, m_row_width)) return AllocationError("Rapid sort row image allocation failed");
+  if (!Reserve(m_row_image, m_row_width)) return AllocationError("Rapid sort row image allocation failed");
   m_limit = m_filesort->limit;
 
   if (CanUseTopN()) return SinkTopN();
@@ -1057,7 +1056,7 @@ int VectorizedSortIterator::NextPayload(const uchar **row) {
 }
 
 bool VectorizedSortIterator::LoadTailRow() {
-  if (!TryReserve(m_row_image, m_row_width)) return AllocationError("Rapid sort tail row image allocation failed");
+  if (!Reserve(m_row_image, m_row_width)) return AllocationError("Rapid sort tail row image allocation failed");
   m_row_image.resize(m_row_width);
   for (const auto &field : m_payload_fields) {
     const ColumnChunk *source = nullptr;
@@ -1097,7 +1096,7 @@ int VectorizedSortIterator::ReadBatchImpl(std::pmr::vector<ColumnChunk> &chunks,
 
   capacity = std::min(capacity, m_batch_capacity);
   m_output_columns.clear();
-  if (!TryReserve(m_output_columns, chunks.size())) {
+  if (!Reserve(m_output_columns, chunks.size())) {
     AllocationError("Rapid sort output schema allocation failed");
     return 1;
   }

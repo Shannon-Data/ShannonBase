@@ -26,7 +26,10 @@
    Copyright (c) 2023, Shannon Data AI and/or its affiliates.
 */
 #include "storage/rapid_engine/executor/iterators/stream_iterator.h"
+#include <algorithm>
+#include <cassert>
 #include "scope_guard.h"
+#include "sql/current_thd.h"
 #include "sql/iterators/timing_iterator.h"
 #include "sql/sql_optimizer.h"
 #include "sql/temp_table_param.h"
@@ -89,6 +92,8 @@ VectorizedStreamIterator::VectorizedStreamIterator(THD *thd, unique_ptr_destroy_
       m_reservation(ResMgmt::reserve_query_memory(thd, ResMgmt::QueryMemoryOperator::kBatchTransport, budget)),
       m_memory(m_reservation.bytes()),
       m_source(std::move(source)),
+      // m_native borrows m_source.get(): m_source must be declared before
+      // m_native in the class definition.
       m_native(thd, NewIterator<detail::BorrowedRows>(thd, thd->mem_root, m_source.get()), param, table, provide_rowid,
                join, ref_slice),
       m_param(param),
@@ -126,21 +131,30 @@ bool VectorizedStreamIterator::Init() {
   if (m_native.Init()) return true;
   auto *batch = dynamic_cast<BatchReadable *>(m_source->real_iterator());
   if (batch == nullptr || !batch->SupportsBatchRead() || !CanVectorize(m_param, m_table, m_provide_rowid)) return false;
-  if (!TryReserve(m_input, m_input_fields.size())) return Error();
+  // Falling back to the row path must give back what the batch path reserved.
+  const auto fall_back = [this] {
+    m_input.clear();
+    m_input.shrink_to_fit();
+    m_bindings.clear();
+    m_bindings.shrink_to_fit();
+    m_batch = nullptr;
+    return false;
+  };
+  if (!Reserve(m_input, m_input_fields.size())) return Error();
   for (Field *field : m_input_fields) {
     m_input.emplace_back(field, field ? 1 : 0, &m_memory);
     if (m_input.back().failed()) return Error();
   }
-  if (!TryReserve(m_bindings, m_param->items_to_copy->size())) return Error();
+  if (!Reserve(m_bindings, m_param->items_to_copy->size())) return Error();
   for (const Func_ptr &copy : *m_param->items_to_copy) {
     Field *target = copy.result_field();
     if (target == nullptr || !bitmap_is_set(m_table->read_set, target->field_index())) continue;
     Field *source = down_cast<Item_field *>(copy.func()->real_item())->field;
     const auto found = std::find(m_input_fields.begin(), m_input_fields.end(), source);
-    if (found == m_input_fields.end()) return false;
+    if (found == m_input_fields.end()) return fall_back();
     auto dictionary = batch->Dictionary(source);
-    if (Utils::Util::is_string(source->type()) && dictionary == nullptr) return false;
-    if (!dictionary && Utils::Util::normalized_length(source) != source->pack_length()) return false;
+    if (Utils::Util::is_string(source->type()) && dictionary == nullptr) return fall_back();
+    if (!dictionary && Utils::Util::normalized_length(source) != source->pack_length()) return fall_back();
     m_bindings.push_back({source, target, static_cast<size_t>(found - m_input_fields.begin()), std::move(dictionary)});
   }
   size_t row_bytes = sizeof(uint32_t);
@@ -167,11 +181,23 @@ int VectorizedStreamIterator::ReadBatch(std::pmr::vector<ColumnChunk> &chunks, s
       RapidMonitor::rapid_counters.query_vectorized_stream_batch_rows_total.fetch_add(rows, std::memory_order_relaxed);
   });
   if (m_batch == nullptr) return Error();
+  // ReadBatch mutates JOIN ref-slice state shared by every iterator of the
+  // query; it must only run on the thread that owns this iterator's THD.
+  assert(current_thd == thd());
   capacity = std::min(capacity, m_batch_capacity);
   if (capacity == 0) return 0;
   m_join->set_ref_item_slice(m_input_slice);
+  // The ref-item slice is shared by every iterator of the query, so leave the
+  // JOIN as it was found when this reader does not publish into a slice of its
+  // own. Keeping the input slice installed would change what other iterators
+  // read after the batch, and a negative output slice means "no own slice".
+  const uint entry_slice = m_join->get_ref_item_slice();
   auto output_slice = create_scope_guard([&] {
-    if (m_output_slice >= 0 && !m_join->ref_items[m_output_slice].is_null()) m_join->set_ref_item_slice(m_output_slice);
+    if (m_output_slice >= 0 && !m_join->ref_items[m_output_slice].is_null()) {
+      m_join->set_ref_item_slice(m_output_slice);
+    } else {
+      m_join->set_ref_item_slice(entry_slice);
+    }
   });
   for (auto &chunk : m_input) {
     chunk.clear();
@@ -182,22 +208,32 @@ int VectorizedStreamIterator::ReadBatch(std::pmr::vector<ColumnChunk> &chunks, s
   for (auto &chunk : chunks) {
     if (!chunk.valid()) continue;
     const Binding *binding = nullptr;
-    for (const auto &candidate : m_bindings)
-      if (candidate.target == chunk.source_field()) binding = &candidate;
+    // First match, exactly as Dictionary() resolves it.
+    for (const auto &candidate : m_bindings) {
+      if (candidate.target == chunk.source_field()) {
+        binding = &candidate;
+        break;
+      }
+    }
     if (binding == nullptr) return Error();
     const auto &input = m_input[binding->index];
     if (chunk.width() != input.width()) return Error();
-    for (size_t row = 0; row < rows; ++row) {
-      const size_t physical = m_input_selection.empty() ? row : m_input_selection[row];
-      const bool is_null = input.nullable_fast(physical);
-      if (!chunk.add(is_null ? nullptr : input.data_fast(physical), is_null ? 0 : input.width(), is_null))
-        return Error();
-    }
+    // One bulk append per column: a dense batch is a single memcpy, a selective
+    // one walks the selection once. append_range_from() cannot be used here
+    // because the input and output chunks belong to different tables.
+    if (!chunk.append_rows_from(input, m_input_selection.empty() ? nullptr : m_input_selection.data(), rows))
+      return Error();
   }
   return result;
 }
 
-bool VectorizedStreamIterator::PushbackBatchTail(const std::pmr::vector<ColumnChunk> &, size_t, size_t) { return true; }
+// BatchReadable contract: true means the tail could NOT be buffered and the
+// caller must fail the query. This inner source never buffers; the owning
+// VectorizedRecordIterator does (as for VectorizedLookup). Being called here is
+// a bug, so report it instead of returning a bare failure.
+bool VectorizedStreamIterator::PushbackBatchTail(const std::pmr::vector<ColumnChunk> &, size_t, size_t) {
+  return Error() != 0;
+}
 
 bool VectorizedStreamIterator::PreservesBatchNullRows() const { return true; }
 

@@ -1,0 +1,132 @@
+--source include/no_ps_protocol.inc
+
+--echo #
+--echo # optimizer_trace reports the planning-time parallel decision: whether
+--echo # this pipeline may use parallel workers, and what plan shape blocks it
+--echo # when it may not. Execution is deliberately not traced.
+--echo #
+
+CREATE DATABASE rapid_parallel_trace;
+USE rapid_parallel_trace;
+
+SET use_secondary_engine=OFF;
+SET cte_max_recursion_depth=30000;
+CREATE TABLE t(id INT PRIMARY KEY, g INT, n BIGINT, d DECIMAL(15,2),
+               s VARCHAR(12)) SECONDARY_ENGINE=rapid;
+INSERT INTO t WITH RECURSIVE seq AS (SELECT 1 n UNION ALL SELECT n+1 FROM seq
+  WHERE n<20000)
+  SELECT n, MOD(n,97), n*3, n*1.25, CONCAT('s',MOD(n,50)) FROM seq;
+CREATE TABLE dim(k INT PRIMARY KEY) SECONDARY_ENGINE=rapid;
+INSERT INTO dim VALUES (1),(2),(3),(4),(5);
+ANALYZE TABLE t, dim;
+ALTER TABLE t SECONDARY_LOAD;
+ALTER TABLE dim SECONDARY_LOAD;
+
+SET use_secondary_engine=FORCED;
+SET secondary_engine_cost_threshold=0;
+--disable_warnings
+SET optimizer_switch='hypergraph_optimizer=on';
+--enable_warnings
+SET SESSION optimizer_trace_max_mem_size=1048576;
+
+--echo #
+--echo # Batch pipeline over a plain scan: capable, one candidate, no gate.
+--echo #
+SET SESSION rapid_parallel_workers=8;
+SET @parallel_capable='yes', @parallel_blocked_by='absent',
+    @parallel_operators='["aggregate"]',
+    @parallel_reasons='["batch_pipeline"]';
+SET SESSION optimizer_trace='enabled=on,one_line=off';
+SELECT SUM(n) FROM t;
+# The block below is the `trace` case of the shared parallel checks; the
+# selector stays set for every later assertion in this file.
+--let $parallel_check = trace
+--source suite/secondary_engine/include/rapid_parallel_checks.inc
+
+--echo #
+--echo # A one-worker limit blocks the run without changing the plan verdict:
+--echo # the candidate stays capable, only the answer flips.
+--echo #
+SET SESSION rapid_parallel_workers=1;
+SET @parallel_capable='no', @parallel_blocked_by='parallel_workers_le_1',
+    @parallel_operators='["aggregate"]',
+    @parallel_reasons='["batch_pipeline"]';
+SET SESSION optimizer_trace='enabled=on,one_line=off';
+SELECT SUM(n) FROM t;
+--source suite/secondary_engine/include/rapid_parallel_checks.inc
+
+--echo #
+--echo # An aggregate the batch path cannot fold blocks its candidate.
+--echo #
+SET SESSION rapid_parallel_workers=8;
+SET @parallel_capable='no', @parallel_blocked_by='plan_shape',
+    @parallel_operators='["aggregate"]',
+    @parallel_reasons='["unsupported_aggregate"]';
+SET SESSION optimizer_trace='enabled=on,one_line=off';
+SELECT MAX(n) FROM t;
+--source suite/secondary_engine/include/rapid_parallel_checks.inc
+
+--echo #
+--echo # A materialized derived table blocks the aggregate reading from it.
+--echo #
+SET @parallel_capable='no', @parallel_blocked_by='plan_shape',
+    @parallel_operators='["aggregate","materialized_derived"]',
+    @parallel_reasons='["materialized_derived","materialized_derived"]';
+SET SESSION optimizer_trace='enabled=on,one_line=off';
+SELECT SUM(x.s) FROM (SELECT g, SUM(n) s FROM t GROUP BY g) x;
+--source suite/secondary_engine/include/rapid_parallel_checks.inc
+
+--echo #
+--echo # A nested loop join blocks the pipeline above it, and the leaf left on
+--echo # the native executor is reported on its own.
+--echo #
+SET @parallel_capable='no', @parallel_blocked_by='plan_shape',
+    @parallel_operators='["aggregate","nested_loop_join","mysql_native"]',
+    @parallel_reasons='["nested_loop_join","nested_loop_join","mysql_native_island"]';
+--disable_warnings
+SET optimizer_switch='hypergraph_optimizer=off,block_nested_loop=off';
+--enable_warnings
+SET SESSION optimizer_trace='enabled=on,one_line=off';
+SELECT SUM(t.n) FROM t, dim WHERE t.id < dim.k;
+--source suite/secondary_engine/include/rapid_parallel_checks.inc
+--disable_warnings
+SET optimizer_switch='hypergraph_optimizer=on';
+--enable_warnings
+
+--echo #
+--echo # Without the secondary engine there is no Rapid plan, so no section.
+--echo #
+SET SESSION use_secondary_engine=OFF;
+SET SESSION optimizer_trace='enabled=on,one_line=off';
+SELECT SUM(n) FROM t;
+SET SESSION optimizer_trace='enabled=off';
+SELECT IFNULL(JSON_LENGTH(TRACE,'$**.rapid_parallel'),0) AS sections,
+       IFNULL(JSON_LENGTH(TRACE,'$**.rapid_parallel'),0) = 0 AS as_expected
+  FROM information_schema.OPTIMIZER_TRACE;
+SET SESSION use_secondary_engine=FORCED;
+
+--echo #
+--echo # The knobs the decision rests on are traced alongside it.
+--echo #
+SET SESSION optimizer_trace='enabled=on,one_line=off';
+SELECT SUM(n) FROM t;
+SET SESSION optimizer_trace='enabled=off';
+# The worker count is capped by the machine's CPU count, so the column is masked.
+--replace_column 1 #
+SELECT JSON_VALUE(TRACE,'$.steps[*].rapid_parallel.session_workers') AS workers,
+       JSON_VALUE(TRACE,'$.steps[*].rapid_parallel.worker_limit') >= 1 AS limit_set,
+       JSON_VALUE(TRACE,'$.steps[*].rapid_parallel.isolation') AS isolation
+  FROM information_schema.OPTIMIZER_TRACE;
+
+--echo #
+--echo # It stays a planning answer: nothing is emitted while the plan runs.
+--echo #
+SET SESSION optimizer_trace='enabled=on,one_line=off';
+SELECT SUM(n) FROM t;
+SET SESSION optimizer_trace='enabled=off';
+SELECT IFNULL(JSON_LENGTH(TRACE,'$**.rapid_parallel'),0) AS sections,
+       IFNULL(JSON_LENGTH(TRACE,'$.steps[*].join_execution[*].rapid_parallel'),0)
+         AS while_executing
+  FROM information_schema.OPTIMIZER_TRACE;
+
+DROP DATABASE rapid_parallel_trace;

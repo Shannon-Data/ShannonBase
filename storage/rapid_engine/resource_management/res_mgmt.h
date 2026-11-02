@@ -63,12 +63,19 @@ inline constexpr unsigned long DEFAULT_AP_LIMIT = 4;
 inline constexpr unsigned long DEFAULT_SYNC_LIMIT = 2;
 inline constexpr unsigned long DEFAULT_MAINT_LIMIT = 1;
 
+// CPUs this process may actually run on, i.e. the affinity mask (which is what
+// a container CPU limit or a taskset wrapper changes) rather than the machine's
+// core count. Re-read on every call: the answer is a property of the running
+// environment, not of the build.
+size_t HardwareWorkers();
+
 class WorkGovernor {
  public:
   struct Snapshot {
     size_t active{0}, waiting{0}, peak{0};
     uint64_t admitted{0}, rejected{0}, cancelled{0};
   };
+
   class Lease {
    public:
     Lease() = default;
@@ -102,22 +109,94 @@ class WorkGovernor {
     WorkClass m_kind{WorkClass::AP};
     bool m_valid{false};
   };
+
+  // Native parallel threads have their own process-wide admission limit, even
+  // when AP query admission is OFF. Never wait with statement MDL held: a full
+  // worker budget sends the caller back to its serial pipeline.
+  class ParallelLease {
+   public:
+    ParallelLease() = default;
+    ~ParallelLease() { reset(); }
+    ParallelLease(const ParallelLease &) = delete;
+    ParallelLease &operator=(const ParallelLease &) = delete;
+    ParallelLease(ParallelLease &&other) noexcept
+        : m_owner(std::exchange(other.m_owner, nullptr)), m_count(other.m_count) {}
+
+    explicit operator bool() const { return m_owner != nullptr; }
+    size_t size() const { return m_owner ? m_count : 0; }
+    void reset() noexcept {
+      if (!m_owner) return;
+      std::lock_guard lock(m_owner->m_mutex);
+      assert(m_owner->m_parallel_stats.active >= m_count);
+      m_owner->m_parallel_stats.active -= m_count;
+      m_owner = nullptr;
+    }
+
+   private:
+    friend class WorkGovernor;
+    ParallelLease(WorkGovernor *owner, size_t count) : m_owner(owner), m_count(count) {}
+    WorkGovernor *m_owner{nullptr};
+    size_t m_count{0};
+  };
+
+  ParallelLease try_acquire_parallel_workers(size_t count) {
+    std::lock_guard lock(m_mutex);
+    if (!count || m_stopping) return {};
+    // 0 means "as many as this process can run" (see parallel_limit()); using
+    // the raw field would reject every request in that configuration.
+    const size_t limit = m_parallel_limit ? m_parallel_limit : HardwareWorkers();
+    if (count > limit || m_parallel_stats.active > limit - count) {
+      ++m_parallel_stats.rejected;
+      return {};
+    }
+
+    m_parallel_stats.active += count;
+    m_parallel_stats.admitted += count;
+    m_parallel_stats.peak = std::max(m_parallel_stats.peak, m_parallel_stats.active);
+    return ParallelLease(this, count);
+  }
+
+  bool configure_parallel_limit(size_t limit) {
+    std::lock_guard lock(m_mutex);
+    if (m_parallel_stats.active) return false;
+    // 0 is a valid setting: "as many as this process can actually run".
+    m_parallel_limit = limit;
+    return true;
+  }
+
+  // Configured cap, or the machine's current capacity when unset. Derived per
+  // call so a CPU affinity or cgroup change is picked up without a restart.
+  size_t parallel_limit() const {
+    std::lock_guard lock(m_mutex);
+    return m_parallel_limit ? m_parallel_limit : HardwareWorkers();
+  }
+
+  Snapshot parallel_snapshot() const {
+    std::lock_guard lock(m_mutex);
+    return m_parallel_stats;
+  }
+
   bool configure(IsolationMode mode, std::array<size_t, 3> limits, bool resume = true) {
     std::lock_guard lock(m_mutex);
     for (const auto &state : m_states)
       if (state.stats.active || !state.queue.empty()) return false;
+    if (m_parallel_stats.active) return false;
     m_limits = limits;
     m_stopping = !resume;
     m_mode.store(mode, std::memory_order_release);
     return true;
   }
+
   bool idle() const {
     std::lock_guard lock(m_mutex);
+    if (m_parallel_stats.active) return false;
     for (const auto &state : m_states)
       if (state.stats.active || !state.queue.empty()) return false;
     return true;
   }
+
   IsolationMode mode() const { return m_mode.load(std::memory_order_acquire); }
+
   Lease try_acquire(WorkClass kind) {
     std::lock_guard lock(m_mutex);
     auto &state = m_states[index(kind)];
@@ -127,6 +206,7 @@ class WorkGovernor {
     }
     return admit(kind);
   }
+
   template <class Cancelled>
   Lease acquire(WorkClass kind, Cancelled cancelled) {
     std::unique_lock lock(m_mutex);
@@ -139,6 +219,7 @@ class WorkGovernor {
       state.stats.waiting = state.queue.size();
       m_cv.notify_all();
     };
+
     for (;;) {
       // Cancellation must be a nonblocking atomic predicate: no external locks.
       if (m_stopping || cancelled()) {
@@ -153,18 +234,22 @@ class WorkGovernor {
       m_cv.wait_for(lock, std::chrono::milliseconds(20));
     }
   }
+
   size_t limit(WorkClass kind) const {
     std::lock_guard lock(m_mutex);
     return m_limits[index(kind)];
   }
+
   Snapshot snapshot(WorkClass kind) const {
     std::lock_guard lock(m_mutex);
     return m_states[index(kind)].stats;
   }
+
   bool stopping() const {
     std::lock_guard lock(m_mutex);
     return m_stopping;
   }
+
   void stop() {
     std::lock_guard lock(m_mutex);
     m_stopping = true;
@@ -176,6 +261,7 @@ class WorkGovernor {
   bool enforced() const {
     return mode() == IsolationMode::SOFT || mode() == IsolationMode::STRICT_CPU || mode() == IsolationMode::AUTO;
   }
+
   Lease admit(WorkClass kind) {
     auto &stats = m_states[index(kind)].stats;
     ++stats.active;
@@ -183,6 +269,7 @@ class WorkGovernor {
     stats.peak = std::max(stats.peak, stats.active);
     return Lease(this, kind);
   }
+
   void release(WorkClass kind) noexcept {
     std::lock_guard lock(m_mutex);
     auto &stats = m_states[index(kind)].stats;
@@ -190,13 +277,18 @@ class WorkGovernor {
     --stats.active;
     m_cv.notify_all();
   }
+
   struct State {
     Snapshot stats;
     std::deque<uint64_t> queue;
   };
+
   mutable std::mutex m_mutex;
   std::condition_variable m_cv;
   std::array<State, 3> m_states;
+  Snapshot m_parallel_stats;
+
+  size_t m_parallel_limit{0};
   std::array<size_t, 3> m_limits{DEFAULT_AP_LIMIT, DEFAULT_SYNC_LIMIT, DEFAULT_MAINT_LIMIT};
   std::atomic<IsolationMode> m_mode{IsolationMode::OFF};
   uint64_t m_next_ticket{0};
@@ -215,11 +307,13 @@ struct CpuTopologyEntry {
   unsigned cpu;
   int package, core;
 };
+
 struct AutoCpuPlan {
   std::array<std::vector<unsigned>, static_cast<size_t>(CpuRole::COUNT)> cpus;
   std::array<size_t, 3> limits{};
   bool available{false};
 };
+
 // Keep SMT siblings together. Reserve at least two physical cores for TP and
 // separate cores for AP/SYNC/MAINT; low-capacity hosts use software admission.
 inline AutoCpuPlan make_auto_cpu_plan(const std::vector<CpuTopologyEntry> &topology,
@@ -245,6 +339,7 @@ inline AutoCpuPlan make_auto_cpu_plan(const std::vector<CpuTopologyEntry> &topol
   plan.available = true;
   return plan;
 }
+
 WorkGovernor &work_governor();
 bool configure_auto_resources(IsolationMode mode, std::array<size_t, 3> limits);
 void start_auto_resources();
@@ -269,6 +364,7 @@ class WorkScope {
   struct State;
   std::unique_ptr<State> m_state;
 };
+
 // Native names are startup-only. DBA creates USER AP and SYSTEM SYNC/MAINT groups.
 extern char *tp_resource_group, *ap_resource_group, *sync_resource_group, *maint_resource_group,
     *maint_user_resource_group;
@@ -282,6 +378,7 @@ class WorkerRegistration {
  private:
   unsigned long long m_tid{0};
 };
+
 extern std::atomic<uint64_t> cpu_restore_failures;
 const char *validate_cpu_plan(THD *thd);
 
@@ -370,6 +467,7 @@ class MemoryBudget {
       }
       return *this;
     }
+
     size_t bytes() const { return m_bytes; }
     const void *query() const { return m_query; }
     explicit operator bool() const { return m_bytes != 0; }
@@ -401,6 +499,7 @@ class MemoryBudget {
       std::swap(m_bytes, other.m_bytes);
       std::swap(m_lifetime, other.m_lifetime);
     }
+
     MemoryBudget *m_owner{nullptr};
     const void *m_query{nullptr};
     size_t m_bytes{0};
@@ -419,6 +518,7 @@ class MemoryBudget {
     m_query_limit = query_limit;
     return true;
   }
+
   Reservation reserve(const void *query, size_t requested, size_t minimum = 1, size_t available_capacity = SIZE_MAX) {
     std::lock_guard lock(m_mutex);
     const auto found = m_queries.find(query);
@@ -432,21 +532,25 @@ class MemoryBudget {
     ++m_grants;
     return Reservation(this, query, bytes);
   }
+
   size_t reserved() const {
     std::lock_guard lock(m_mutex);
     return m_reserved;
   }
+
   size_t reserved_for(const void *query) const {
     std::lock_guard lock(m_mutex);
     const auto found = m_queries.find(query);
     return found == m_queries.end() ? 0 : found->second;
   }
+
   // Live grants, i.e. operators currently holding a reservation. Reported for
   // diagnostics; the adaptive ceiling splits free space over these.
   size_t active_grants() const {
     std::lock_guard lock(m_mutex);
     return m_grants;
   }
+
   // --- Eviction arbitration -------------------------------------------------
   // An operator that can give memory back at a safe point registers here. A
   // grow that the pool cannot satisfy asks the cheapest victims first, which
@@ -471,6 +575,7 @@ class MemoryBudget {
     QueryMemoryOperator op;
     Evictable *victim;
   };
+
   // Cheapest-to-evict first: a hash aggregate can flush a partition without
   // restarting its input, an ordered hash join has to re-partition its whole
   // build, so it is the last choice.
@@ -496,6 +601,7 @@ class MemoryBudget {
     m_reserved -= bytes;
     if (found->second == 0) m_queries.erase(found);
   }
+
   size_t m_global_limit, m_query_limit;
   mutable std::mutex m_mutex;
   size_t m_reserved{0};
@@ -533,6 +639,7 @@ void unregister_evictable(Evictable *victim);
 struct SystemMemoryLimits {
   size_t pool{0}, query_total{0}, query{0}, operation{0};
 };
+
 SystemMemoryLimits system_memory_limits(size_t root_capacity);
 // Execution-side ceiling for one operator: what the pool could spare right now,
 // capped at the per-query `query` limit and floored at `operation`. It is only
@@ -551,6 +658,7 @@ struct SystemPoolStats {
   size_t capacity{0}, used{0}, peak{0}, reserved{0}, failed_allocations{0};
   size_t operator_cap{0};
 };
+
 SystemPoolStats system_pool_stats();
 class SystemPoolState;
 struct SystemPoolDeleter {
@@ -595,11 +703,13 @@ class BoundedMemoryResource final : public std::pmr::memory_resource {
     Reservation(BoundedMemoryResource *resource, size_t bytes) : m_resource(resource), m_bytes(bytes) {
       if (m_resource) m_resource->acquire(bytes);
     }
+
     bool try_acquire(BoundedMemoryResource *resource, size_t bytes) noexcept {
       reset();
       resource->m_last_failure = AllocationFailure::kNone;
       if (bytes > resource->m_limit - resource->m_used) {
         resource->m_last_failure = AllocationFailure::kBudgetExhausted;
+        resource->m_budget_refused = true;
         return false;
       }
       resource->m_used += bytes;
@@ -608,6 +718,7 @@ class BoundedMemoryResource final : public std::pmr::memory_resource {
       m_bytes = bytes;
       return true;
     }
+
     Reservation(const Reservation &) = delete;
     Reservation &operator=(const Reservation &) = delete;
     Reservation(Reservation &&other) noexcept
@@ -620,6 +731,7 @@ class BoundedMemoryResource final : public std::pmr::memory_resource {
       }
       return *this;
     }
+
     ~Reservation() { reset(); }
     void reset() noexcept {
       if (m_resource) {
@@ -633,6 +745,7 @@ class BoundedMemoryResource final : public std::pmr::memory_resource {
     BoundedMemoryResource *m_resource{nullptr};
     size_t m_bytes{0};
   };
+
   size_t limit() const { return m_limit; }
   size_t used() const { return m_used; }
   size_t peak() const { return m_peak; }
@@ -644,10 +757,17 @@ class BoundedMemoryResource final : public std::pmr::memory_resource {
   // do_allocate() keeps the throwing pmr
   // contract for containers.
   AllocationFailure last_failure() const noexcept { return m_last_failure; }
+  // Sticky: set by any refusal for exceeding the budget and never cleared, unlike
+  // last_failure(), which the next successful allocation resets. A caller that
+  // sees an error after several allocations can still tell that the budget was
+  // the cause and fall back to the serial path. Like the rest of this class it
+  // is not thread-safe: a resource belongs to one worker.
+  bool budget_refused() const noexcept { return m_budget_refused; }
   void *try_allocate(size_t bytes, size_t alignment = alignof(std::max_align_t)) noexcept {
     m_last_failure = AllocationFailure::kNone;
     if (bytes > m_limit - m_used) {
       m_last_failure = AllocationFailure::kBudgetExhausted;
+      m_budget_refused = true;
       return nullptr;
     }
     void *pointer = nullptr;
@@ -676,29 +796,34 @@ class BoundedMemoryResource final : public std::pmr::memory_resource {
     m_last_failure = AllocationFailure::kNone;
     if (bytes > m_limit - m_used) {
       m_last_failure = AllocationFailure::kBudgetExhausted;
+      m_budget_refused = true;
       throw std::bad_alloc();
     }
     m_used += bytes;
     m_peak = std::max(m_peak, m_used);
   }
+
   void release(size_t bytes) noexcept {
     assert(bytes <= m_used);
     m_used -= bytes;
   }
+
   void *do_allocate(size_t bytes, size_t alignment) override {
     if (void *pointer = try_allocate(bytes, alignment)) return pointer;
     throw std::bad_alloc();  // Required by the std::pmr contract.
   }
+
   void do_deallocate(void *pointer, size_t bytes, size_t alignment) override {
     m_upstream->deallocate(pointer, bytes, alignment);
     release(bytes);
   }
+
   bool do_is_equal(const std::pmr::memory_resource &other) const noexcept override { return this == &other; }
-  size_t m_limit;
+  size_t m_limit{0}, m_used{0}, m_peak{0};
   PoolMemoryResource m_pool_memory;
   std::pmr::memory_resource *m_upstream;
-  size_t m_used{0}, m_peak{0};
   AllocationFailure m_last_failure{AllocationFailure::kNone};
+  bool m_budget_refused{false};
 };
 }  // namespace ResMgmt
 }  // namespace ShannonBase

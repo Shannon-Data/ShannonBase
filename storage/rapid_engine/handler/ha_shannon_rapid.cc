@@ -24,6 +24,7 @@
    Copyright (c) 2023, Shannon Data AI and/or its affiliates. */
 
 #include <optional>
+#include <thread>
 #include "storage/rapid_engine/service/change_notification.h"
 #include "storage/rapid_engine/service/recovery_service.h"
 
@@ -68,6 +69,7 @@
 #include "sql/sql_optimizer.h"
 #include "sql/sql_partition.h"  // get_part_for_delete, get_parts_for_update
 #include "sql/table.h"
+#include "storage/rapid_engine/executor/executor.h"
 #include "storage/rapid_engine/resource_management/io_scheduler.h"
 
 #include "log0log.h" /* log_get_lsn */
@@ -667,6 +669,12 @@ int ha_rapid::complete_batch_projection(std::pmr::vector<ShannonBase::Executor::
                                         const std::pmr::vector<uint32_t> &selection) {
   if (inited != handler::RND) return HA_ERR_WRONG_COMMAND;
   return m_cursor->complete_projection(chunks, selection);
+}
+
+std::unique_ptr<ShannonBase::Executor::Morsel::ParallelSource> ha_rapid::create_parallel_source(
+    ShannonBase::ResMgmt::BoundedMemoryResource *memory, const std::pmr::vector<Field *> &fields, bool index_reverse) {
+  if (inited != handler::RND || table->part_info) return {};
+  return m_cursor->create_parallel_source(memory, fields, index_reverse);
 }
 
 int ha_rapid::index_next_batch(size_t batch_size, std::pmr::vector<ShannonBase::Executor::ColumnChunk> &data,
@@ -1736,6 +1744,16 @@ static const char *rapid_propagation_mode_names[] = {"DIRECT_NOTIFICATION", "RED
   X(query_vectorized_sort_batch_rows_total, query_vectorized_sort_batch_rows_total)                                 \
   X(query_vectorized_ref_batch_rows_total, query_vectorized_ref_batch_rows_total)                                   \
   X(query_vectorized_expression_rows_total, query_vectorized_expression_rows_total)                                 \
+  X(query_parallel_workers_total, query_parallel_workers_total)                                                     \
+  X(query_parallel_tasks_total, query_parallel_tasks_total)                                                         \
+  X(query_parallel_rows_total, query_parallel_rows_total)                                                           \
+  X(query_parallel_spills_total, query_parallel_spills_total)                                                       \
+  X(query_parallel_fallbacks_total, query_parallel_fallbacks_total)                                                 \
+  X(query_parallel_join_build_rows_total, query_parallel_join_build_rows_total)                                     \
+  X(query_parallel_join_build_workers_total, query_parallel_join_build_workers_total)                               \
+  X(query_parallel_join_finalize_partitions_total, query_parallel_join_finalize_partitions_total)                   \
+  X(query_parallel_join_finalize_workers_total, query_parallel_join_finalize_workers_total)                         \
+  X(query_parallel_join_build_fallbacks_total, query_parallel_join_build_fallbacks_total)                           \
   X(query_like_mask_rows_total, query_like_mask_rows_total)                                                         \
   X(query_like_scalar_rows_total, query_like_scalar_rows_total)                                                     \
   X(query_dictionary_predicate_rows_total, query_dictionary_predicate_rows_total)                                   \
@@ -1786,6 +1804,17 @@ static int show_rapid_change_propagation_status(THD *, SHOW_VAR *var, char *) {
   bool running = ShannonBase::Populate::shannon_propagation_thread_started.load(std::memory_order_acquire);
   var->type = SHOW_CHAR;
   var->value = const_cast<char *>(running ? kOn : kOff);
+  var->scope = SHOW_SCOPE_GLOBAL;
+  return 0;
+}
+
+static int show_rapid_parallel_worker_status(THD *, SHOW_VAR *var, char *buffer) {
+  const auto &governor = ShannonBase::ResMgmt::work_governor();
+  const auto stats = governor.parallel_snapshot();
+  snprintf(buffer, SHOW_VAR_FUNC_BUFF_SIZE, "limit=%zu active=%zu peak=%zu rejected=%llu", governor.parallel_limit(),
+           stats.active, stats.peak, (unsigned long long)stats.rejected);
+  var->type = SHOW_CHAR;
+  var->value = buffer;
   var->scope = SHOW_SCOPE_GLOBAL;
   return 0;
 }
@@ -1880,6 +1909,7 @@ static SHOW_VAR rapid_runtime_status_variables[] = {
         {"rapid_mempool_usage_percentage", (char *)&rapid_export_vars.mempool_usage_percentage, SHOW_DOUBLE,
          SHOW_SCOPE_GLOBAL},
     {"rapid_sys_pool_status", (char *)&show_rapid_sys_pool_status, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
+    {"rapid_parallel_worker_status", (char *)&show_rapid_parallel_worker_status, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
     {"rapid_resource_status", (char *)&show_rapid_resource_status, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
     {"rapid_resource_plan", (char *)&show_rapid_resource_plan, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
     {"rapid_resource_io_status", (char *)&show_rapid_resource_io_status, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
@@ -2401,7 +2431,34 @@ static void rpd_gc_interval_scn_update(THD *thd, SYS_VAR *, void *var_ptr, const
   *static_cast<ulonglong *>(var_ptr) = *static_cast<const ulonglong *>(save);
 }
 
+static uint DefaultParallelMaxWorkers() {
+  const unsigned cores = std::thread::hardware_concurrency();
+  return cores ? cores : 1;
+}
+
 // clang-format off
+static uint rapid_parallel_max_workers = DefaultParallelMaxWorkers();
+static MYSQL_SYSVAR_UINT(parallel_max_workers, rapid_parallel_max_workers, PLUGIN_VAR_RQCMDARG | PLUGIN_VAR_READONLY,
+                        "Process-wide native parallel worker limit; exhausted pipelines execute serially.",
+                        nullptr, nullptr, DefaultParallelMaxWorkers(), 1, 1024, 0);
+static MYSQL_THDVAR_UINT(parallel_workers, PLUGIN_VAR_RQCMDARG,
+                        "Maximum workers per Rapid parallel pipeline; 1 keeps serial execution.",
+                        nullptr, nullptr, 1, 1, 1024, 0);
+
+unsigned ShannonBase::Executor::Morsel::ParallelWorkers(THD *thd) {
+  // The session knob cannot exceed what this machine can actually run, so the
+  // trace and every admission decision report the same number.
+  const auto &sysvar = MYSQL_SYSVAR_NAME(parallel_workers);
+  // resolve() is installed when the plugin registers, and the session slot only
+  // exists on a THD that loaded it. Neither holds for unit tests or background
+  // threads, so stay serial instead of dereferencing null.
+  if (sysvar.resolve == nullptr) return 1;
+  const void *slot = sysvar.resolve(thd, sysvar.offset);
+  if (slot == nullptr) return 1;
+  return static_cast<unsigned>(
+      std::min<size_t>(*static_cast<const uint *>(slot), ShannonBase::Executor::Morsel::MaxParallelWorkers()));
+}
+
 static MYSQL_SYSVAR_ULONG(memory_size_max,
                           ShannonBase::shannon_rpd_engine_cfg.memory_pool_size_bytes,
                           PLUGIN_VAR_OPCMDARG | PLUGIN_VAR_PERSIST_AS_READ_ONLY,
@@ -2735,6 +2792,8 @@ static struct SYS_VAR *rapid_system_variables[] = {
     MYSQL_SYSVAR(window_spill_size_max),
     MYSQL_SYSVAR(window_spill_size_total),
     MYSQL_SYSVAR(query_sync_timeout_ms),
+    MYSQL_SYSVAR(parallel_workers),
+    MYSQL_SYSVAR(parallel_max_workers),
     MYSQL_SYSVAR(parallel_load_max),
     MYSQL_SYSVAR(parallel_part_load_threshold),
     MYSQL_SYSVAR(propagation_mode),
@@ -2800,6 +2859,8 @@ static int RapidInitAbort() {
 }
 
 static int Shannonbase_Rapid_Init(MYSQL_PLUGIN p) {
+  ShannonBase::Executor::Morsel::RegisterParallelThreads();
+  ShannonBase::ResMgmt::work_governor().configure_parallel_limit(rapid_parallel_max_workers);
   auto &resource_cfg = ShannonBase::shannon_rpd_engine_cfg;
   resource_cfg.resource_isolation = static_cast<ShannonBase::ResMgmt::IsolationMode>(rapid_resource_mode_value);
   ShannonBase::ResMgmt::work_governor().configure(

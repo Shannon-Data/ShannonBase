@@ -50,10 +50,10 @@ let $total_global_vars=`SELECT COUNT(*)
    WHERE variable_name NOT LIKE 'ndb_%'
    AND variable_name NOT LIKE 'debug_%'
    AND variable_name NOT LIKE '%telemetry%'`;
-# 441 upstream variables plus the 19 persistable rapid_% plugin variables
-# (31 registered minus 12 PLUGIN_VAR_READONLY variables: query_sync_timeout_ms,
-# sort/window spill quotas, three resource limits and five resource groups).
-let $total_persistent_vars=460;
+# 441 upstream variables plus the 20 persistable rapid_% plugin variables
+# (34 registered globally minus 14 PLUGIN_VAR_READONLY variables, and one
+# session-only worker cap that never appears in global_variables).
+let $total_persistent_vars=461;
 
 --echo ***************************************************************
 --echo * 0. Verify that variables present in performance_schema.global

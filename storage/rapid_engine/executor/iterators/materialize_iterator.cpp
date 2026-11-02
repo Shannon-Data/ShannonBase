@@ -191,11 +191,11 @@ bool VectorizedMaterializeIterator::InitImpl() {
   // Spool IO reuses this buffer, so replay never has to allocate.
   const auto ensure_encoded = [&](size_t rows) {
     const size_t bytes = rows * max_width;
-    if (!TryReserve(m_encoded, bytes)) return false;
+    if (!Reserve(m_encoded, bytes)) return false;
     return true;
   };
   if (!ensure_encoded(capacity)) return Error("Rapid materialization spool buffer allocation failed");
-  if (!TryReserve(m_columns, m_table->s->fields))
+  if (!Reserve(m_columns, m_table->s->fields))
     return Error("Rapid materialization column descriptors allocation failed");
 
   for (uint i = 0; i < m_table->s->fields; ++i) {
@@ -207,7 +207,7 @@ bool VectorizedMaterializeIterator::InitImpl() {
   auto *batch = dynamic_cast<BatchReadable *>(m_source->real_iterator());
   if (batch != nullptr && !batch->SupportsBatchRead()) batch = nullptr;
   if (batch != nullptr) {
-    if (!TryReserve(m_input, m_table->s->fields))
+    if (!Reserve(m_input, m_table->s->fields))
       return Error("Rapid materialization input descriptors allocation failed");
 
     for (uint i = 0; i < m_table->s->fields; ++i) {
@@ -244,8 +244,13 @@ bool VectorizedMaterializeIterator::InitImpl() {
 
       for (size_t i = 0; i < m_columns.size(); ++i) {
         if (!m_columns[i].valid()) continue;
+        if (m_input_selection.empty()) {
+          if (!m_columns[i].append_range_from(m_input[i], 0, rows))
+            return Error("Rapid materialization batch append failed");
+          continue;
+        }
         for (size_t row = 0; row < rows; ++row) {
-          const size_t physical = m_input_selection.empty() ? row : m_input_selection[row];
+          const size_t physical = m_input_selection[row];
           if (!m_columns[i].append_from(m_input[i], physical))
             return Error("Rapid materialization batch append failed");
         }
@@ -390,6 +395,16 @@ int VectorizedMaterializeIterator::ReadBatch(std::pmr::vector<ColumnChunk> &chun
 bool VectorizedMaterializeIterator::PushbackBatchTail(const std::pmr::vector<ColumnChunk> &chunks, size_t from,
                                                       size_t total) {
   return PushbackBatchTailShared(chunks, from, total, &m_tail, &m_tail_start, &m_tail_count, nullptr, &m_memory);
+}
+
+std::unique_ptr<Morsel::ParallelSource> VectorizedMaterializeIterator::CreateParallelSource(
+    ResMgmt::BoundedMemoryResource *memory, const std::pmr::vector<Field *> &fields) {
+  // Only the resident block is safe to hand out: a spool file is positioned by
+  // the coordinator's cursor, and the tail holds rows already served to it. No
+  // spool file means every collected row is still in m_columns.
+  if (!m_ready || m_file || m_tail_count != 0 || m_position != 0 || m_emitted != 0 || fields.empty()) return {};
+  if (m_rows != m_total) return {};
+  return std::make_unique<Morsel::MaterializedSource>(memory, m_columns, m_total, fields);
 }
 }  // namespace Executor
 }  // namespace ShannonBase

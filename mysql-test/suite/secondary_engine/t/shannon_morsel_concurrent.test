@@ -1,0 +1,90 @@
+--source include/have_debug.inc
+--source include/have_debug_sync.inc
+--source include/no_ps_protocol.inc
+CREATE DATABASE rapid_parallel_concurrent;
+USE rapid_parallel_concurrent;
+SET use_secondary_engine=OFF;
+SET cte_max_recursion_depth=70000;
+CREATE TABLE t(id INT PRIMARY KEY,v BIGINT) SECONDARY_ENGINE=rapid;
+INSERT INTO t WITH RECURSIVE seq AS (SELECT 1 n UNION ALL SELECT n+1 FROM seq WHERE n<70000)
+ SELECT n,n FROM seq;
+ALTER TABLE t SECONDARY_LOAD;
+--connect (one,localhost,root,,rapid_parallel_concurrent)
+SET use_secondary_engine=FORCED;
+SET rapid_parallel_workers=2;
+--disable_warnings
+SET optimizer_switch='hypergraph_optimizer=on';
+--enable_warnings
+SET DEBUG_SYNC='rapid_parallel_workers_started SIGNAL one_started WAIT_FOR one_continue';
+--send SELECT SUM(v)=2450035000,COUNT(*)=70000 FROM t
+--connection default
+SET DEBUG_SYNC='now WAIT_FOR one_started';
+--connect (two,localhost,root,,rapid_parallel_concurrent)
+SET use_secondary_engine=FORCED;
+SET rapid_parallel_workers=2;
+--disable_warnings
+SET optimizer_switch='hypergraph_optimizer=on';
+--enable_warnings
+SET DEBUG_SYNC='rapid_parallel_workers_started SIGNAL two_started WAIT_FOR two_continue';
+--send SELECT SUM(v)=2450035000,COUNT(*)=70000 FROM t
+--connection default
+SET DEBUG_SYNC='now WAIT_FOR two_started';
+--echo # Two pipelines hold all four native worker slots and one shared query pool.
+--let $wait_condition = SELECT COUNT(*)=4 FROM performance_schema.threads WHERE NAME='thread/rapid/parallel_worker'
+--source include/wait_condition.inc
+--let $status = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_parallel_worker_status', Value, 1)
+--let $bounded = `SELECT '$status' LIKE 'limit=% active=4 peak=4 rejected=%'`
+if ($bounded == 0) {
+ --die Global parallel worker accounting is incorrect
+}
+--let $pool = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_sys_pool_status', Value, 1)
+--let $bounded = `SELECT CAST(SUBSTRING_INDEX(SUBSTRING_INDEX('$pool','reserved=',-1),' ',1) AS UNSIGNED)<=CAST(SUBSTRING_INDEX(SUBSTRING_INDEX('$pool','query_total=',-1),' ',1) AS UNSIGNED)`
+if ($bounded == 0) {
+ --die Concurrent pipelines exceeded the shared query budget
+}
+--echo # A third query completes serially without waiting for either held query.
+SET use_secondary_engine=FORCED;
+SET rapid_parallel_workers=2;
+--disable_warnings
+SET optimizer_switch='hypergraph_optimizer=on';
+--enable_warnings
+--let $before = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_parallel_workers_total', Value, 1)
+--let $retry_before = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_parallel_fallbacks_total', Value, 1)
+SELECT SUM(v)=2450035000,COUNT(*)=70000 FROM t;
+--let $after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_parallel_workers_total', Value, 1)
+--let $retry_after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_parallel_fallbacks_total', Value, 1)
+--let $bounded = `SELECT $before=$after AND $retry_after>$retry_before`
+if ($bounded == 0) {
+ --die Worker admission overflow did not fall back without starting more threads
+}
+--echo # Concurrent committed insert/update/delete cannot change either reader's snapshot.
+SET use_secondary_engine=OFF;
+UPDATE t SET v=-v WHERE id<=2000;
+DELETE FROM t WHERE id BETWEEN 2001 AND 3000;
+INSERT INTO t VALUES (70001,70001),(70002,70002);
+SET use_secondary_engine=FORCED;
+--let $assert_query = SELECT SUM(v),COUNT(*) FROM t
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+SET DEBUG_SYNC='now SIGNAL one_continue';
+SET DEBUG_SYNC='now SIGNAL two_continue';
+--connection one
+--reap
+SET DEBUG_SYNC='RESET';
+--connection two
+--reap
+SET DEBUG_SYNC='RESET';
+--connection default
+--let $status = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_parallel_worker_status', Value, 1)
+--let $released = `SELECT '$status' LIKE 'limit=% active=0 peak=4 rejected=%'`
+if ($released == 0) {
+ --die Native worker slots were not released after join
+}
+--let $assert_query = SELECT SUM(v),COUNT(*) FROM t
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--disconnect one
+--disconnect two
+SET DEBUG_SYNC='RESET';
+--let $parallel_check = finalize_admission
+--source suite/secondary_engine/include/rapid_parallel_checks.inc
+SET use_secondary_engine=OFF;
+DROP DATABASE rapid_parallel_concurrent;

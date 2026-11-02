@@ -54,6 +54,9 @@
 #include "sql/table.h"                        //Table
 #include "storage/innobase/include/ut0dbg.h"  //ut_a
 
+#include "storage/rapid_engine/executor/executor.h"             // ParallelWorkers
+#include "storage/rapid_engine/resource_management/res_mgmt.h"  // work_governor
+
 #include "storage/rapid_engine/include/rapid_column_info.h"
 #include "storage/rapid_engine/include/rapid_config.h"
 #include "storage/rapid_engine/include/rapid_const.h"
@@ -699,6 +702,179 @@ void Optimizer::AddDefaultRules() {
   m_registered.store(true, std::memory_order_relaxed);
 }
 
+namespace Morsel {
+/** Plan-time view of whether a pipeline can run on native parallel workers.
+    Only static facts are used: the runtime additionally requires a batch
+    iterator and an idle worker budget, so this is an upper bound, not a
+    promise. */
+struct ParallelClass {
+  bool parallel{false};
+  const char *reason{"unsupported_node"};
+};
+
+ParallelClass ClassifyParallelInput(const PlanNode *node);
+
+/** Why a subtree cannot feed a batch pipeline; nullptr when it can.
+    Only structural blockers are reported: a nested loop, a materialized
+    derived table, a MySQL native island, an index lookup or a union. Scan
+    width/limit and index metadata are NOT treated as blockers because they
+    are decided per iterator at execution time. */
+const char *BlockingReason(const PlanNode *node) {
+  if (node == nullptr) return nullptr;
+  switch (node->type()) {
+    case PlanNode::Type::NESTED_LOOP_JOIN:
+      return "nested_loop_join";
+    case PlanNode::Type::MATERIALIZE_DERIVED:
+      return "materialized_derived";
+    case PlanNode::Type::MYSQL_NATIVE:
+      return "mysql_native_island";
+    case PlanNode::Type::REF_LOOKUP:
+      return "index_lookup";
+    case PlanNode::Type::UNION:
+      return "union";
+    default:
+      break;
+  }
+  for (const auto &child : node->children)
+    if (const char *reason = BlockingReason(child.get())) return reason;
+  return nullptr;
+}
+
+ParallelClass ClassifyParallelInput(const PlanNode *node) {
+  ParallelClass result;
+  if (node == nullptr) {
+    result = {false, "no_input"};
+    return result;
+  }
+  if (const char *reason = BlockingReason(node); reason != nullptr) {
+    result = {false, reason};
+    return result;
+  }
+  if (node->type() == PlanNode::Type::HASH_JOIN) {
+    const auto *join = static_cast<const HashJoin *>(node);
+    if (join->join_type != JoinType::INNER && join->join_type != JoinType::SEMI) {
+      result = {false, "join_type_not_inner_or_semi"};
+      return result;
+    }
+    if (join->join_conditions.empty()) {
+      result = {false, "no_equality_condition"};
+      return result;
+    }
+  }
+  result = {true, "batch_pipeline"};
+  return result;
+}
+
+bool AggregateParallelizable(const LocalAgg *agg, ParallelClass *result) {
+  if (agg->olap != olap_type::UNSPECIFIED_OLAP_TYPE) {
+    *result = {false, "rollup_not_supported"};
+    return false;
+  }
+  for (Item_func *item : agg->aggregates) {
+    switch (static_cast<Item_sum *>(item)->sum_func()) {
+      case Item_sum::COUNT_FUNC:
+      case Item_sum::SUM_FUNC:
+      case Item_sum::AVG_FUNC:
+        break;
+      default:
+        *result = {false, "unsupported_aggregate"};
+        return false;
+    }
+  }
+  *result = agg->children.empty() ? ParallelClass{false, "no_input"} : ClassifyParallelInput(agg->children[0].get());
+  return result->parallel;
+}
+
+bool JoinParallelCandidate(const HashJoin *join, ParallelClass *result) {
+  *result = ClassifyParallelInput(join);
+  return result->parallel;
+}
+
+/** Classify one node; op is null for nodes that carry no parallel decision. */
+const char *ClassifyNode(const PlanNode *node, ParallelClass *result) {
+  switch (node->type()) {
+    case PlanNode::Type::LOCAL_AGGREGATE:
+      AggregateParallelizable(static_cast<const LocalAgg *>(node), result);
+      return "aggregate";
+    case PlanNode::Type::HASH_JOIN:
+      JoinParallelCandidate(static_cast<const HashJoin *>(node), result);
+      return "hash_join";
+    case PlanNode::Type::NESTED_LOOP_JOIN:
+      *result = {false, "nested_loop_join"};
+      return "nested_loop_join";
+    case PlanNode::Type::MATERIALIZE_DERIVED:
+      *result = {false, "materialized_derived"};
+      return "materialized_derived";
+    case PlanNode::Type::MYSQL_NATIVE:
+      *result = {false, "mysql_native_island"};
+      return "mysql_native";
+    default:
+      return nullptr;
+  }
+}
+
+bool PlanHasParallelCandidate(const PlanNode *node) {
+  if (node == nullptr) return false;
+  ParallelClass cls;
+  if (ClassifyNode(node, &cls) != nullptr && cls.parallel) return true;
+  for (const auto &child : node->children)
+    if (PlanHasParallelCandidate(child.get())) return true;
+  return false;
+}
+
+void EmitParallelCandidates(Opt_trace_context &trace, const PlanNode *node) {
+  if (node == nullptr) return;
+  ParallelClass cls;
+  if (const char *op = ClassifyNode(node, &cls); op != nullptr) {
+    Opt_trace_object entry(&trace);
+    entry.add_alnum("operator", op)
+        .add_alnum("parallel_capable", cls.parallel ? "yes" : "no")
+        .add_alnum("reason", cls.reason);
+  }
+  for (const auto &child : node->children) EmitParallelCandidates(trace, child.get());
+}
+
+const char *IsolationName(ResMgmt::IsolationMode mode) {
+  switch (mode) {
+    case ResMgmt::IsolationMode::OFF:
+      return "off";
+    case ResMgmt::IsolationMode::OBSERVE:
+      return "observe";
+    case ResMgmt::IsolationMode::SOFT:
+      return "soft";
+    case ResMgmt::IsolationMode::STRICT_CPU:
+      return "strict_cpu";
+    case ResMgmt::IsolationMode::AUTO:
+      return "auto";
+  }
+  return "unknown";
+}
+
+/** Records, at planning time, whether any operator could run on parallel
+    workers. Execution-only facts (batch iterator availability, free worker
+    slots, row counts) are deliberately not claimed here. */
+void TraceParallelPlan(Opt_trace_context &trace, const PlanNode *root, const THD *thd) {
+  if (!trace.is_started() || root == nullptr) return;
+  const unsigned workers = Executor::Morsel::ParallelWorkers(const_cast<THD *>(thd));
+  const ResMgmt::IsolationMode mode = ResMgmt::work_governor().mode();
+  const bool isolation_ok = mode != ResMgmt::IsolationMode::STRICT_CPU && mode != ResMgmt::IsolationMode::AUTO;
+  const bool plan_ok = PlanHasParallelCandidate(root);
+  Opt_trace_object parallel(&trace, "rapid_parallel");
+  parallel.add("session_workers", static_cast<ulonglong>(workers));
+  parallel.add("worker_limit", static_cast<ulonglong>(ResMgmt::work_governor().parallel_limit()));
+  parallel.add_alnum("isolation", IsolationName(mode));
+  parallel.add_alnum("parallel_capable", (workers > 1 && isolation_ok && plan_ok) ? "yes" : "no");
+  if (workers <= 1)
+    parallel.add_alnum("blocked_by", "parallel_workers_le_1");
+  else if (!isolation_ok)
+    parallel.add_alnum("blocked_by", "cpu_isolation");
+  else if (!plan_ok)
+    parallel.add_alnum("blocked_by", "plan_shape");
+  Opt_trace_array candidates(&trace, "candidates");
+  EmitParallelCandidates(trace, root);
+}
+}  // namespace Morsel
+
 Plan Optimizer::Optimize(const OptimizeContext *context, const THD *thd, const JOIN *join) {
   if (!m_registered.load()) AddDefaultRules();
   if (m_optimize_rules.empty()) return nullptr;
@@ -710,15 +886,20 @@ Plan Optimizer::Optimize(const OptimizeContext *context, const THD *thd, const J
   if (!plan.root) return nullptr;
   auto *trace_context = &const_cast<THD *>(thd)->opt_trace;
   Opt_trace_object rapid_trace(trace_context);
-  Opt_trace_array rules_trace(trace_context, "rapid_optimizer_rules");
-  for (auto &rule : m_optimize_rules) {
-    Opt_trace_object rule_trace(trace_context);
-    if (trace_context->is_started()) rule_trace.add_alnum("rule", rule->name().c_str());
-    Opt_trace_array decisions_trace(trace_context, "decisions");
-    Timer rule_timer;
-    rule->apply(plan.root);
-    DBUG_PRINT("optimizer", ("Rule %s took %s", rule->name().c_str(), rule_timer.lap_formatted().c_str()));
+  {
+    Opt_trace_array rules_trace(trace_context, "rapid_optimizer_rules");
+    for (auto &rule : m_optimize_rules) {
+      Opt_trace_object rule_trace(trace_context);
+      if (trace_context->is_started()) rule_trace.add_alnum("rule", rule->name().c_str());
+      Opt_trace_array decisions_trace(trace_context, "decisions");
+      Timer rule_timer;
+      rule->apply(plan.root);
+      DBUG_PRINT("optimizer", ("Rule %s took %s", rule->name().c_str(), rule_timer.lap_formatted().c_str()));
+    }
   }
+  // Planning-time answer to "could this pipeline use parallel workers?". It must
+  // be a keyed object, so the rules array above has to be closed first.
+  Morsel::TraceParallelPlan(*trace_context, plan.root.get(), thd);
   return std::move(plan.root);
 }
 
@@ -1328,8 +1509,10 @@ bool Optimizer::translate_access_path(TranslateState *state, THD *thd, AccessPat
       // 1: extra join condition.
       if (hj.join_predicate) {
         extract_join_conditions(hj.join_predicate->expr, node->join_conditions);
-      } else
+      } else {
+        // ut_ad() compiles away in release builds; the braces keep that from becoming an empty-bodied else.
         ut_ad(false);
+      }
 
       // 2: extra post-join filter（extra predicates）
       std::vector<Item *> post_join_filters;

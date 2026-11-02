@@ -1,0 +1,45 @@
+CREATE DATABASE rapid_parallel_concurrent;
+USE rapid_parallel_concurrent;
+SET use_secondary_engine=OFF;
+SET cte_max_recursion_depth=70000;
+CREATE TABLE t(id INT PRIMARY KEY,v BIGINT) SECONDARY_ENGINE=rapid;
+INSERT INTO t WITH RECURSIVE seq AS (SELECT 1 n UNION ALL SELECT n+1 FROM seq WHERE n<70000)
+SELECT n,n FROM seq;
+ALTER TABLE t SECONDARY_LOAD;
+SET use_secondary_engine=FORCED;
+SET rapid_parallel_workers=2;
+SET optimizer_switch='hypergraph_optimizer=on';
+SET DEBUG_SYNC='rapid_parallel_workers_started SIGNAL one_started WAIT_FOR one_continue';
+SELECT SUM(v)=2450035000,COUNT(*)=70000 FROM t;
+SET DEBUG_SYNC='now WAIT_FOR one_started';
+SET use_secondary_engine=FORCED;
+SET rapid_parallel_workers=2;
+SET optimizer_switch='hypergraph_optimizer=on';
+SET DEBUG_SYNC='rapid_parallel_workers_started SIGNAL two_started WAIT_FOR two_continue';
+SELECT SUM(v)=2450035000,COUNT(*)=70000 FROM t;
+SET DEBUG_SYNC='now WAIT_FOR two_started';
+# Two pipelines hold all four native worker slots and one shared query pool.
+# A third query completes serially without waiting for either held query.
+SET use_secondary_engine=FORCED;
+SET rapid_parallel_workers=2;
+SET optimizer_switch='hypergraph_optimizer=on';
+SELECT SUM(v)=2450035000,COUNT(*)=70000 FROM t;
+SUM(v)=2450035000	COUNT(*)=70000
+1	1
+# Concurrent committed insert/update/delete cannot change either reader's snapshot.
+SET use_secondary_engine=OFF;
+UPDATE t SET v=-v WHERE id<=2000;
+DELETE FROM t WHERE id BETWEEN 2001 AND 3000;
+INSERT INTO t VALUES (70001,70001),(70002,70002);
+SET use_secondary_engine=FORCED;
+SET DEBUG_SYNC='now SIGNAL one_continue';
+SET DEBUG_SYNC='now SIGNAL two_continue';
+SUM(v)=2450035000	COUNT(*)=70000
+1	1
+SET DEBUG_SYNC='RESET';
+SUM(v)=2450035000	COUNT(*)=70000
+1	1
+SET DEBUG_SYNC='RESET';
+SET DEBUG_SYNC='RESET';
+SET use_secondary_engine=OFF;
+DROP DATABASE rapid_parallel_concurrent;

@@ -1,0 +1,78 @@
+CREATE DATABASE rapid_join_build;
+USE rapid_join_build;
+SET use_secondary_engine=OFF;
+SET cte_max_recursion_depth=140000;
+CREATE TABLE b(id INT PRIMARY KEY,k INT,k2 INT,g INT,v DECIMAL(12,2),s VARCHAR(12)) SECONDARY_ENGINE=rapid;
+CREATE TABLE p(id INT PRIMARY KEY,k INT,k2 INT,g INT,v BIGINT) SECONDARY_ENGINE=rapid;
+INSERT INTO p WITH RECURSIVE seq AS (SELECT 1 n UNION ALL SELECT n+1 FROM seq WHERE n<140000)
+SELECT n,IF(MOD(n,23)=0,NULL,MOD(n,20000)),MOD(n,3),MOD(n,9),n-70000 FROM seq;
+INSERT INTO b SELECT id,IF(MOD(id,17)=0,NULL,MOD(id,20000)),k2,MOD(id,5),
+IF(MOD(id,11)=0,NULL,(id-35000)*1.25),IF(MOD(id,13)=0,NULL,CONCAT('v',MOD(id,97))) FROM p WHERE id<=70000;
+ANALYZE TABLE b,p;
+Table	Op	Msg_type	Msg_text
+rapid_join_build.b	analyze	status	OK
+rapid_join_build.p	analyze	status	OK
+ALTER TABLE b SECONDARY_LOAD;
+ALTER TABLE p SECONDARY_LOAD;
+SET use_secondary_engine=FORCED;
+SET optimizer_switch='hypergraph_optimizer=on';
+SET secondary_engine_cost_threshold=0;
+# Both build and finalize must execute, with composite keys, NULLs and encoded payloads.
+SET rapid_parallel_workers=1;
+SET rapid_parallel_workers=2;
+SET rapid_parallel_workers=1;
+SET rapid_parallel_workers=4;
+SET rapid_parallel_workers=1;
+SET rapid_parallel_workers=8;
+SET rapid_parallel_workers=2;
+# Budget refusals in either stage discard all private state before serial replay.
+SET debug='+d,rapid_parallel_join_build_budget';
+SET debug='-d,rapid_parallel_join_build_budget';
+SET debug='+d,rapid_parallel_join_finalize_budget';
+SET debug='-d,rapid_parallel_join_finalize_budget';
+# Errors from either stage join all threads, then the next execution succeeds.
+SET debug='+d,rapid_parallel_join_build_failure';
+SELECT SUM(b.v),COUNT(*) FROM p JOIN b ON p.k=b.k AND p.k2=b.k2;
+ERROR HY000: Rapid injected parallel join build failure
+SET debug='-d,rapid_parallel_join_build_failure';
+SET debug='+d,rapid_parallel_join_finalize_failure';
+SELECT SUM(b.v),COUNT(*) FROM p JOIN b ON p.k=b.k AND p.k2=b.k2;
+ERROR HY000: Rapid injected parallel join finalize failure
+SET debug='-d,rapid_parallel_join_finalize_failure';
+# Prepared executions rebuild or reuse a complete immutable build only.
+PREPARE stmt FROM 'SELECT SUM(b.v),COUNT(*) FROM p JOIN b ON p.k=b.k AND p.k2=b.k2';
+EXECUTE stmt;
+SUM(b.v)	COUNT(*)
+-204417097.50	153046
+EXECUTE stmt;
+SUM(b.v)	COUNT(*)
+-204417097.50	153046
+DEALLOCATE PREPARE stmt;
+# A bounded build replays through the existing ordered spill implementation.
+SET join_buffer_size=1048576;
+SET debug='+d,rapid_operator_budget_floor,rapid_parallel_join_build_budget';
+SET debug='-d,rapid_operator_budget_floor,rapid_parallel_join_build_budget';
+SET join_buffer_size=DEFAULT;
+# Cancellation at the finalize barrier cannot publish partial hash chains.
+SET DEBUG_SYNC='rapid_before_parallel_join_finalize SIGNAL finalize_ready WAIT_FOR finalize_continue';
+SELECT SUM(b.v),COUNT(*) FROM p JOIN b ON p.k=b.k AND p.k2=b.k2;
+SET DEBUG_SYNC='now WAIT_FOR finalize_ready';
+SET DEBUG_SYNC='now SIGNAL finalize_continue';
+ERROR 70100: Query execution was interrupted
+SET DEBUG_SYNC='RESET';
+# Build workers share the coordinator snapshot across concurrent committed DML.
+SET use_secondary_engine=OFF;
+SET use_secondary_engine=FORCED;
+SET DEBUG_SYNC='rapid_parallel_workers_started SIGNAL build_started WAIT_FOR build_continue EXECUTE 1';
+SET DEBUG_SYNC='now WAIT_FOR build_started';
+SET use_secondary_engine=OFF;
+UPDATE b SET v=-v WHERE id<=2000;
+DELETE FROM b WHERE id BETWEEN 2001 AND 3000;
+INSERT INTO b VALUES (70001,1,1,1,123.45,'new');
+SET DEBUG_SYNC='now SIGNAL build_continue';
+snapshot_sum	snapshot_count
+1	1
+SET DEBUG_SYNC='RESET';
+# An empty filtered build must publish no dangling row references.
+SET use_secondary_engine=OFF;
+DROP DATABASE rapid_join_build;
