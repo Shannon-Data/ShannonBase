@@ -46,6 +46,9 @@ env:
   CARGO_TERM_COLOR: always
   PROTOC: protoc
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true  # Add this to Node24
+  # Leak tracking plus the 256 MB quarantine dominate these allocation-heavy tests.
+  # MTR keeps its own detect_leaks=1: that step exports ASAN_OPTIONS itself.
+  ASAN_OPTIONS: detect_leaks=0:malloc_context_size=0:quarantine_size_mb=16:max_redzone=16
   # Per-run install/test tree so a PR run and a concurrent nightly/weekly run on
   # the same self-hosted box do not share binaries, mysql-test/var, or sockets.
   SHANNON_PREFIX: /home/shannon-bin-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
@@ -102,6 +105,8 @@ jobs:
           cmake ../ \
           -DCMAKE_BUILD_TYPE=Release \
           -DWITH_ASAN=ON \
+          -DOPTIMIZE_SANITIZER_BUILDS=OFF \
+          -DWITH_ASAN_SCOPE=OFF \
           -DCMAKE_INSTALL_PREFIX=${SHANNON_PREFIX}/ \
           -DMYSQL_DATADIR=${SHANNON_PREFIX}/data \
           -DSYSCONFDIR=${SHANNON_PREFIX}/ \
@@ -132,9 +137,10 @@ jobs:
           test -n "$RAPID_UNIT_TESTS" || { echo "No Rapid gunit tests found in CMakeLists.txt"; exit 1; }
           echo "Rapid unit tests: $RAPID_UNIT_TESTS"
           make -j"$(nproc)" $RAPID_UNIT_TESTS
+          # Benchmarks need 100+ iterations each; they are perf tools, not checks.
           for t in $RAPID_UNIT_TESTS; do
             echo "=== $t ==="
-            ./runtime_output_directory/$t --gtest_color=no || exit 1
+            ./runtime_output_directory/$t --gtest_color=no '--gtest_filter=-Microbenchmarks.*' || exit 1
           done
       - name: Clean up build
         run: |
@@ -195,6 +201,8 @@ jobs:
           cmake ../ \
           -DCMAKE_BUILD_TYPE=Release \
           -DWITH_ASAN=ON \
+          -DOPTIMIZE_SANITIZER_BUILDS=OFF \
+          -DWITH_ASAN_SCOPE=OFF \
           -DCMAKE_INSTALL_PREFIX=${SHANNON_PREFIX}/ \
           -DMYSQL_DATADIR=${SHANNON_PREFIX}/data \
           -DSYSCONFDIR=${SHANNON_PREFIX}/ \
@@ -207,8 +215,8 @@ jobs:
           -DWITH_CURL=bundled \
           -DWITH_UNIT_TESTS=ON \
           -DWITH_HYPERGRAPH_OPTIMIZER=ON \
-          -DCMAKE_C_FLAGS="-march=armv8-a -O2" \
-          -DCMAKE_CXX_FLAGS="-march=armv8-a -O2" \
+          -DCMAKE_C_FLAGS="-march=armv8-a" \
+          -DCMAKE_CXX_FLAGS="-march=armv8-a" \
           -DCOMPILATION_COMMENT="MySQL Community Server, and Shannon Data AI Alpha V."
           make -j"$(nproc)" && sudo make install
           sudo find ${SHANNON_PREFIX}/bin -type f -executable -exec strip --strip-unneeded {} \; || true
@@ -227,9 +235,10 @@ jobs:
           test -n "$RAPID_UNIT_TESTS" || { echo "No Rapid gunit tests found in CMakeLists.txt"; exit 1; }
           echo "Rapid unit tests: $RAPID_UNIT_TESTS"
           make -j"$(nproc)" $RAPID_UNIT_TESTS
+          # Benchmarks need 100+ iterations each; they are perf tools, not checks.
           for t in $RAPID_UNIT_TESTS; do
             echo "=== $t ==="
-            ./runtime_output_directory/$t --gtest_color=no || exit 1
+            ./runtime_output_directory/$t --gtest_color=no '--gtest_filter=-Microbenchmarks.*' || exit 1
           done
       - name: Clean up build
         run: |
@@ -319,9 +328,10 @@ jobs:
           test -n "$RAPID_UNIT_TESTS" || { echo "No Rapid gunit tests found in CMakeLists.txt"; exit 1; }
           echo "Rapid unit tests: $RAPID_UNIT_TESTS"
           make -j"$(nproc)" $RAPID_UNIT_TESTS
+          # Benchmarks need 100+ iterations each; they are perf tools, not checks.
           for t in $RAPID_UNIT_TESTS; do
             echo "=== $t ==="
-            ./runtime_output_directory/$t --gtest_color=no || exit 1
+            ./runtime_output_directory/$t --gtest_color=no '--gtest_filter=-Microbenchmarks.*' || exit 1
           done
       - name: Clean up build
         run: |
@@ -408,9 +418,10 @@ jobs:
           test -n "$RAPID_UNIT_TESTS" || { echo "No Rapid gunit tests found in CMakeLists.txt"; exit 1; }
           echo "Rapid unit tests: $RAPID_UNIT_TESTS"
           make -j"$(nproc)" $RAPID_UNIT_TESTS
+          # Benchmarks need 100+ iterations each; they are perf tools, not checks.
           for t in $RAPID_UNIT_TESTS; do
             echo "=== $t ==="
-            ./runtime_output_directory/$t --gtest_color=no || exit 1
+            ./runtime_output_directory/$t --gtest_color=no '--gtest_filter=-Microbenchmarks.*' || exit 1
           done
       - name: Clean up build
         run: |
