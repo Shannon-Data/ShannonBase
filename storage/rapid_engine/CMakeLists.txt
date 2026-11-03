@@ -203,6 +203,12 @@ SET(SHANNON_ML
     ml/query_arbitrator.cpp
 )
 
+# Hardware offload.
+SET(SHANNON_DPU_SOURCES
+    dpu/dispatch.cpp
+    dpu/host/host_backend.cpp
+)
+
 # --- All Rapid sources ---
 SET(SHANNON_RAPID_SOURCES
     handler/ha_shannon_rapid.cc
@@ -213,6 +219,7 @@ SET(SHANNON_RAPID_SOURCES
     ${SHANNON_POPULATE_SOURCES}
     ${SHANNON_MONITOR_SOURCES}
     ${SHANNON_ML}
+    ${SHANNON_DPU_SOURCES}
     ${SHANNON_OPTIMIZE}
 )
 
