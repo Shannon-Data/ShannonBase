@@ -1,0 +1,122 @@
+##############################################################################
+# Bit-packed integer columns: RAPID_COLUMN=ENCODING=BITPACK
+#
+# A tagged integer column is stored as fixed-width codes over the CU buffer
+# instead of one slot per row; the width and the bias come from the values that
+# were actually loaded (a 0..7 column takes 3 bits, a narrow BIGINT takes 3
+# bits instead of 8 bytes).
+#
+# Two things have to hold, and either one silently rots on its own:
+#   1. the encoding is really used -- otherwise the tag degrades to an ordinary
+#      column and every check below still passes;
+#   2. every path that used to dereference a slot decodes the stream instead:
+#      scans, predicates, aggregates, DML after the load, and the checkpoint
+#      restore (the packed stream has its own section in the CU snapshot).
+##############################################################################
+CREATE DATABASE sh_bitpack;
+USE sh_bitpack;
+--disable_warnings
+--let $assert_warnings_off = 1
+SET USE_SECONDARY_ENGINE=FORCED;
+--echo # tiny_val 0..7 -> 3 bits, int_val -1000..1000 -> 11 bits,
+--echo # big_val a 4-value BIGINT domain -> 3 bits instead of 8 bytes.
+CREATE TABLE t_bp (
+  id INT PRIMARY KEY,
+  tiny_val TINYINT COMMENT 'RAPID_COLUMN=ENCODING=BITPACK',
+  int_val INT COMMENT 'RAPID_COLUMN=ENCODING=BITPACK',
+  big_val BIGINT COMMENT 'RAPID_COLUMN=ENCODING=BITPACK',
+  plain INT
+) SECONDARY_ENGINE=RAPID;
+
+INSERT INTO t_bp VALUES
+  (1, 0,    -1000, 999999999999, 7),
+  (2, 3,       0, 1000000000000, NULL),
+  (3, 7,    1000, 1000000000001, 9),
+  (4, 1,    -999,  999999999998, 7),
+  (5, NULL, NULL,            NULL, NULL),
+  (6, 2,     500, 1000000000002, 7);
+
+ALTER TABLE t_bp SECONDARY_LOAD;
+
+--echo # Three tagged columns, three bit-packed CUs. Zero means the tag was
+--echo # parsed but the column stayed in canonical slots.
+--echo # (FORCED would route performance_schema itself to the secondary engine.)
+SET USE_SECONDARY_ENGINE=OFF;
+SELECT VARIABLE_VALUE AS packed_columns FROM performance_schema.global_status
+  WHERE VARIABLE_NAME = 'rapid_cu_bitpacked_columns_total';
+SET USE_SECONDARY_ENGINE=FORCED;
+
+--echo # Scans, predicates and aggregates over the packed columns.
+SELECT * FROM t_bp ORDER BY id;
+--let $assert_digest = SELECT * FROM t_bp ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+
+SELECT id FROM t_bp WHERE tiny_val = 3 ORDER BY id;
+--let $assert_digest = SELECT id FROM t_bp WHERE tiny_val = 3 ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+
+SELECT id FROM t_bp WHERE int_val BETWEEN -999 AND 500 ORDER BY id;
+--let $assert_digest = SELECT id FROM t_bp WHERE int_val BETWEEN -999 AND 500 ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+
+SELECT id FROM t_bp WHERE big_val > 1000000000000 ORDER BY id;
+--let $assert_digest = SELECT id FROM t_bp WHERE big_val > 1000000000000 ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+
+SELECT id FROM t_bp WHERE int_val IS NULL ORDER BY id;
+--let $assert_digest = SELECT id FROM t_bp WHERE int_val IS NULL ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+
+SELECT COUNT(*), SUM(int_val), MIN(tiny_val), MAX(big_val) FROM t_bp;
+--let $assert_digest = SELECT COUNT(*), SUM(int_val), MIN(tiny_val), MAX(big_val) FROM t_bp
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+
+--echo # The packed stream has to reach a checkpoint, and the restart after it
+--echo # has to read it back: the CU snapshot carries the code width and bias.
+--echo # The first restart reloads from InnoDB (there is no generation yet) and
+--echo # repacks the column; the second one must restore from that generation.
+--let $restart_parameters = restart: --rapid_reload_on_restart=ON
+--source include/restart_mysqld.inc
+USE sh_bitpack;
+--let $wait_condition = SELECT COUNT(*)=1 FROM performance_schema.rpd_table_id WHERE SCHEMA_NAME='sh_bitpack' AND TABLE_NAME='t_bp'
+--source include/wait_condition.inc
+
+--let $datadir = `SELECT @@datadir`
+--let $checkpoint_dir = $datadir/rapid_snapshots/sh_bitpack/t_bp/checkpoints
+--source suite/secondary_engine/include/wait_native_checkpoint.inc
+
+--let $restart_parameters = restart: --rapid_reload_on_restart=ON
+--source include/restart_mysqld.inc
+USE sh_bitpack;
+--let $wait_condition = SELECT COUNT(*)=1 FROM performance_schema.rpd_table_id WHERE SCHEMA_NAME='sh_bitpack' AND TABLE_NAME='t_bp'
+--source include/wait_condition.inc
+--let $wait_condition = SELECT CAST(VARIABLE_VALUE AS UNSIGNED)>=1 FROM performance_schema.global_status WHERE VARIABLE_NAME='rapid_recovery_storage_restores'
+--source include/wait_condition.inc
+SET USE_SECONDARY_ENGINE=FORCED;
+
+SELECT * FROM t_bp ORDER BY id;
+--let $assert_digest = SELECT * FROM t_bp ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+
+SELECT id FROM t_bp WHERE int_val >= 501 ORDER BY id;
+--let $assert_digest = SELECT id FROM t_bp WHERE int_val >= 501 ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+
+--echo # DML on the restored stream: the INSERT has to write a new code, the
+--echo # UPDATE falls back to canonical slots, the DELETE has to hide the row.
+INSERT INTO t_bp VALUES (7, 5, 250, 1000000000003, 1);
+UPDATE t_bp SET int_val = int_val + 1 WHERE id <= 3;
+DELETE FROM t_bp WHERE id = 4;
+SELECT * FROM t_bp ORDER BY id;
+--let $assert_digest = SELECT * FROM t_bp ORDER BY id
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+
+SELECT COUNT(*), SUM(big_val) FROM t_bp;
+--let $assert_digest = SELECT COUNT(*), SUM(big_val) FROM t_bp
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+
+--sleep 5
+SET USE_SECONDARY_ENGINE=OFF;
+--enable_warnings
+--let $assert_warnings_off =
+DROP DATABASE sh_bitpack;

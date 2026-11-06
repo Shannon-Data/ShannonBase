@@ -456,6 +456,45 @@ TEST(BitPackedCuStorage, PackRefusesIneligibleColumns) {
   }
 }
 
+TEST(BitPackedCuStorage, PackedSnapshotRoundTripsAndStaysSmallerThanSlots) {
+  auto pool = native_pool();
+  auto field = native_bitpack_field(MYSQL_TYPE_LONG, 4);
+  CU column(nullptr, field, 0, 256, pool);
+  std::vector<int64_t> values;
+  for (int64_t i = 0; i < 200; ++i) values.push_back((i % 200) - 100);
+
+  std::istringstream input(native_packed_record(MYSQL_TYPE_LONG, 4, values));
+  ASSERT_EQ(column.deserialize(nullptr, input, values.size()), SHANNON_SUCCESS);
+  // -100..99 spans 199 -> 8 bits per code instead of a 4-byte slot.
+  ASSERT_EQ(column.pack(values.size()), 8);
+
+  std::ostringstream out;
+  ASSERT_EQ(column.serialize(out, values.size(), true), SHANNON_SUCCESS);
+  // Header (88) + payload + packed section (9) + CRC against the slot image the
+  // same snapshot would need without the encoding.
+  EXPECT_LT(out.str().size(), 88 + values.size() * 4);
+
+  CU restored(nullptr, field, 0, 256, pool);
+  std::istringstream round(out.str());
+  ASSERT_EQ(restored.deserialize(nullptr, round, values.size()), SHANNON_SUCCESS);
+  ASSERT_TRUE(restored.is_bitpacked());
+  EXPECT_EQ(restored.bitpack_width(), 8);
+  for (size_t row = 0; row < values.size(); ++row) {
+    std::array<uchar, 4> slot{};
+    ASSERT_TRUE(restored.decode_packed_slot(row, slot.data()));
+    int32_t decoded = 0;
+    std::memcpy(&decoded, slot.data(), sizeof(decoded));
+    EXPECT_EQ(decoded, values[row]);
+  }
+
+  // A snapshot restored into a column that did not opt in is corruption, not a
+  // silent decode of the stream as slots.
+  auto plain_field = native_field();
+  CU plain(nullptr, plain_field, 0, 256, pool);
+  std::istringstream rejected(out.str());
+  EXPECT_NE(plain.deserialize(nullptr, rejected, values.size()), SHANNON_SUCCESS);
+}
+
 // Test FieldMetadata structure
 TEST(FieldMetadataTest, BasicProperties) {
   FieldMetadata field_meta;

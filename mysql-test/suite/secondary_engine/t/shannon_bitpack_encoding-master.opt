@@ -1,0 +1,3 @@
+# Restart coverage of the packed CU snapshot does not need optional model
+# inference, which is not available in every test environment.
+--loose-rapid_schema_embedding=OFF

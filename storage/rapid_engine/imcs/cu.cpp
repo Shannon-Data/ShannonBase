@@ -28,6 +28,7 @@
 */
 #include "storage/rapid_engine/imcs/cu.h"
 #include "storage/rapid_engine/include/rapid_config.h"
+#include "storage/rapid_engine/monitor/rapid_monitor.h"
 #include "storage/rapid_engine/populate/log_binlog_parser.h"
 #include "storage/rapid_engine/populate/log_commons.h"
 
@@ -567,6 +568,9 @@ uint8_t CU::pack(size_t row_count) {
   // The stripe compressor already encoded m_data as slot bytes; unpacking it
   // here would silently undo the caller's compression setting.
   if (m_is_compressed.load(std::memory_order_relaxed)) return 0;
+  // A packed CU has no update history: the journal stores canonical slot images
+  // and rollback republishes them, and the snapshot format rejects the pair.
+  if (m_version_manager->has_any_version()) return 0;
 
   if (row_count == 0) row_count = m_header.owner_imcu ? m_header.owner_imcu->get_row_count() : 0;
   if (row_count == 0) return 0;
@@ -576,15 +580,30 @@ uint8_t CU::pack(size_t row_count) {
   const size_t stream_rows = m_data_capacity.load(std::memory_order_acquire) / width;
   if (stream_rows < row_count) return 0;
 
-  // Zero is part of the domain on purpose: a NULL cell's code is never read but
-  // must stay representable, and the null mask -- not the value -- decides what
-  // a reader sees.
+  // NULL rows are skipped: their slot is zeroed, and letting that zero into the
+  // domain would widen it to [0, max] for any column with a large bias (a
+  // BIGINT domain near 1e12 became 40 bits and never packed). A NULL cell is
+  // never decoded -- the null mask answers for it -- so it needs no code.
+  const bit_array_t *null_mask = nullptr;
+  if (m_header.owner_imcu) {
+    const auto &null_masks = m_header.owner_imcu->get_null_masks();
+    if (m_header.column_id < null_masks.size()) null_mask = null_masks[m_header.column_id].get();
+  }
+
+  bool have_value = false;
   int64_t low = 0, high = 0;
   for (size_t row = 0; row < row_count; ++row) {
+    if (null_mask != nullptr && Utils::Util::bit_array_get_fast(null_mask->data, row)) continue;
     const int64_t value = slot_value(m_data.get() + row * width, width);
-    low = std::min(low, value);
-    high = std::max(high, value);
+    if (!have_value) {
+      low = high = value;
+      have_value = true;
+    } else {
+      low = std::min(low, value);
+      high = std::max(high, value);
+    }
   }
+  if (!have_value) return 0;  // nothing but NULLs: no code to store
 
   const uint8_t bits = Compress::BitPackedColumn::WidthFor(low, high);
   if (bits == 0) return 0;  // domain wider than the codec supports: keep slots
@@ -598,6 +617,8 @@ uint8_t CU::pack(size_t row_count) {
   Compress::BitPackedColumn stream;
   if (!stream.Attach(packed.data(), bytes, bits, low, stream_rows)) return 0;
   for (size_t row = 0; row < row_count; ++row) {
+    // NULL rows keep code 0 from the zero-filled buffer, as in the domain scan.
+    if (null_mask != nullptr && Utils::Util::bit_array_get_fast(null_mask->data, row)) continue;
     if (!stream.SetValue(row, slot_value(m_data.get() + row * width, width))) return 0;
   }
 
@@ -607,6 +628,7 @@ uint8_t CU::pack(size_t row_count) {
     return 0;
   }
   m_packed_rows = row_count;
+  RapidMonitor::rapid_counters.cu_bitpacked_columns_total.fetch_add(1, std::memory_order_relaxed);
   return bits;
 }
 
@@ -1296,10 +1318,6 @@ int CU::serialize(std::ostream &out, size_t snapshot_row_count, bool checkpoint)
 }
 
 int CU::serialize_payload(std::ostream &out, size_t snapshot_row_count, bool checkpoint) const {
-  // The snapshot format has no place for the stream's width/bias yet, so a
-  // packed CU would be persisted as slot bytes that reload as garbage values.
-  // Fail loudly instead of writing a checkpoint nobody can read back.
-  ut_a(m_header.field_desc.encoding != Compress::ENCODING_TYPE::BITPACK);
   // Reuse an existing compressed payload. Only non-checkpoint snapshots attempt
   // new compression; checkpoints keep an uncompressed CU in its current format.
   std::lock_guard lock(m_data_mutex);
@@ -1326,7 +1344,14 @@ int CU::serialize_payload(std::ostream &out, size_t snapshot_row_count, bool che
   std::string temp_compressed;  // non-empty when we just compressed
   CU_CompressAlgo payload_algo = CU_CompressAlgo::NONE;
 
-  if (payload_compressed) {
+  // A packed stream replaces the slot array: the payload is the codes of the
+  // rows this snapshot covers, and it is never re-compressed (the stream is
+  // already denser than the compressor could make the slots).
+  const bool bitpacked = m_packed.valid();
+
+  if (bitpacked) {
+    payload_size = Compress::BitPackedColumn::BytesFor(snapshot_row_count, m_packed.width());
+  } else if (payload_compressed) {
     // Already compressed — use the bytes already in m_data.
     payload_size = m_compressed_data_size.load(std::memory_order_relaxed);
     payload_algo = static_cast<CU_CompressAlgo>(m_compress_algo_used.load(std::memory_order_relaxed));
@@ -1352,12 +1377,16 @@ int CU::serialize_payload(std::ostream &out, size_t snapshot_row_count, bool che
   auto version_snap = checkpoint ? std::vector<ColumnVersionManager::VersionEntry>{} : m_version_manager->snapshot();
   bool has_versions = !version_snap.empty();
   bool has_varlen = (m_varlen_pool != nullptr);
+  // pack() refuses a column that still has an update history, so a packed CU
+  // never carries one; the reader rejects the combination as corruption.
+  ut_a(!bitpacked || version_snap.empty());
 
   uint8_t flags = 0;
   if (payload_compressed) flags |= CU_FLAG_COMPRESSED;
   if (has_dict) flags |= CU_FLAG_HAS_DICT;
   if (has_versions) flags |= CU_FLAG_HAS_VERSIONS;
   if (has_varlen) flags |= CU_FLAG_HAS_VARLEN;
+  if (bitpacked) flags |= CU_FLAG_BITPACKED;
 
   // Write through CrcStream so we compute the checksum as we go
   CrcStream cs(out);
@@ -1393,7 +1422,9 @@ int CU::serialize_payload(std::ostream &out, size_t snapshot_row_count, bool che
   // Data payload
   cs.write_pod(static_cast<uint64_t>(payload_size));  // 8
 
-  if (payload_compressed && !temp_compressed.empty()) {
+  if (bitpacked) {
+    cs.write(m_data.get(), payload_size);
+  } else if (payload_compressed && !temp_compressed.empty()) {
     cs.write(temp_compressed.data(), payload_size);
   } else if (payload_compressed) {
     // m_data currently holds the compressed bytes.
@@ -1401,6 +1432,12 @@ int CU::serialize_payload(std::ostream &out, size_t snapshot_row_count, bool che
   } else {
     // Uncompressed — write raw data.
     cs.write(m_data.get(), payload_size);
+  }
+
+  // Bit-packed section: the code width and the bias the codes are relative to.
+  if (bitpacked) {
+    cs.write_pod(static_cast<uint8_t>(m_packed.width()));
+    cs.write_pod(static_cast<int64_t>(m_packed.bias()));
   }
 
   // Dictionary
@@ -1516,6 +1553,9 @@ struct CU::DecodedSnapshot {
 
   uint8_t flags = 0;
   uint8_t compression_algorithm = 0;
+  bool bitpacked = false;
+  uint8_t bitpack_width = 0;
+  int64_t bitpack_bias = 0;
   uint64_t pack_length = 0, slot_width = 0, uncompressed_bytes = 0, row_count = 0, payload_bytes = 0;
   double min_value = 0, max_value = 0, sum = 0;
   std::vector<uchar> payload;
@@ -1592,10 +1632,21 @@ int CU::read_snapshot(DictionaryRestoreContext *dictionaries, std::istream &in, 
   if (col_id != m_header.column_id) return HA_ERR_GENERIC;
   if (ftype != static_cast<uint8_t>(m_header.field_desc.type)) return HA_ERR_GENERIC;
   if (enc != static_cast<uint8_t>(m_header.field_desc.encoding)) return HA_ERR_GENERIC;
-  constexpr uint8_t known_flags = CU_FLAG_COMPRESSED | CU_FLAG_HAS_DICT | CU_FLAG_HAS_VERSIONS | CU_FLAG_HAS_VARLEN;
+  constexpr uint8_t known_flags =
+      CU_FLAG_COMPRESSED | CU_FLAG_HAS_DICT | CU_FLAG_HAS_VERSIONS | CU_FLAG_HAS_VARLEN | CU_FLAG_BITPACKED;
   if (snapshot.flags & ~known_flags) return HA_ERR_GENERIC;
   if ((snapshot.flags & CU_FLAG_HAS_DICT) && !m_header.field_desc.dictionary) return HA_ERR_GENERIC;
   if (bool(snapshot.flags & CU_FLAG_HAS_VARLEN) != bool(m_varlen_pool)) return HA_ERR_GENERIC;
+
+  snapshot.bitpacked = (snapshot.flags & CU_FLAG_BITPACKED) != 0;
+  if (snapshot.bitpacked) {
+    // A packed payload replaces the slot array, so it is never compressed and
+    // cannot coexist with the sections that describe slots.
+    if (snapshot.flags & (CU_FLAG_COMPRESSED | CU_FLAG_HAS_VERSIONS | CU_FLAG_HAS_DICT | CU_FLAG_HAS_VARLEN))
+      return HA_ERR_GENERIC;
+    if (m_header.field_desc.encoding != Compress::ENCODING_TYPE::BITPACK) return HA_ERR_GENERIC;
+    if (snapshot.compression_algorithm != static_cast<uint8_t>(CU_CompressAlgo::NONE)) return HA_ERR_GENERIC;
+  }
 
   // Lengths
   if (!cis.read_pod(snapshot.pack_length)) return HA_ERR_GENERIC;
@@ -1617,7 +1668,7 @@ int CU::read_snapshot(DictionaryRestoreContext *dictionaries, std::istream &in, 
   const size_t data_capacity = m_data_capacity.load(std::memory_order_acquire);
   if (snapshot.uncompressed_bytes > data_capacity) return HA_ERR_GENERIC;
   if (snapshot.payload_bytes > snapshot.uncompressed_bytes) return HA_ERR_GENERIC;
-  if (!(snapshot.flags & CU_FLAG_COMPRESSED) &&
+  if (!snapshot.bitpacked && !(snapshot.flags & CU_FLAG_COMPRESSED) &&
       (snapshot.payload_bytes != snapshot.uncompressed_bytes ||
        snapshot.compression_algorithm != static_cast<uint8_t>(CU_CompressAlgo::NONE)))
     return HA_ERR_GENERIC;
@@ -1638,6 +1689,19 @@ int CU::read_snapshot(DictionaryRestoreContext *dictionaries, std::istream &in, 
 
   snapshot.payload.resize(snapshot.payload_bytes);
   if (snapshot.payload_bytes > 0 && !cis.read(snapshot.payload.data(), snapshot.payload_bytes)) return HA_ERR_GENERIC;
+
+  // Bit-packed section (optional)
+  if (snapshot.bitpacked) {
+    uint8_t bit_width = 0;
+    int64_t bias = 0;
+    if (!cis.read_pod(bit_width) || !cis.read_pod(bias)) return HA_ERR_GENERIC;
+    if (bit_width == 0 || bit_width > Compress::BitPackedColumn::kMaxWidth) return HA_ERR_GENERIC;
+    // The payload must cover exactly the codes of the rows it claims.
+    if (snapshot.payload_bytes != Compress::BitPackedColumn::BytesFor(snapshot.row_count, bit_width))
+      return HA_ERR_GENERIC;
+    snapshot.bitpack_width = bit_width;
+    snapshot.bitpack_bias = bias;
+  }
 
   // Dictionary (optional)
   bool compare_dictionary = false;
@@ -1764,8 +1828,25 @@ int CU::restore_snapshot(const DecodedSnapshot &snapshot) {
     std::string plain = decomp->decompress(cv);
     if (plain.size() != static_cast<size_t>(snapshot.uncompressed_bytes)) return HA_ERR_GENERIC;
     std::memcpy(m_data.get(), plain.data(), snapshot.uncompressed_bytes);
-  } else {
+  } else if (!snapshot.bitpacked) {
     std::memcpy(m_data.get(), snapshot.payload.data(), snapshot.payload_bytes);
+  }
+
+  if (snapshot.bitpacked) {
+    // Install the stream and re-attach it over the whole buffer, so rows
+    // appended after the restore keep packing. The bytes past the payload were
+    // never written by the snapshot and must read as code 0.
+    const size_t width = m_header.field_desc.normalized_length;
+    const size_t stream_rows = width == 0 ? 0 : m_data_capacity.load(std::memory_order_relaxed) / width;
+    const size_t stream_bytes = Compress::BitPackedColumn::BytesFor(stream_rows, snapshot.bitpack_width);
+    if (stream_bytes < snapshot.payload_bytes || stream_bytes > m_data_capacity.load(std::memory_order_relaxed))
+      return HA_ERR_GENERIC;
+    if (snapshot.payload_bytes > 0) std::memcpy(m_data.get(), snapshot.payload.data(), snapshot.payload_bytes);
+    if (stream_bytes > snapshot.payload_bytes)
+      std::memset(m_data.get() + snapshot.payload_bytes, 0, stream_bytes - snapshot.payload_bytes);
+    if (!m_packed.Attach(m_data.get(), stream_bytes, snapshot.bitpack_width, snapshot.bitpack_bias, stream_rows))
+      return HA_ERR_GENERIC;
+    m_packed_rows = static_cast<size_t>(snapshot.row_count);
   }
 
   // Mark uncompressed after loading (runtime can re-compress if desired).
