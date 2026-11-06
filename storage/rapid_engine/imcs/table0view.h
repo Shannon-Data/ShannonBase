@@ -75,12 +75,17 @@ struct ColumnChunkRecv : RecieverBase {
   std::vector<row_id_t> &row_ids;
   size_t &read_cnt;
   std::vector<size_t> projection_lengths;
+  /// A row could not be stored: the scan must fail, never silently drop it.
+  bool append_failed{false};
 
   /// Number of rows actually materialised into chunks (≤ rows examined).
   size_t rows_received() const { return read_cnt; }
 
+  inline bool accept_more() const { return !append_failed; }
+
   void on_batch_begin() {
     read_cnt = 0;
+    append_failed = false;
     row_ids.clear();
   }
   void on_row(row_id_t rowid, const std::vector<const uchar *> &row_data);
@@ -301,8 +306,12 @@ class RapidCursor : public MemoryObject {
                                  const std::vector<const uchar *> &cells, const uchar *key, size_t key_length);
 
   int fill_index_batch(bool reverse, size_t max_rows = std::numeric_limits<size_t>::max(),
-                       const std::vector<uint32_t> *proj_override = nullptr);
+                       const std::vector<uint32_t> *proj_override = nullptr,
+                       std::pmr::vector<Executor::ColumnChunk> *target = nullptr);
+  // Candidate window of the row-at-a-time index path, and the ceiling of the batch
+  // path, which otherwise honours the caller's batch size.
   static constexpr size_t kIndexScanBatch = 512;
+  static constexpr size_t kIndexScanMaxBatch = 4096;
 
   int serve_index_row(bool reverse);
 

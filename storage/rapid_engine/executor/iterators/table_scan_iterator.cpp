@@ -50,6 +50,22 @@
 
 namespace ShannonBase {
 namespace Executor {
+namespace {
+// Latency band of the batch-size controller: growing below kFastBatchMs keeps the
+// doubled batch under kSlowBatchMs, so the controller cannot oscillate.
+constexpr double kSlowBatchMs = 50.0;
+constexpr double kFastBatchMs = 10.0;
+constexpr size_t kAdaptEvery = 8;  // batches per decision
+constexpr double kEwmaAlpha = 0.3;
+constexpr double kRowsCap = 10000.0;
+
+// A batch of whole kernel blocks leaves no ragged tail block per fetch.
+inline size_t AlignBatchRows(size_t rows) {
+  if (rows >= SHANNON_BATCH_NUM) return rows / SHANNON_BATCH_NUM * SHANNON_BATCH_NUM;
+  return (rows + 3) & ~size_t(3);
+}
+}  // namespace
+
 VectorizedTableScanIterator::VectorizedTableScanIterator(THD *thd, TABLE *mtable, double expected_rows,
                                                          ha_rows *examined_rows,
                                                          std::unique_ptr<Imcs::Predicate> predicate,
@@ -64,6 +80,7 @@ VectorizedTableScanIterator::VectorizedTableScanIterator(THD *thd, TABLE *mtable
       m_use_storage_index{use_storage_index},
       m_index_no{index_no},
       m_reverse{reverse},
+      m_examined_rows{examined_rows},
       m_batch_size{0},
       m_opt_batch_size{0},
       m_curr_batch_size{0},
@@ -73,7 +90,12 @@ VectorizedTableScanIterator::VectorizedTableScanIterator(THD *thd, TABLE *mtable
       m_fields_cached{false},
       m_cardinality(expected_rows) {
   m_opt_batch_size = CalculateOptimalBatchSize(expected_rows);
-  m_batch_size = m_opt_batch_size;
+  // Chunks are allocated once, for this many rows: a larger request does not grow
+  // them, it loses rows (see ColumnChunkRecv::on_row).
+  m_chunk_capacity = std::max(m_opt_batch_size, static_cast<size_t>(ShannonBase::SHANNON_ROWS_IN_CHUNK));
+  m_max_batch_size = std::min(m_chunk_capacity, m_opt_batch_size * 2);
+  m_min_batch_size = std::min(m_opt_batch_size, std::max<size_t>(SHANNON_BATCH_NUM, SHANNON_VECTOR_WIDTH));
+  ResetBatchRamp();
 
   m_metrics.reset();
 }
@@ -92,21 +114,26 @@ size_t VectorizedTableScanIterator::CalculateOptimalBatchSize(double expected_ro
   size_t row_size = EstimateRowSize();
   size_t cache_optimal = l3_cache_size / (row_size * 4);
 
-  size_t rows_based = 0;
-  if (expected_rows > 0) rows_based = static_cast<size_t>(std::min(expected_rows / 10.0, 10000.0));
+  // An unknown estimate used to skip the cap and pick up to 131072 rows, while a
+  // known one never exceeded 10000: treat "unknown" as "large".
+  const size_t rows_based =
+      static_cast<size_t>(expected_rows > 0 ? std::min(expected_rows / 10.0, kRowsCap) : kRowsCap);
 
-  size_t candidate = rows_based ? std::min(cache_optimal, rows_based) : cache_optimal;
+  size_t candidate = std::min(cache_optimal, rows_based);
   candidate = std::clamp(candidate, base_size, static_cast<size_t>(131072));
-  candidate = (candidate + 3) & ~size_t(3);  // align to 4
-  return candidate;
+  return AlignBatchRows(candidate);
 }
 
 size_t VectorizedTableScanIterator::EstimateRowSize() const {
+  // Size the batch by the chunk cell width (4 bytes for a dictionary-coded string),
+  // not pack_length(), which overstates a VARCHAR(255) utf8mb4 column ~250x.
   size_t total_size = 0;
   for (uint idx = 0; idx < table()->s->fields; idx++) {
     Field *field = *(table()->field + idx);
-    if (bitmap_is_set(table()->read_set, idx) && !field->is_flag_set(NOT_SECONDARY_FLAG))
-      total_size += field->pack_length();
+    const bool explicitly_projected =
+        std::find(m_projected_columns.begin(), m_projected_columns.end(), idx) != m_projected_columns.end();
+    if ((bitmap_is_set(table()->read_set, idx) || explicitly_projected) && !field->is_flag_set(NOT_SECONDARY_FLAG))
+      total_size += std::max<size_t>(1, static_cast<size_t>(Utils::Util::normalized_length(field)));
   }
   return total_size > 0 ? total_size : 64;
 }
@@ -140,6 +167,7 @@ bool VectorizedTableScanIterator::Init() {
   m_curr_row_in_batch = 0;
   m_batch_exhausted = true;
   m_eof_reached = false;
+  ResetBatchRamp();
   m_metrics.reset();
   m_operator_stats = VectorizedOperatorStats{};
 
@@ -218,7 +246,8 @@ bool VectorizedTableScanIterator::PreallocateColumnChunks() {
     m_col_chunks.assign(table()->s->fields, ShannonBase::Executor::ColumnChunk(nullptr, 0));
   }
 
-  auto initial_capacity = std::max(m_batch_size, static_cast<size_t>(ShannonBase::SHANNON_ROWS_IN_CHUNK));
+  // Sized from the optimum, not from the (ramping) current batch size.
+  const auto initial_capacity = m_chunk_capacity;
 
   uint valid_fields = 0;
   for (uint ind = 0; ind < table()->s->fields; ind++) {
@@ -251,7 +280,8 @@ bool VectorizedTableScanIterator::PreallocateColumnChunks() {
   return false;
 }
 
-void VectorizedTableScanIterator::UpdatePerformanceMetrics(std::chrono::high_resolution_clock::time_point start_time) {
+double VectorizedTableScanIterator::UpdatePerformanceMetrics(
+    std::chrono::high_resolution_clock::time_point start_time) {
   auto end_time = std::chrono::high_resolution_clock::now();
   auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end_time - start_time);
   double read_time = duration.count() / 1000.0;  // in ms.
@@ -260,18 +290,40 @@ void VectorizedTableScanIterator::UpdatePerformanceMetrics(std::chrono::high_res
       (m_metrics.avg_batch_time * (m_metrics.total_batches - 1) + read_time) / m_metrics.total_batches;
   m_metrics.total_read_time += read_time;
   m_metrics.last_batch_time = end_time;
+  return read_time;
 }
 
-void VectorizedTableScanIterator::AdaptBatchSize() {
-  if (m_metrics.total_batches % 100 == 0 && m_metrics.total_batches > 0) {
-    double current_avg = m_metrics.avg_batch_time;
+void VectorizedTableScanIterator::ResetBatchRamp() {
+  m_in_ramp = m_min_batch_size < m_opt_batch_size;
+  m_batch_size = m_in_ramp ? m_min_batch_size : m_opt_batch_size;
+  m_batch_ms_ewma = 0.0;
+  m_adapt_samples = 0;
+}
 
-    if (current_avg > 50.0) {  // over 50 ms. reduce the batch size.
-      m_batch_size = std::max(m_batch_size / 2, static_cast<size_t>(SHANNON_VECTOR_WIDTH));
-    } else if (current_avg < 10.0 && m_batch_size < m_opt_batch_size * 2) {
-      // less than 10 ms, raise up the batch size.
-      m_batch_size = std::min(m_batch_size * 2, m_opt_batch_size * 4);
-    }
+void VectorizedTableScanIterator::AdaptBatchSize(double batch_ms) {
+  // Slow start: double until the optimum, so a parent that stops early never pays
+  // for a full batch up front.
+  if (m_in_ramp) {
+    m_batch_size = std::min(AlignBatchRows(m_batch_size * 2), m_opt_batch_size);
+    if (m_batch_size >= m_opt_batch_size) m_in_ramp = false;
+    return;
+  }
+
+  // Windowed latency: a cumulative mean could not react once a few hundred batches
+  // had accumulated, and averaged in batches of the previous size after a resize.
+  m_batch_ms_ewma = m_adapt_samples == 0 ? batch_ms : (1.0 - kEwmaAlpha) * m_batch_ms_ewma + kEwmaAlpha * batch_ms;
+  if (++m_adapt_samples < kAdaptEvery) return;
+  m_adapt_samples = 0;
+
+  size_t next = m_batch_size;
+  if (m_batch_ms_ewma > kSlowBatchMs) {
+    next = std::max(AlignBatchRows(m_batch_size / 2), m_min_batch_size);  // bounds kill latency
+  } else if (m_batch_ms_ewma < kFastBatchMs) {
+    next = std::min(AlignBatchRows(m_batch_size * 2), m_max_batch_size);
+  }
+  if (next != m_batch_size) {
+    m_batch_size = next;
+    m_batch_ms_ewma = 0.0;  // the next window must describe the new size
   }
 }
 
@@ -395,12 +447,11 @@ int VectorizedTableScanIterator::Read() {
 
   if (m_batch_exhausted && !m_eof_reached) {
     result = ReadNextBatch();
+    // EOF never carries rows: every cursor entry point zeroes its counter before
+    // it can return HA_ERR_END_OF_FILE.
     if (result) {
-      if (result == HA_ERR_END_OF_FILE && m_curr_batch_size == 0) {
-        m_cardinality.Finish(thd(), "scan", m_operator_stats.rows_in);
-        return HandleError(HA_ERR_END_OF_FILE);
-      }
-      if (result != HA_ERR_END_OF_FILE) return HandleError(result);
+      if (result == HA_ERR_END_OF_FILE) m_cardinality.Finish(thd(), "scan", m_operator_stats.rows_in);
+      return HandleError(result);
     }
   }
 
@@ -459,13 +510,7 @@ int VectorizedTableScanIterator::ReadNextBatch() {
     if (result != 0) {
       if (result == HA_ERR_END_OF_FILE) {
         m_eof_reached = true;
-        if (read_cnt) {
-          m_batch_row_ids = file->last_batch_row_ids();
-          m_batch_exhausted = false;
-          m_metrics.total_batches++;
-          UpdatePerformanceMetrics(batch_start);
-        }
-        m_curr_batch_size = read_cnt;
+        m_curr_batch_size = 0;
         m_curr_row_in_batch = 0;
         return HA_ERR_END_OF_FILE;
       }
@@ -477,6 +522,9 @@ int VectorizedTableScanIterator::ReadNextBatch() {
 
     if (read_cnt == 0) {  // no data read, therefore set to EOF.
       m_eof_reached = true;
+      // Leave no stale batch behind: Read() would re-serve its first row.
+      m_curr_batch_size = 0;
+      m_curr_row_in_batch = 0;
       return HA_ERR_END_OF_FILE;
     }
 
@@ -485,9 +533,9 @@ int VectorizedTableScanIterator::ReadNextBatch() {
     m_curr_row_in_batch = 0;
     m_batch_exhausted = false;
     m_metrics.total_batches++;
+    if (m_examined_rows != nullptr) *m_examined_rows += read_cnt;
 
-    UpdatePerformanceMetrics(batch_start);
-    AdaptBatchSize();
+    AdaptBatchSize(UpdatePerformanceMetrics(batch_start));
 
     return ShannonBase::SHANNON_SUCCESS;
   }
@@ -577,6 +625,7 @@ int VectorizedTableScanIterator::ReadBatch(std::pmr::vector<ColumnChunk> &col_ch
       m_operator_stats.rows_in += rows_read;
       m_operator_stats.rows_out += rows_read;
       ++m_operator_stats.batches;
+      if (m_examined_rows != nullptr) *m_examined_rows += rows_read;
     }
     m_cardinality.Finish(thd(), "scan", m_operator_stats.rows_in);
     return HA_ERR_END_OF_FILE;
@@ -595,6 +644,7 @@ int VectorizedTableScanIterator::ReadBatch(std::pmr::vector<ColumnChunk> &col_ch
   m_operator_stats.rows_in += rows_read;
   m_operator_stats.rows_out += rows_read;
   ++m_operator_stats.batches;
+  if (m_examined_rows != nullptr) *m_examined_rows += rows_read;
   return 0;
 }
 
@@ -632,6 +682,7 @@ int VectorizedTableScanIterator::ReadPredicateBatch(std::pmr::vector<ColumnChunk
   m_operator_stats.rows_in += rows;
   m_operator_stats.rows_out += rows;
   ++m_operator_stats.batches;
+  if (m_examined_rows != nullptr) *m_examined_rows += rows;
   RapidMonitor::rapid_counters.query_late_predicate_rows_total.fetch_add(rows, std::memory_order_relaxed);
   if (m_eof_reached) m_cardinality.Finish(thd(), "scan", m_operator_stats.rows_in);
   if (rows) {
@@ -856,7 +907,6 @@ ParallelIndexScan::ParallelIndexScan(ResMgmt::BoundedMemoryResource *memory, con
 void ParallelIndexScan::Collect() {
   // Candidates arrive in index order; a run is a maximal stretch inside one
   // IMCU, so a worker materializes it with a single vectorised scan.
-  constexpr size_t kMaxCandidates = size_t{1} << 20;
   std::pmr::vector<Run> runs(m_runs.get_allocator().resource());
   std::pmr::vector<uint32_t> offsets(m_offsets.get_allocator().resource());
   Imcs::Index::Art_Iterator walk(m_index);
@@ -877,7 +927,12 @@ void ParallelIndexScan::Collect() {
     offsets.push_back(static_cast<uint32_t>(rowid % m_rows_per_imcu));
     ++runs.back().count;
     ++ordinal;
-    if (ordinal > kMaxCandidates) return;  // Too large to hold: leave it serial.
+    if (ordinal > kMaxCandidates) {
+      // An empty run list would look exactly like an empty index: every worker
+      // would report success and the rows would be lost.
+      m_overflow.store(true, std::memory_order_release);
+      return;
+    }
   }
   m_offsets = std::move(offsets);
   m_runs = std::move(runs);
@@ -890,6 +945,7 @@ bool ParallelIndexScan::ExecuteImpl(THD *worker, ResMgmt::BoundedMemoryResource 
   // The walk cannot be split, and it must not be paid before the caller has
   // committed to a parallel phase: run it here, once.
   std::call_once(m_collect, [&] { Collect(); });
+  if (m_overflow.load(std::memory_order_acquire)) return true;
   if (m_runs.empty()) return false;
   constexpr size_t capacity = ParallelSource::kBatchRows;
   ResMgmt::BoundedMemoryResource::Reservation scratch(memory, m_storage_scratch_bytes);
@@ -905,8 +961,10 @@ bool ParallelIndexScan::ExecuteImpl(THD *worker, ResMgmt::BoundedMemoryResource 
   std::pmr::vector<ColumnChunk> chunks(memory);
   std::pmr::vector<uint32_t> selection(memory);
   std::pmr::vector<uint64_t> ordinals(memory);
+  std::vector<uint32_t> gather;  // reused: scan_rows_vectorized() takes a vector
   chunks.reserve(m_fields.size());
   ordinals.reserve(capacity);
+  gather.reserve(capacity);
   for (Field *field : m_fields) {
     chunks.emplace_back(field, capacity, memory);
     if (chunks.back().failed()) return true;
@@ -932,7 +990,8 @@ bool ParallelIndexScan::ExecuteImpl(THD *worker, ResMgmt::BoundedMemoryResource 
       const uint32_t *offsets = m_offsets.data() + run.begin + offset;
       size_t next_candidate = 0;
       bool failed = false;
-      imcu->scan_rows_vectorized(&context, std::vector<uint32_t>(offsets, offsets + count), m_predicates, m_projection,
+      gather.assign(offsets, offsets + count);
+      imcu->scan_rows_vectorized(&context, gather, m_predicates, m_projection,
                                  [&](row_id_t id, const std::vector<const uchar *> &values) {
                                    if (failed) return;
                                    const uint32_t offset_in_imcu = static_cast<uint32_t>(id % m_rows_per_imcu);
