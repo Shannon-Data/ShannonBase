@@ -81,6 +81,9 @@ static constexpr uint8_t CU_FLAG_COMPRESSED = 0x01u;
 static constexpr uint8_t CU_FLAG_HAS_DICT = 0x02u;
 static constexpr uint8_t CU_FLAG_HAS_VERSIONS = 0x04u;
 static constexpr uint8_t CU_FLAG_HAS_VARLEN = 0x08u;
+// The data payload is a bit-packed stream (see BitPackedColumn), not a slot
+// array; the packed section that follows it carries the code width and bias.
+static constexpr uint8_t CU_FLAG_BITPACKED = 0x10u;
 
 /**
  * Algorithm tag persisted in the snapshot (decoupled from the runtime enum so
@@ -219,7 +222,7 @@ class CU : public MemoryObject {
    * │   magic          4 B  CU_SERIAL_MAGIC = 0x55484353             │
    * │   version        2 B  CU_FORMAT_VERSION                      │
    * │   flags          1 B  CU_FLAG_COMPRESSED | HAS_DICT |        │
-   * │                       HAS_VERSIONS | HAS_VARLEN              │
+   * │                       HAS_VERSIONS | HAS_VARLEN | BITPACKED  │
    * │   column_id      4 B                                         │
    * │   field_type     1 B  enum_field_types                       │
    * │   encoding       1 B  Compress::ENCODING_TYPE                │
@@ -240,6 +243,10 @@ class CU : public MemoryObject {
    * │ Data payload                                                 │
    * │   payload_size  8 B  (bytes that follow; ≤ original_size)    │
    * │   payload       N B                                          │
+   * ├──────────────────────────────────────────────────────────────┤
+   * │ Bit-packed section (only when CU_FLAG_BITPACKED is set)      │
+   * │   bit_width  1 B   1..32 bits per code                       │
+   * │   bias       8 B   int64 subtracted from every value         │
    * ├──────────────────────────────────────────────────────────────┤
    * │ Dictionary  (only when CU_FLAG_HAS_DICT is set)              │
    * │   entry_count  4 B                                           │
@@ -370,9 +377,10 @@ class CU : public MemoryObject {
    * Repack rows [0, row_count) into a bit-packed stream laid over m_data.
    *
    * Only a BITPACK column is eligible (fixed-width integers, no varlen pool, no
-   * dictionary), and only when the observed [min, max] span fits
-   * BitPackedColumn::kMaxWidth. NULL cells keep whatever code the slot held;
-   * the column's null mask stays authoritative.
+   * dictionary), and only when the observed [min, max] span of its non-NULL
+   * cells fits BitPackedColumn::kMaxWidth. NULL cells carry no code -- the
+   * column's null mask stays authoritative -- so a zeroed slot cannot widen the
+   * domain.
    *
    * Caller MUST hold the owning IMCU's mutation mutex exclusively: readers do
    * not take m_data_mutex, so the stream must not change under them.

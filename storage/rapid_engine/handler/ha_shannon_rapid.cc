@@ -1765,6 +1765,7 @@ static const char *rapid_propagation_mode_names[] = {"DIRECT_NOTIFICATION", "RED
   X(query_like_mask_rows_total, query_like_mask_rows_total)                                                         \
   X(query_like_scalar_rows_total, query_like_scalar_rows_total)                                                     \
   X(query_dictionary_predicate_rows_total, query_dictionary_predicate_rows_total)                                   \
+  X(cu_bitpacked_columns_total, cu_bitpacked_columns_total)                                                         \
   X(query_vectorized_like_rows_total, query_vectorized_like_rows_total)                                             \
   X(query_vectorized_dictionary_minmax_rows_total, query_vectorized_dictionary_minmax_rows_total)                   \
   X(query_late_predicate_rows_total, query_late_predicate_rows_total)                                               \

@@ -975,13 +975,24 @@ void Imcu::update_storage_index() {
   if (!m_header.storage_index) return;
 
   std::unique_lock<std::shared_mutex> dml_lock(m_mutation_mutex);
-  std::unique_lock lock(m_header_mutex);
-  // the frontier, not current_rows: allocate_row_id() bumps current_rows
+
+  // The frontier, not current_rows: allocate_row_id() bumps current_rows
   // before the row's cells are written, and a rolled-back insert leaves that
   // slot reserved but never written. Walking up to current_rows reads those
   // slots -- uninitialized dictionary ids and varlen references -- and folds
   // them into the zone map. clear_dirty() below then re-arms pruning on it.
-  size_t num_rows = get_row_count();
+  const size_t num_rows = get_row_count();
+
+  // The first pass after a load is the last point where every value of a column
+  // is known, so bit-pack the columns that opted in here. pack() is idempotent
+  // and takes each CU's data lock; it runs before the header lock below so the
+  // two orders can never invert.
+  for (auto &[col_idx, cu] : m_column_units) {
+    (void)col_idx;
+    if (cu) cu->pack(num_rows);
+  }
+
+  std::unique_lock lock(m_header_mutex);
 
   // Hold pruning off for the whole rebuild. reset_stats() blanks min/max, and
   // a reader that reached the index in between would prune on [DBL_MAX,

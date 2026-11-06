@@ -1,0 +1,94 @@
+CREATE DATABASE sh_bitpack;
+USE sh_bitpack;
+SET USE_SECONDARY_ENGINE=FORCED;
+# tiny_val 0..7 -> 3 bits, int_val -1000..1000 -> 11 bits,
+# big_val a 4-value BIGINT domain -> 3 bits instead of 8 bytes.
+CREATE TABLE t_bp (
+id INT PRIMARY KEY,
+tiny_val TINYINT COMMENT 'RAPID_COLUMN=ENCODING=BITPACK',
+int_val INT COMMENT 'RAPID_COLUMN=ENCODING=BITPACK',
+big_val BIGINT COMMENT 'RAPID_COLUMN=ENCODING=BITPACK',
+plain INT
+) SECONDARY_ENGINE=RAPID;
+INSERT INTO t_bp VALUES
+(1, 0,    -1000, 999999999999, 7),
+(2, 3,       0, 1000000000000, NULL),
+(3, 7,    1000, 1000000000001, 9),
+(4, 1,    -999,  999999999998, 7),
+(5, NULL, NULL,            NULL, NULL),
+(6, 2,     500, 1000000000002, 7);
+ALTER TABLE t_bp SECONDARY_LOAD;
+# Three tagged columns, three bit-packed CUs. Zero means the tag was
+# parsed but the column stayed in canonical slots.
+# (FORCED would route performance_schema itself to the secondary engine.)
+SET USE_SECONDARY_ENGINE=OFF;
+SELECT VARIABLE_VALUE AS packed_columns FROM performance_schema.global_status
+WHERE VARIABLE_NAME = 'rapid_cu_bitpacked_columns_total';
+packed_columns
+3
+SET USE_SECONDARY_ENGINE=FORCED;
+# Scans, predicates and aggregates over the packed columns.
+SELECT * FROM t_bp ORDER BY id;
+id	tiny_val	int_val	big_val	plain
+1	0	-1000	999999999999	7
+2	3	0	1000000000000	NULL
+3	7	1000	1000000000001	9
+4	1	-999	999999999998	7
+5	NULL	NULL	NULL	NULL
+6	2	500	1000000000002	7
+SELECT id FROM t_bp WHERE tiny_val = 3 ORDER BY id;
+id
+2
+SELECT id FROM t_bp WHERE int_val BETWEEN -999 AND 500 ORDER BY id;
+id
+2
+4
+6
+SELECT id FROM t_bp WHERE big_val > 1000000000000 ORDER BY id;
+id
+3
+6
+SELECT id FROM t_bp WHERE int_val IS NULL ORDER BY id;
+id
+5
+SELECT COUNT(*), SUM(int_val), MIN(tiny_val), MAX(big_val) FROM t_bp;
+COUNT(*)	SUM(int_val)	MIN(tiny_val)	MAX(big_val)
+6	-499	0	1000000000002
+# The packed stream has to reach a checkpoint, and the restart after it
+# has to read it back: the CU snapshot carries the code width and bias.
+# The first restart reloads from InnoDB (there is no generation yet) and
+# repacks the column; the second one must restore from that generation.
+# restart: --rapid_reload_on_restart=ON
+USE sh_bitpack;
+# restart: --rapid_reload_on_restart=ON
+USE sh_bitpack;
+SET USE_SECONDARY_ENGINE=FORCED;
+SELECT * FROM t_bp ORDER BY id;
+id	tiny_val	int_val	big_val	plain
+1	0	-1000	999999999999	7
+2	3	0	1000000000000	NULL
+3	7	1000	1000000000001	9
+4	1	-999	999999999998	7
+5	NULL	NULL	NULL	NULL
+6	2	500	1000000000002	7
+SELECT id FROM t_bp WHERE int_val >= 501 ORDER BY id;
+id
+3
+# DML on the restored stream: the INSERT has to write a new code, the
+# UPDATE falls back to canonical slots, the DELETE has to hide the row.
+INSERT INTO t_bp VALUES (7, 5, 250, 1000000000003, 1);
+UPDATE t_bp SET int_val = int_val + 1 WHERE id <= 3;
+DELETE FROM t_bp WHERE id = 4;
+SELECT * FROM t_bp ORDER BY id;
+id	tiny_val	int_val	big_val	plain
+1	0	-999	999999999999	7
+2	3	1	1000000000000	NULL
+3	7	1001	1000000000001	9
+5	NULL	NULL	NULL	NULL
+6	2	500	1000000000002	7
+7	5	250	1000000000003	1
+SELECT COUNT(*), SUM(big_val) FROM t_bp;
+COUNT(*)	SUM(big_val)
+6	5000000000005
+SET USE_SECONDARY_ENGINE=OFF;
+DROP DATABASE sh_bitpack;
