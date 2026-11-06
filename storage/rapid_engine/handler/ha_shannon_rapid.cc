@@ -648,12 +648,20 @@ int ha_rapid::rnd_next(uchar *buf) {
   return ShannonBase::SHANNON_SUCCESS;
 }
 
+// Handler_read_* count rows: ha_statistic_increment() adds 1, which under-reported
+// a batch fetch by the batch size.
+static inline void count_batch_rows(const TABLE *table, ulonglong System_status_var::*counter, size_t rows) {
+  if (rows != 0 && table != nullptr && table->in_use != nullptr) table->in_use->status_var.*counter += rows;
+}
+
 int ha_rapid::rnd_next_batch(size_t batch_size, std::pmr::vector<ShannonBase::Executor::ColumnChunk> &data,
                              size_t &read_cnt) {
-  if (inited != handler::RND) return HA_ERR_END_OF_FILE;
+  read_cnt = 0;
+  if (inited != handler::RND || batch_size == 0) return HA_ERR_WRONG_COMMAND;
 
   const int error = m_cursor->next(batch_size, data, read_cnt);
-  if (error == ShannonBase::SHANNON_SUCCESS) ha_statistic_increment(&System_status_var::ha_read_rnd_next_count);
+  if (error == ShannonBase::SHANNON_SUCCESS)
+    count_batch_rows(table, &System_status_var::ha_read_rnd_next_count, read_cnt);
   return error;
 }
 
@@ -661,7 +669,7 @@ int ha_rapid::rnd_next_projected_batch(size_t capacity, std::pmr::vector<Shannon
                                        size_t &rows, const std::vector<uint32_t> &projection) {
   if (inited != handler::RND) return HA_ERR_WRONG_COMMAND;
   const int error = m_cursor->next_projected(capacity, chunks, rows, projection);
-  if (!error) ha_statistic_increment(&System_status_var::ha_read_rnd_next_count);
+  if (!error) count_batch_rows(table, &System_status_var::ha_read_rnd_next_count, rows);
   return error;
 }
 
@@ -682,7 +690,7 @@ int ha_rapid::index_next_batch(size_t batch_size, std::pmr::vector<ShannonBase::
   if (inited != handler::INDEX) return HA_ERR_END_OF_FILE;
 
   const int error = m_cursor->index_next_batch(batch_size, data, read_cnt, reverse);
-  if (error == ShannonBase::SHANNON_SUCCESS) ha_statistic_increment(&System_status_var::ha_read_next_count);
+  if (error == ShannonBase::SHANNON_SUCCESS) count_batch_rows(table, &System_status_var::ha_read_next_count, read_cnt);
   return error;
 }
 

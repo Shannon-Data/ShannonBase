@@ -516,6 +516,28 @@ std::pair<const uchar *, size_t> RapidCursor::resolve_blob_from_chunk(uint32_t c
   return {nullptr, 0};
 }
 
+namespace {
+// Rows a batch may still add to every projected chunk. The batch size is a request;
+// the chunk capacity is the limit: the IMCU has already consumed the physical rows
+// when add() refuses, so an unclamped request loses them.
+// `assume_empty` is for callers that clear the target before filling it.
+size_t ChunkRoom(std::pmr::vector<ShannonBase::Executor::ColumnChunk> &chunks, const std::vector<uint32_t> &projection,
+                 bool assume_empty = false) {
+  size_t room = std::numeric_limits<size_t>::max();
+  for (uint32_t col : projection) {
+    if (col >= chunks.size() || !chunks[col].valid()) return 0;
+    auto &chunk = chunks[col];
+    const size_t used = assume_empty ? 0 : chunk.size();
+    room = std::min(room, chunk.capacity() > used ? chunk.capacity() - used : 0);
+  }
+  return room;
+}
+
+inline bool QueryKilled(const Rapid_scan_context *context) {
+  return context != nullptr && context->m_thd != nullptr && context->m_thd->killed;
+}
+}  // namespace
+
 int RapidCursor::next(uchar *buf) {
   // ut_a(m_inited.load(std::memory_order_acquire));
   if (!m_inited.load(std::memory_order_acquire)) init();
@@ -606,6 +628,7 @@ int RapidCursor::next(size_t batch_size, std::pmr::vector<ShannonBase::Executor:
     const std::vector<uint32_t> empty_proj;  // no column data needed while skipping
     scan_batch_internal(static_cast<size_t>(to_skip), empty_proj, skip_recv);
 
+    if (QueryKilled(m_scan_context.get())) return HA_ERR_QUERY_INTERRUPTED;
     if (m_rows_skipped < m_scan_offset) return HA_ERR_END_OF_FILE;
     if (m_scan_state.exhausted.load(std::memory_order_acquire)) return HA_ERR_END_OF_FILE;
   }
@@ -624,7 +647,8 @@ int RapidCursor::next(size_t batch_size, std::pmr::vector<ShannonBase::Executor:
   }
 
   // Phase 3: columnar batch fetch
-  const std::vector<uint32_t> projection_cols = projection_columns();
+  // By reference: the list is rebuilt only when m_proj_cols_dirty is set.
+  const std::vector<uint32_t> &projection_cols = projection_columns();
 
 #ifndef NDEBUG
   for (uint32_t col_id : projection_cols) {
@@ -632,8 +656,20 @@ int RapidCursor::next(size_t batch_size, std::pmr::vector<ShannonBase::Executor:
   }
 #endif
 
+  batch_size = std::min(batch_size, ChunkRoom(col_chunks, projection_cols));
+  if (batch_size == 0) {
+    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid batch scan: output chunk has no room");
+    return HA_ERR_GENERIC;
+  }
+
   ColumnChunkRecv receiver{this, projection_cols, col_chunks, m_batch_row_ids, read_cnt};
   scan_batch_internal(batch_size, projection_cols, receiver);
+  // A refused append means rows were already consumed from the IMCUs.
+  if (receiver.append_failed) {
+    my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid batch scan overflowed its output chunk");
+    return HA_ERR_GENERIC;
+  }
+  if (QueryKilled(m_scan_context.get())) return HA_ERR_QUERY_INTERRUPTED;
   if (read_cnt > 0) {
     m_rows_returned += static_cast<ha_rows>(read_cnt);
     return ShannonBase::SHANNON_SUCCESS;
@@ -673,6 +709,9 @@ std::unique_ptr<Executor::Morsel::ParallelSource> RapidCursor::create_parallel_s
       if (imcu) row_bound += imcu->get_row_count();
     }
     if (row_bound < 2 * Executor::Morsel::ParallelQueue::kClaimRows) return {};
+    // Collect() cannot hold more candidates than this; past it the source used to
+    // return an empty result instead of falling back to the serial path.
+    if (row_bound > Executor::Morsel::ParallelIndexScan::kMaxCandidates) return {};
     return std::make_unique<Executor::Morsel::ParallelIndexScan>(
         memory, m_scan_context.get(), m_scan_imcus, m_scan_predicates, fields,
         static_cast<uint32_t>(m_rpd_table->meta().rows_per_imcu), index->impl(), row_bound);
@@ -692,8 +731,12 @@ int RapidCursor::next_projected(size_t capacity, std::pmr::vector<Executor::Colu
   if (m_scan_state.exhausted.load(std::memory_order_acquire)) return HA_ERR_END_OF_FILE;
   for (uint32_t col : projection)
     if (col >= chunks.size() || !chunks[col].valid()) return HA_ERR_GENERIC;
+  capacity = std::min(capacity, ChunkRoom(chunks, projection));
+  if (capacity == 0) return HA_ERR_GENERIC;
   ColumnChunkRecv receiver{this, projection, chunks, m_batch_row_ids, rows};
   scan_batch_internal(capacity, projection, receiver);
+  if (receiver.append_failed) return HA_ERR_GENERIC;
+  if (QueryKilled(m_scan_context.get())) return HA_ERR_QUERY_INTERRUPTED;
   for (uint32_t col : projection)
     if (chunks[col].failed() || chunks[col].size() != rows) return HA_ERR_GENERIC;
   m_rows_returned += rows;
@@ -837,6 +880,11 @@ int RapidCursor::index_init(uint keynr, bool sorted) {
   if (m_scan_context) m_scan_context->m_extra_info.m_keynr = m_active_index;
 
   reset_index_runtime_state(false);
+  // init() is a no-op on a live cursor, so a re-init (correlated subquery, LATERAL,
+  // nested-loop inner side) would inherit the previous pass's OFFSET/LIMIT state.
+  m_rows_skipped = 0;
+  m_rows_returned = 0;
+  m_last_returned_rowid = INVALID_ROW_ID;
   if (!bind_active_index_iterator()) {
     (void)end();
     return HA_ERR_KEY_NOT_FOUND;
@@ -862,7 +910,9 @@ bool RapidCursor::visible_index_key_matches(Imcu *imcu, const std::vector<uint32
                                             size_t key_length) {
   const auto *desc = m_rpd_table->get_art_index_descriptor(static_cast<uint>(m_active_index));
   if (!desc) return false;
-  if (!m_rpd_table->get_index(desc->key_name)->has_versioned_keys()) return true;
+  const auto *key_index = m_rpd_table->get_index(desc->key_name);
+  if (key_index == nullptr) return false;  // fail closed rather than dereference
+  if (!key_index->has_versioned_keys()) return true;
   const auto &meta = m_rpd_table->meta();
   // Each BLOB Field retains its payload pointer until key encoding is done.
   std::vector<std::vector<uchar>> payloads(desc->parts.size());
@@ -1096,6 +1146,7 @@ int RapidCursor::serve_index_row(bool reverse) {
     // Window drained but the iterator may still have candidates: a window whose
     // every candidate was invisible yields an empty batch without exhausting.
     const int rc = fill_index_batch(reverse);
+    if (rc != ShannonBase::SHANNON_SUCCESS && rc != HA_ERR_END_OF_FILE) return rc;
     if (rc != ShannonBase::SHANNON_SUCCESS && m_index_exhausted) return HA_ERR_END_OF_FILE;
   }
 }
@@ -1134,7 +1185,9 @@ int RapidCursor::index_next_batch(size_t batch_size, std::pmr::vector<ShannonBas
     static const std::vector<uint32_t> kCountOnly;
     while (m_rows_skipped < m_scan_offset) {
       if (m_index_exhausted) return HA_ERR_END_OF_FILE;
-      fill_index_batch(reverse, static_cast<size_t>(m_scan_offset - m_rows_skipped), &kCountOnly);
+      if (QueryKilled(m_scan_context.get())) return HA_ERR_QUERY_INTERRUPTED;
+      const int rc = fill_index_batch(reverse, static_cast<size_t>(m_scan_offset - m_rows_skipped), &kCountOnly);
+      if (rc != ShannonBase::SHANNON_SUCCESS && rc != HA_ERR_END_OF_FILE) return rc;
       m_rows_skipped += m_scan_state.batch_size;
     }
     m_scan_state.commit_batch(0);
@@ -1150,38 +1203,41 @@ int RapidCursor::index_next_batch(size_t batch_size, std::pmr::vector<ShannonBas
     if (static_cast<ha_rows>(batch_size) > remaining) batch_size = static_cast<size_t>(remaining);
   }
 
+  // The batch is materialized straight into the caller's chunks, so their shape
+  // and capacity must hold before any index position is consumed.
+  const auto &batch_proj = projection_columns();
+  if (col_chunks.size() != m_col_chunks.size()) return HA_ERR_INTERNAL_ERROR;
+  size_t capacity_rows = batch_size;
+  for (uint32_t col : batch_proj) {
+    if (col >= col_chunks.size()) return HA_ERR_INTERNAL_ERROR;
+    const auto &target = col_chunks[col];
+    if (!target.valid() || target.width() != m_rpd_table->meta().fields[col].normalized_length)
+      return HA_ERR_INTERNAL_ERROR;
+    capacity_rows = std::min(capacity_rows, target.remaining());
+  }
+  if (capacity_rows == 0) return HA_ERR_GENERIC;
+
   if (m_scan_state.row_in_batch >= m_scan_state.batch_size) {
     // The cap counts index entries, not surviving rows, so a window whose
     // candidates are all invisible yields nothing without exhausting the
     // index. Keep filling rather than reporting the scan finished.
     for (;;) {
       if (m_index_exhausted) return HA_ERR_END_OF_FILE;
-      const int rc = fill_index_batch(reverse, batch_size);
+      if (QueryKilled(m_scan_context.get())) return HA_ERR_QUERY_INTERRUPTED;
+      const int rc = fill_index_batch(reverse, capacity_rows, nullptr, &col_chunks);
       if (rc == ShannonBase::SHANNON_SUCCESS) break;
+      if (rc != HA_ERR_END_OF_FILE) return rc;
       if (m_index_exhausted) return HA_ERR_END_OF_FILE;
     }
+  } else {
+    // An undrained row-mode batch lives in m_col_chunks and cannot be handed
+    // over without a copy; only a failed populate can leave that state behind.
+    return HA_ERR_INTERNAL_ERROR;
   }
   if (m_scan_state.batch_size == 0) return HA_ERR_END_OF_FILE;
 
   // A short batch is normal at the end of the index; only an empty one is EOF.
-  read_cnt = std::min(batch_size, m_scan_state.batch_size);
-
-  // The handler cursor can outlive the query's allocator. Copy into the
-  // caller's charged buffers; swapping would both cross PMR resources and
-  // retain operator-owned charges in the table cache after query teardown.
-  if (col_chunks.size() != m_col_chunks.size()) return HA_ERR_INTERNAL_ERROR;
-  for (size_t col = 0; col < col_chunks.size(); ++col) {
-    auto &target = col_chunks[col];
-    if (!target.valid()) continue;
-    target.clear();
-    if (!target.append_range_from(m_col_chunks[col], 0, read_cnt)) {
-      // Layouts the bulk copy refuses keep the row-wise contract. It validates
-      // before writing, so nothing was applied.
-      for (size_t row = 0; row < read_cnt; ++row) {
-        if (!target.append_from(m_col_chunks[col], row)) return HA_ERR_INTERNAL_ERROR;
-      }
-    }
-  }
+  read_cnt = m_scan_state.batch_size;
   m_scan_state.commit_batch(0);
   m_scan_state.row_in_batch = 0;
   m_rows_returned += read_cnt;
@@ -1199,11 +1255,8 @@ int RapidCursor::index_prev(uchar * /*buf*/) {
   return serve_index_row(/*reverse=*/true);
 }
 
-int RapidCursor::fill_index_batch(bool reverse, size_t max_rows, const std::vector<uint32_t> *proj_override) {
-  for (auto &chunk : m_col_chunks) chunk.clear();
-  m_batch_row_ids.clear();
-  m_scan_state.commit_batch(0);
-
+int RapidCursor::fill_index_batch(bool reverse, size_t max_rows, const std::vector<uint32_t> *proj_override,
+                                  std::pmr::vector<Executor::ColumnChunk> *target) {
   if (!m_index_iter || !m_scan_context) {
     m_index_exhausted = true;
     return HA_ERR_END_OF_FILE;
@@ -1212,14 +1265,32 @@ int RapidCursor::fill_index_batch(bool reverse, size_t max_rows, const std::vect
   const size_t rows_per_imcu = m_rpd_table->meta().rows_per_imcu;
   const auto &proj = proj_override != nullptr ? *proj_override : projection_columns();
 
+  // The batch path materializes straight into the caller's buffers.
+  auto &sink = target != nullptr ? *target : m_col_chunks;
+  for (auto &chunk : sink) chunk.clear();
+  m_batch_row_ids.clear();
+  m_scan_state.commit_batch(0);
+
   const auto scan_proj = index_projection(proj);
   size_t received = 0;
-  ColumnChunkRecv receiver{this, proj, m_col_chunks, m_batch_row_ids, received};
+  ColumnChunkRecv receiver{this, proj, sink, m_batch_row_ids, received};
+
+  // Candidate window: the row-at-a-time callers keep the small default, the batch
+  // path gets the size it asked for, capped by kIndexScanMaxBatch and by the sink.
+  size_t window =
+      max_rows == std::numeric_limits<size_t>::max() ? kIndexScanBatch : std::min(max_rows, kIndexScanMaxBatch);
+  if (!proj.empty()) window = std::min(window, ChunkRoom(sink, proj, /*assume_empty=*/true));
+  window = std::max<size_t>(window, 1);
+
+  // ART key bytes are only read by the versioned-key re-check.
+  const auto *key_desc = m_rpd_table->get_art_index_descriptor(static_cast<uint>(m_active_index));
+  const auto *key_index = key_desc != nullptr ? m_rpd_table->get_index(key_desc->key_name) : nullptr;
+  const bool need_keys = key_desc != nullptr && (key_index == nullptr || key_index->has_versioned_keys());
 
   // Offsets of the current same-IMCU run, materialized in one shot on flush.
   std::vector<uint32_t> run_offsets;
   std::vector<std::vector<uchar>> run_keys;
-  run_offsets.reserve(kIndexScanBatch);
+  run_offsets.reserve(window);
   size_t run_imcu = std::numeric_limits<size_t>::max();
   Imcu *run_imcu_ptr = nullptr;
 
@@ -1230,8 +1301,9 @@ int RapidCursor::fill_index_batch(bool reverse, size_t max_rows, const std::vect
         const auto offset = static_cast<uint32_t>(rid % rows_per_imcu);
         while (candidate < run_offsets.size() && run_offsets[candidate] != offset) ++candidate;
         if (candidate == run_offsets.size()) return;
-        const auto &key = run_keys[candidate++];
-        if (visible_index_key_matches(run_imcu_ptr, scan_proj, row_data, key.data(), key.size()))
+        const size_t cand = candidate++;
+        if (!need_keys ||
+            visible_index_key_matches(run_imcu_ptr, scan_proj, row_data, run_keys[cand].data(), run_keys[cand].size()))
           receiver.on_row(rid, row_data);
       };
       run_imcu_ptr->scan_rows_vectorized(m_scan_context.get(), run_offsets, m_scan_predicates, scan_proj, collector);
@@ -1243,7 +1315,7 @@ int RapidCursor::fill_index_batch(bool reverse, size_t max_rows, const std::vect
   const uchar *key = nullptr;
   uint32_t key_len = 0;
   row_id_t rowid = INVALID_ROW_ID;
-  const size_t fill_rows = std::min(max_rows, kIndexScanBatch);
+  const size_t fill_rows = window;
   for (size_t seen = 0; seen < fill_rows; ++seen) {
     const bool found =
         reverse ? m_index_iter->prev(&key, &key_len, &rowid) : m_index_iter->next(&key, &key_len, &rowid);
@@ -1261,10 +1333,17 @@ int RapidCursor::fill_index_batch(bool reverse, size_t max_rows, const std::vect
     }
     if (run_imcu_ptr != nullptr) {
       run_offsets.push_back(static_cast<uint32_t>(rowid % rows_per_imcu));
-      run_keys.emplace_back(key, key + key_len);
+      if (need_keys) run_keys.emplace_back(key, key + key_len);
     }
   }
   flush_run();
+
+  if (receiver.append_failed) {
+    // Candidates were consumed from the iterator but could not be stored.
+    m_batch_row_ids.clear();
+    m_scan_state.commit_batch(0);
+    return HA_ERR_INTERNAL_ERROR;
+  }
 
   m_scan_state.commit_batch(m_batch_row_ids.size());
   return m_batch_row_ids.empty() ? HA_ERR_END_OF_FILE : ShannonBase::SHANNON_SUCCESS;
@@ -1286,6 +1365,9 @@ size_t RapidCursor::scan_batch_internal(size_t batch_size, const std::vector<uin
   recv.on_batch_begin();
 
   while (st.curr_imcu_idx < m_scan_imcus.size() && remaining > 0 && recv.accept_more()) {
+    // A selective predicate can walk the whole table inside one batch, so honour
+    // KILL / max_execution_time here.
+    if (m_scan_context && m_scan_context->m_thd && m_scan_context->m_thd->killed) break;
     auto imcu = m_scan_imcus[st.curr_imcu_idx];
     if (!imcu) {
       st.curr_imcu_idx++;
@@ -1306,9 +1388,12 @@ size_t RapidCursor::scan_batch_internal(size_t batch_size, const std::vector<uin
     auto collector_func = [&](row_id_t rowid, const std::vector<const uchar *> &row_data) {
       recv.on_row(rowid, row_data);
     };
+    const size_t imcu_rows = imcu->get_row_count();
+    // scan()'s limit is a physical range; the output quota travels as max_emitted.
+    const size_t physical_range = imcu_rows - std::min(st.curr_imcu_offset, imcu_rows);
     size_t rows_before = recv.rows_received();
-    size_t rows_examined = imcu->scan(m_scan_context.get(), st.curr_imcu_offset, remaining, m_scan_predicates,
-                                      projection_cols, collector_func);
+    size_t rows_examined = imcu->scan(m_scan_context.get(), st.curr_imcu_offset, physical_range, m_scan_predicates,
+                                      projection_cols, collector_func, remaining);
     size_t rows_returned = recv.rows_received() - rows_before;
 
     // Quota tracking uses rows actually returned (callback → on_row).
@@ -1316,7 +1401,6 @@ size_t RapidCursor::scan_batch_internal(size_t batch_size, const std::vector<uin
     // Row-index accounting uses rows examined (all rows the scan touched).
     st.curr_row_idx.fetch_add(rows_examined, std::memory_order_release);
 
-    size_t imcu_rows = imcu->get_row_count();
     if (st.curr_imcu_offset + rows_examined >= imcu_rows) {
       st.curr_imcu_idx++;
       st.curr_imcu_offset = 0;
@@ -1345,11 +1429,25 @@ ColumnChunkRecv::ColumnChunkRecv(RapidCursor *c, const std::vector<uint32_t> &pr
 }
 
 void ColumnChunkRecv::on_row(row_id_t rowid, const std::vector<const uchar *> &row_data) {
+  if (append_failed) return;
+  // Check every target column first: a mid-row failure would leave the chunks
+  // with different row counts.
   for (size_t idx = 0; idx < projection_cols.size(); ++idx) {
-    auto col_idx = projection_cols[idx];
+    const auto col_idx = projection_cols[idx];
     if (col_idx >= chunks.size()) continue;
     auto &chunk = chunks[col_idx];
-    if (!chunk.add(row_data[idx], projection_lengths[idx], row_data[idx] == nullptr)) return;  // chunk full
+    if (!chunk.valid() || chunk.full()) {
+      append_failed = true;
+      return;
+    }
+  }
+  for (size_t idx = 0; idx < projection_cols.size(); ++idx) {
+    const auto col_idx = projection_cols[idx];
+    if (col_idx >= chunks.size()) continue;
+    if (!chunks[col_idx].add(row_data[idx], projection_lengths[idx], row_data[idx] == nullptr)) {
+      append_failed = true;
+      return;
+    }
   }
   row_ids.push_back(rowid);
   ++read_cnt;

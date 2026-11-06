@@ -98,6 +98,10 @@ class ParallelScan final : public ParallelSource {
  */
 class ParallelIndexScan final : public ParallelSource {
  public:
+  /// Upper bound on index candidates one source holds; create_parallel_source()
+  /// refuses to build a source above it rather than return an empty result.
+  static constexpr size_t kMaxCandidates = size_t{1} << 20;
+
   struct Run {
     size_t imcu;          // Index into the cursor's IMCU list.
     uint64_t ordinal;     // Index-order position of offsets[begin].
@@ -136,6 +140,8 @@ class ParallelIndexScan final : public ParallelSource {
   std::pmr::vector<uint32_t> m_offsets;
   std::pmr::vector<Run> m_runs;
   std::once_flag m_collect;
+  /// Set when Collect() gave up: an empty run list looks exactly like an empty index.
+  std::atomic<bool> m_overflow{false};
   std::atomic<size_t> m_ready_runs{0};
   std::atomic<size_t> m_next_run{0};
   Imcs::Index::ART *m_index;
@@ -260,13 +266,14 @@ class VectorizedTableScanIterator final : public TableRowIterator, public BatchR
     for (auto &chunk : m_col_chunks) chunk.clear();
   }
 
-  void UpdatePerformanceMetrics(std::chrono::high_resolution_clock::time_point start_time);
+  /// Folds one batch into the metrics and returns its latency in ms.
+  double UpdatePerformanceMetrics(std::chrono::high_resolution_clock::time_point start_time);
 
-  /**
-   * Adapt batch size based on runtime performance characteristics
-   * Implements dynamic batch size adjustment for optimal performance
-   */
-  void AdaptBatchSize();
+  /// Feedback controller for the output batch size; see the .cpp for the policy.
+  void AdaptBatchSize(double batch_ms);
+
+  /// Restart the slow-start ramp (Init / rescan).
+  void ResetBatchRamp();
 
   /**
    * Populate the current row from batch data to MySQL row format
@@ -327,6 +334,9 @@ class VectorizedTableScanIterator final : public TableRowIterator, public BatchR
   int m_index_no{-1};
   bool m_reverse{false};
 
+  /// Caller-owned Rows_examined counter (slow log / EXPLAIN ANALYZE); may be null.
+  ha_rows *m_examined_rows{nullptr};
+
   /// Cached IMCU snapshot used to resolve out-of-line varlen references.
   /// RpdTable::get_imcus() copies the whole vector (and bumps every shared_ptr
   /// refcount) under a lock, so calling it per row made varlen materialization
@@ -342,6 +352,12 @@ class VectorizedTableScanIterator final : public TableRowIterator, public BatchR
 
   size_t m_batch_size;            ///< Current batch size being used
   size_t m_opt_batch_size;        ///< Calculated optimal batch size
+  size_t m_min_batch_size{0};     ///< Floor: one IMCU kernel block
+  size_t m_max_batch_size{0};     ///< Ceiling: the allocated chunk capacity
+  size_t m_chunk_capacity{0};     ///< Rows each output ColumnChunk was allocated for
+  bool m_in_ramp{true};           ///< Slow start still running
+  double m_batch_ms_ewma{0.0};    ///< Windowed batch latency, reset on every resize
+  size_t m_adapt_samples{0};      ///< Batches folded into the EWMA since the last decision
   size_t m_curr_batch_size{0};    ///< Size of the current batch being processed
   size_t m_curr_row_in_batch{0};  ///< Current row index within the batch
   bool m_batch_exhausted{true};   ///< Flag indicating if current batch is fully processed

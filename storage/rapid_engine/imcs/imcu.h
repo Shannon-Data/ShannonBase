@@ -433,17 +433,19 @@ class Imcu : public MemoryObject {
   /**
    * @param context: scan context
    * @param offset : where start from
-   * @param limit : how many rows fetched.
+   * @param limit : how many PHYSICAL rows to examine (not an output quota)
    * @param predicates: filter conditions
    * @param projection: list of projected columns
    * @param callback: row callback (arbitrary callable; NOT type-erased via std::function)
-   * @return number of scanned rows
+   * @param max_emitted: stop once this many rows passed the filter
+   * @return physical rows examined; the next scan resumes at offset + return
    */
   template <typename CallBack>
   inline size_t scan(Rapid_scan_context *context, size_t offset, size_t limit,
                      const std::vector<std::unique_ptr<Predicate>> &predicates, const std::vector<uint32> &projection,
-                     CallBack &&callback) {
-    return scan_range_vectorized(context, offset, limit, predicates, projection, std::forward<CallBack>(callback));
+                     CallBack &&callback, size_t max_emitted = SIZE_MAX) {
+    return scan_range_vectorized(context, offset, limit, predicates, projection, std::forward<CallBack>(callback),
+                                 max_emitted);
   }
 
   /**
@@ -586,7 +588,9 @@ class Imcu : public MemoryObject {
         const row_id_t global_row_id = m_header.start_row + local_row_id;
         callback(global_row_id, row_buffer);
         context->rows_returned++;
-        if (context->limit > 0 && context->rows_returned >= context->limit) return scanned;
+        // `scanned` already counts the whole block; report only up to row i or the
+        // rest of the block is skipped for good.
+        if (context->limit > 0 && context->rows_returned >= context->limit) return scanned - batch_size + i + 1;
       }
     }
 
@@ -896,11 +900,11 @@ class Imcu : public MemoryObject {
   template <typename CallBack>
   size_t scan_range_vectorized(Rapid_scan_context *context, size_t start_offset, size_t limit,
                                const std::vector<std::unique_ptr<Predicate>> &predicates,
-                               const std::vector<uint32> &projection, CallBack &&callback) {
+                               const std::vector<uint32> &projection, CallBack &&callback, size_t max_emitted) {
     size_t num_rows = get_row_count();
     if (start_offset >= num_rows) return 0;
 
-    size_t end = std::min(start_offset + limit, num_rows);
+    size_t end = start_offset + std::min(limit, num_rows - start_offset);
     // Same working set as scan_rows_vectorized(): it lives on the context so a
     // repeated scan does not rebuild it.
     const size_t proj_size = projection.size();
@@ -911,6 +915,8 @@ class Imcu : public MemoryObject {
     std::vector<const uchar *> &row_buffer = context->row_buffer;
     std::vector<VisibleCell> &visible_cells = context->visible_cells;
     size_t scanned = 0;
+    size_t emitted = 0;
+    if (max_emitted == 0) return 0;
 
     // Projection is fixed for the whole scan: resolve each column's CU and NULL
     // bitmap once here rather than re-indexing m_cu_array / m_header.null_masks
@@ -942,8 +948,10 @@ class Imcu : public MemoryObject {
         std::memcpy(predicate_mask.data, visibility_mask.data, byte_count);
       }
 
-      scanned += batch_size;
-      if (predicate_mask.is_all_false()) continue;
+      if (predicate_mask.is_all_false()) {
+        scanned += batch_size;
+        continue;
+      }
       // Whole-chunk pass (no filter, nothing hidden): skip the per-row bit probe.
       const bool all_pass = predicate_mask.is_all_true();
 
@@ -966,9 +974,13 @@ class Imcu : public MemoryObject {
 
         const row_id_t global_row_id = m_header.start_row + local_row_id;
         callback(global_row_id, row_buffer);
+        ++emitted;
         context->rows_returned++;
-        if (context->limit > 0 && context->rows_returned >= context->limit) return scanned;
+        if (emitted >= max_emitted || (context->limit > 0 && context->rows_returned >= context->limit))
+          return scanned + i + 1;
       }
+      // Only a fully walked chunk advances the counter in bulk.
+      scanned += batch_size;
     }
 
     return scanned;
