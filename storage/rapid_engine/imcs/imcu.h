@@ -508,7 +508,6 @@ class Imcu : public MemoryObject {
   size_t scan_rows_vectorized(Rapid_scan_context *context, const std::vector<uint32_t> &row_offsets,
                               const std::vector<std::unique_ptr<Predicate>> &predicates,
                               const std::vector<uint32> &projection, CallBack &&callback) {
-    static constexpr size_t kScanBatchSize = 1024;
     if (row_offsets.empty()) return 0;
 
     // The buffers live on the scan context so that a repeated scan -- above
@@ -532,20 +531,20 @@ class Imcu : public MemoryObject {
     }
     const char *const table_name = context->m_table_name.c_str();
 
-    uint32_t batch_offsets[kScanBatchSize];
-    uint32_t batch_lengths[kScanBatchSize];
+    uint32_t batch_offsets[SHANNON_BATCH_NUM];
+    uint32_t batch_lengths[SHANNON_BATCH_NUM];
     // Reusable buffer to avoid per-chunk heap allocation.
     std::vector<row_id_t> &ids = context->scan_ids;
-    ids.reserve(kScanBatchSize);
+    ids.reserve(SHANNON_BATCH_NUM);
 
     size_t scanned = 0;
 
-    for (size_t chunk_start = 0; chunk_start < row_offsets.size(); chunk_start += kScanBatchSize) {
+    for (size_t chunk_start = 0; chunk_start < row_offsets.size(); chunk_start += SHANNON_BATCH_NUM) {
       // Keep version selection, NULL bits, predicates and the callback's
       // copies in one read critical section. Publishing a new slot atomically
       // does not make an unsynchronized memcpy of that slot safe.
       std::shared_lock mutation_lock(m_mutation_mutex);
-      size_t batch_size = std::min(kScanBatchSize, row_offsets.size() - chunk_start);
+      size_t batch_size = std::min<size_t>(SHANNON_BATCH_NUM, row_offsets.size() - chunk_start);
       ids.assign(row_offsets.begin() + chunk_start, row_offsets.begin() + chunk_start + batch_size);
 
       m_header.row_directory->get_offsets_for_rows(ids, batch_offsets, batch_lengths);
@@ -898,7 +897,6 @@ class Imcu : public MemoryObject {
   size_t scan_range_vectorized(Rapid_scan_context *context, size_t start_offset, size_t limit,
                                const std::vector<std::unique_ptr<Predicate>> &predicates,
                                const std::vector<uint32> &projection, CallBack &&callback) {
-    static constexpr size_t kScanBatchSize = 1024;
     size_t num_rows = get_row_count();
     if (start_offset >= num_rows) return 0;
 
@@ -928,9 +926,9 @@ class Imcu : public MemoryObject {
     }
     const char *const table_name = context->m_table_name.c_str();
 
-    for (size_t chunk_start = start_offset; chunk_start < end; chunk_start += kScanBatchSize) {
+    for (size_t chunk_start = start_offset; chunk_start < end; chunk_start += SHANNON_BATCH_NUM) {
       std::shared_lock mutation_lock(m_mutation_mutex);
-      size_t batch_size = std::min(kScanBatchSize, end - chunk_start);
+      size_t batch_size = std::min<size_t>(SHANNON_BATCH_NUM, end - chunk_start);
 
       bit_array_t &visibility_mask = Rapid_scan_context::reuse_mask(context->visibility_mask, batch_size);
       check_visibility_batch(context, chunk_start, batch_size, visibility_mask);

@@ -70,16 +70,21 @@ namespace Executor {
 inline size_t SelectBatchRows(size_t row_bytes, size_t available_bytes, size_t live_batches = 1) {
   row_bytes = std::max<size_t>(1, row_bytes);
   live_batches = std::max<size_t>(1, live_batches);
+
   if (row_bytes > SIZE_MAX / live_batches) return 0;
+
   const size_t footprint = row_bytes * live_batches;
   const size_t memory_rows = available_bytes / footprint;
+
   if (memory_rows == 0) return 0;
+
   // Use only a fraction of L2: keys, null bits and downstream state also need it.
   const size_t cache_bytes = std::max<size_t>(1, CACHE_L2_SIZE / 4);
   size_t rows = std::min<size_t>({8192, memory_rows, std::max<size_t>(1, cache_bytes / footprint)});
   // Whole-byte columns of any width then end at cache/SIMD boundaries. Small
   // grants may serve fewer rows; alignment must never round above the grant.
   const size_t quantum = std::max<size_t>({1, size_t{CACHE_LINE_SIZE}, size_t{SHANNON_SIMD_ALIGN}});
+
   if (rows >= quantum) rows -= rows % quantum;
   return rows;
 }

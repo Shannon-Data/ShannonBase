@@ -120,9 +120,42 @@
     #error "Unsupported platform for ShannonBase"
 #endif  // platform
 
-#if defined(SHANNON_SSE_VECT_SUPPORTED)   ||  defined(SHANNON_AVX_VECT_SUPPORTED)   || \
-    defined(SHANNON_AVX512_VECT_SUPPORTED)||  defined(SHANNON_ARM_VECT_SUPPORTED)   || \
-    defined(SHANNON_ARM_SVE_SUPPORTED)
+// clang-format off
+// ISA capability macros for the hand-written kernels in utils/SIMD_Impl.h:
+// each answers "may this build emit that instruction set", never "does this CPU
+// have it". Runtime selection still goes through SIMD::detect_simd_support().
+#if defined(SHANNON_X86_PLATFORM)
+    #if defined(__SSE2__) || defined(_M_X64) || (defined(_M_IX86_FP) && _M_IX86_FP >= 2)
+        #define SHANNON_HAVE_SSE2 1
+    #endif
+    #if defined(__SSE4_2__) || defined(__AVX__) || defined(SHANNON_AVX_VECT_SUPPORTED)
+        #define SHANNON_HAVE_SSE42 1
+    #endif
+    #if defined(__AVX__) || (defined(_MSC_VER) && defined(SHANNON_AVX_VECT_SUPPORTED))
+        #define SHANNON_HAVE_AVX 1
+    #endif
+    #if defined(__AVX2__)
+        #define SHANNON_HAVE_AVX2 1
+    #endif
+    #if defined(__GNUC__) || defined(__clang__)
+        // Compile AVX2 kernels as function-level ISA variants so a baseline
+        // binary still contains them.
+        #define SHANNON_RUNTIME_AVX2 1
+        #define SHANNON_TARGET_AVX2 __attribute__((target("avx2")))
+    #else
+        #define SHANNON_TARGET_AVX2
+    #endif
+#elif defined(SHANNON_ARM_VECT_SUPPORTED)
+    #define SHANNON_HAVE_NEON 1
+    #if defined(__aarch64__) || defined(_M_ARM64)
+        #define SHANNON_HAVE_NEON_A64 1   // vaddvq_*, vminq_f64, 64-bit lanes are A64-only
+    #endif
+#endif
+// clang-format on
+
+#if defined(SHANNON_SSE_VECT_SUPPORTED) || defined(SHANNON_AVX_VECT_SUPPORTED) ||    \
+    defined(SHANNON_AVX512_VECT_SUPPORTED) || defined(SHANNON_ARM_VECT_SUPPORTED) || \
+    defined(SHANNON_ARM_SVE_SUPPORTED) || defined(SHANNON_HAVE_SSE2)
     #define SHANNON_VECTORIZE_SUPPORT
 #endif
 
@@ -130,7 +163,7 @@
     #define SHANNON_VECTOR_WIDTH 512
 #elif defined(SHANNON_AVX_VECT_SUPPORTED)
     #define SHANNON_VECTOR_WIDTH 256
-#elif defined(SHANNON_SSE_VECT_SUPPORTED)
+#elif defined(SHANNON_SSE_VECT_SUPPORTED) || defined(SHANNON_HAVE_SSE2)
     #define SHANNON_VECTOR_WIDTH 128
 #elif defined(SHANNON_ARM_VECT_SUPPORTED) || defined(SHANNON_ARM_SVE_SUPPORTED)
     #define SHANNON_VECTOR_WIDTH 128    // NEON = 128-bit; SVE >= 128-bit
@@ -251,6 +284,8 @@ inline bool mul_overflow(T a, U b, R *r) {
     #define SHANNON_SIMD_ALIGN  32   // _mm256_load_* requires 32-byte alignment
 #elif defined(SHANNON_SSE_VECT_SUPPORTED)
     #define SHANNON_SIMD_ALIGN  16   // _mm_load_*   requires 16-byte alignment
+#elif defined(SHANNON_HAVE_SSE2)
+    #define SHANNON_SIMD_ALIGN  16   // SSE2 is the x86-64 baseline
 #elif defined(SHANNON_ARM_VECT_SUPPORTED)
     #define SHANNON_SIMD_ALIGN  16   // vld1q_*: no hw requirement, 16 is optimal
 #else
@@ -284,8 +319,8 @@ constexpr int PREFETCH_AHEAD = 2;
 #  define SHANNON_PREFETCH_R(addr)  (void)(addr)  /* disabled */
 #  define SHANNON__PREFETCH_RW(addr)  (void)(addr)  /* disabled */
 #else
-#  if defined(_MSC_VER) && (defined(_M_X64) || defined(_M_I86))  /* _mm_prefetch() is not defined outside of x86/x64 */
-#    include <mmintrin.h>   /* https://msdn.microsoft.com/fr-fr/library/84szxsww(v=vs.90).aspx */
+#  if defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86))  /* _mm_prefetch() is not defined outside of x86/x64 */
+#    include <xmmintrin.h>   /* _mm_prefetch lives here, not in mmintrin.h */
 #    define SHANNON_PREFETCH_L1(addr)  _mm_prefetch((const char*)(addr), _MM_HINT_T0)
 #    define SHANNON_PREFETCH_L2(addr)  _mm_prefetch((const char*)(addr), _MM_HINT_T1)
 #    define SHANNON_PREFETCH_L3(addr)  _mm_prefetch((const char*)(addr), _MM_HINT_T2)

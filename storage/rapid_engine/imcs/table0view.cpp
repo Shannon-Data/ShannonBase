@@ -669,8 +669,9 @@ std::unique_ptr<Executor::Morsel::ParallelSource> RapidCursor::create_parallel_s
     // the source, so a caller that abandons the parallel phase never pays for a
     // full index traversal.
     size_t row_bound = 0;
-    for (const auto &imcu : m_scan_imcus)
+    for (const auto &imcu : m_scan_imcus) {
       if (imcu) row_bound += imcu->get_row_count();
+    }
     if (row_bound < 2 * Executor::Morsel::ParallelQueue::kClaimRows) return {};
     return std::make_unique<Executor::Morsel::ParallelIndexScan>(
         memory, m_scan_context.get(), m_scan_imcus, m_scan_predicates, fields,
