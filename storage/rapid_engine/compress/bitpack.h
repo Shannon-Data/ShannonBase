@@ -68,6 +68,17 @@ class BitPackedColumn {
   /// Largest code the configured width can hold.
   uint64_t max_code() const { return m_width == 64 ? UINT64_MAX : ((uint64_t{1} << m_width) - 1); }
 
+  /**
+   * Sets bit i of `bits` for every row in [row_begin, row_begin + count) whose
+   * value lies in [low, high]. The caller zeroes the mask, and `bits_bytes`
+   * must cover it. Bounds outside [bias, bias + max_code] simply match nothing.
+   *
+   * Widths 8/16/32 read the stream a word at a time; every other width decodes
+   * one code per row.
+   */
+  bool MatchValueRange(size_t row_begin, size_t count, int64_t low, int64_t high, uint8_t *bits,
+                       size_t bits_bytes) const;
+
  private:
   uint8_t *m_buffer{nullptr};
   size_t m_rows{0};

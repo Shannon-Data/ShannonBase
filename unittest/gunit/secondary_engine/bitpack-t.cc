@@ -120,5 +120,45 @@ TEST(BitPackedColumnTest, AttachValidatesArguments) {
   EXPECT_FALSE(column.SetCode(8, 1));
 }
 
+TEST(BitPackedColumnTest, MatchValueRangeAgreesWithTheReference) {
+  constexpr size_t kRows = 53;
+  for (uint8_t width = 1; width <= BitPackedColumn::kMaxWidth; ++width) {
+    std::vector<uint8_t> buffer(BitPackedColumn::BytesFor(kRows, width), 0);
+    BitPackedColumn column;
+    ASSERT_TRUE(column.Attach(buffer.data(), buffer.size(), width, /*bias=*/-7, kRows));
+
+    std::vector<int64_t> values(kRows);
+    for (size_t row = 0; row < kRows; ++row) {
+      values[row] = -7 + static_cast<int64_t>((row * 37u) % (column.max_code() + 1));
+      ASSERT_TRUE(column.SetValue(row, values[row]));
+    }
+
+    for (const auto &bounds : {std::pair<int64_t, int64_t>{-7, 100}, {0, 0}, {10, 25}, {-100, -100}, {256, 1000}}) {
+      for (size_t begin : {size_t{0}, size_t{1}, size_t{7}}) {
+        std::vector<uint8_t> mask((kRows + 7) / 8, 0);
+        ASSERT_TRUE(column.MatchValueRange(begin, kRows - begin, bounds.first, bounds.second, mask.data(), mask.size()));
+        for (size_t i = begin; i < kRows; ++i) {
+          const bool got = (mask[(i - begin) >> 3] >> ((i - begin) & 7u)) & 1u;
+          const bool want = values[i] >= bounds.first && values[i] <= bounds.second;
+          EXPECT_EQ(want, got) << "width " << int(width) << " row " << i << " bounds " << bounds.first << ".."
+                               << bounds.second;
+        }
+      }
+    }
+  }
+}
+
+TEST(BitPackedColumnTest, MatchValueRangeValidatesArguments) {
+  std::vector<uint8_t> buffer(BitPackedColumn::BytesFor(16, 12), 0);
+  BitPackedColumn column;
+  ASSERT_TRUE(column.Attach(buffer.data(), buffer.size(), 12, 0, 16));
+
+  std::vector<uint8_t> mask(2, 0);
+  EXPECT_TRUE(column.MatchValueRange(0, 0, 0, 10, mask.data(), mask.size()));
+  EXPECT_FALSE(column.MatchValueRange(0, 16, 0, 10, mask.data(), 1));   // mask too small
+  EXPECT_FALSE(column.MatchValueRange(16, 1, 0, 10, mask.data(), mask.size()));  // past the end
+  EXPECT_FALSE(column.MatchValueRange(0, 16, 0, 10, nullptr, mask.size()));
+}
+
 }  // namespace Compress
 }  // namespace ShannonBase
