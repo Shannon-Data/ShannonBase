@@ -286,6 +286,7 @@ SET(SERVER_TESTS
   rapid_ml
   rapid_storage_index
   autopilot_helpers
+  bitpack
   regexp_engine
   regexp_facade
   security_context
@@ -354,6 +355,7 @@ DISABLE_MISSING_PROFILE_WARNING()
 # server test into merge_large_tests-t, and the per-test loop further down.
 SET(RAPID_TESTS
   autopilot_helpers
+  bitpack
   imcs_column_statistics
   imcs_cu
   imcs_imcu
