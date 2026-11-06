@@ -108,6 +108,42 @@ bool stats_value_is_numeric(const FieldDesc &fd) {
   return is_numeric_type(fd.type) || is_temporal_type(fd.type) ||
          (fd.src_field && (fd.real_type() == MYSQL_TYPE_ENUM || fd.real_type() == MYSQL_TYPE_SET));
 }
+
+// ---- Fixed-width integer slots, the only shape BITPACK re-encodes ----
+// A slot is the little-endian field image get_field_numeric() decodes, so the
+// conversions below are byte-order fixes, not arithmetic. Signedness does not
+// matter: the packed code is value - bias, and both sign-extending reads of the
+// same image wrap to the same code, so a round trip reproduces the exact bits.
+
+bool bitpackable_type(enum_field_types type) {
+  switch (type) {
+    case MYSQL_TYPE_TINY:
+    case MYSQL_TYPE_SHORT:
+    case MYSQL_TYPE_INT24:
+    case MYSQL_TYPE_LONG:
+    case MYSQL_TYPE_LONGLONG:
+      return true;
+    default:
+      return false;
+  }
+}
+
+bool bitpackable_slot_width(size_t width) { return width == 1 || width == 2 || width == 3 || width == 4 || width == 8; }
+
+uint64_t slot_bits(const uchar *slot, size_t width) {
+  uint64_t bits = 0;
+  for (size_t i = 0; i < width; ++i) bits |= static_cast<uint64_t>(slot[i]) << (8 * i);
+  return bits;
+}
+
+void bits_to_slot(uint64_t bits, uchar *slot, size_t width) {
+  for (size_t i = 0; i < width; ++i) slot[i] = static_cast<uchar>(bits >> (8 * i));
+}
+
+int64_t slot_value(const uchar *slot, size_t width) {
+  const unsigned shift = static_cast<unsigned>(64 - width * 8);
+  return static_cast<int64_t>(slot_bits(slot, width) << shift) >> shift;
+}
 }  // namespace
 
 //  CRC-accumulating ostream wrapper used during serialize()
@@ -518,6 +554,108 @@ size_t CU::get_logical_length(row_id_t local_row_id) const {
   return logical_length_of_inline_slot(slot);
 }
 
+uint8_t CU::pack(size_t row_count) {
+  if (m_header.field_desc.encoding != Compress::ENCODING_TYPE::BITPACK) return 0;
+  if (!m_data || m_varlen_pool || uses_dictionary_encoding()) return 0;
+  if (!bitpackable_type(m_header.field_desc.type)) return 0;
+
+  const size_t width = m_header.field_desc.normalized_length;
+  if (!bitpackable_slot_width(width)) return 0;
+
+  std::lock_guard lock(m_data_mutex);
+  if (m_packed.valid()) return m_packed.width();
+  // The stripe compressor already encoded m_data as slot bytes; unpacking it
+  // here would silently undo the caller's compression setting.
+  if (m_is_compressed.load(std::memory_order_relaxed)) return 0;
+
+  if (row_count == 0) row_count = m_header.owner_imcu ? m_header.owner_imcu->get_row_count() : 0;
+  if (row_count == 0) return 0;
+
+  // The stream covers every slot the buffer can hold, not just the rows written
+  // so far, so appends keep packing instead of unpacking on the next INSERT.
+  const size_t stream_rows = m_data_capacity.load(std::memory_order_acquire) / width;
+  if (stream_rows < row_count) return 0;
+
+  // Zero is part of the domain on purpose: a NULL cell's code is never read but
+  // must stay representable, and the null mask -- not the value -- decides what
+  // a reader sees.
+  int64_t low = 0, high = 0;
+  for (size_t row = 0; row < row_count; ++row) {
+    const int64_t value = slot_value(m_data.get() + row * width, width);
+    low = std::min(low, value);
+    high = std::max(high, value);
+  }
+
+  const uint8_t bits = Compress::BitPackedColumn::WidthFor(low, high);
+  if (bits == 0) return 0;  // domain wider than the codec supports: keep slots
+
+  const size_t bytes = Compress::BitPackedColumn::BytesFor(stream_rows, bits);
+  if (bytes == 0 || bytes > m_data_capacity.load(std::memory_order_relaxed)) return 0;
+
+  // Build the stream beside the slots, then publish it in one memcpy: packing
+  // in place would read a slot after an earlier row's bits overwrote it.
+  std::vector<uint8_t> packed(bytes, 0);
+  Compress::BitPackedColumn stream;
+  if (!stream.Attach(packed.data(), bytes, bits, low, stream_rows)) return 0;
+  for (size_t row = 0; row < row_count; ++row) {
+    if (!stream.SetValue(row, slot_value(m_data.get() + row * width, width))) return 0;
+  }
+
+  std::memcpy(m_data.get(), packed.data(), bytes);
+  if (!m_packed.Attach(m_data.get(), bytes, bits, low, stream_rows)) {
+    m_packed = Compress::BitPackedColumn{};
+    return 0;
+  }
+  m_packed_rows = row_count;
+  return bits;
+}
+
+void CU::unpack() {
+  std::lock_guard lock(m_data_mutex);
+  unpack_locked();
+}
+
+void CU::unpack_locked() {
+  if (!m_packed.valid()) return;
+
+  const size_t width = m_header.field_desc.normalized_length;
+  std::vector<uchar> canonical(m_packed_rows * width, 0);
+  for (size_t row = 0; row < m_packed_rows; ++row) {
+    int64_t value = 0;
+    if (!m_packed.GetValue(row, &value)) break;
+    bits_to_slot(static_cast<uint64_t>(value), canonical.data() + row * width, width);
+  }
+  // Rows past m_packed_rows were never written, so leaving their bytes alone is
+  // the same "uninitialized slot" they were before.
+  if (!canonical.empty()) std::memcpy(m_data.get(), canonical.data(), canonical.size());
+  m_packed = Compress::BitPackedColumn{};
+  m_packed_rows = 0;
+}
+
+bool CU::decode_packed_slot(row_id_t local_row_id, uchar *slot) const {
+  if (!m_packed.valid() || slot == nullptr || local_row_id >= m_packed_rows) return false;
+  int64_t value = 0;
+  if (!m_packed.GetValue(local_row_id, &value)) return false;
+  bits_to_slot(static_cast<uint64_t>(value), slot, m_header.field_desc.normalized_length);
+  return true;
+}
+
+bool CU::pack_value_locked(row_id_t local_row_id, const uchar *data, size_t len) {
+  if (!m_packed.valid() || data == nullptr || local_row_id >= m_packed.rows()) return false;
+
+  const size_t width = m_header.field_desc.normalized_length;
+  uchar slot[16] = {};
+  if (width > sizeof(slot)) return false;
+  // Same truncation the canonical branch applies, so packing does not change
+  // which bytes of a short value are significant.
+  std::memcpy(slot, data, std::min(len, width));
+  const int64_t value = slot_value(slot, width);
+
+  if (!m_packed.SetValue(local_row_id, value)) return false;  // outside [bias, bias+max_code]
+  if (m_packed_rows <= local_row_id) m_packed_rows = local_row_id + 1;
+  return true;
+}
+
 bool CU::get_visible_cell(row_id_t local_row_id, bool current_is_null, Transaction::ID reader_txn_id,
                           uint64_t reader_scn, Transaction *reader_trx, const char *table_name,
                           VisibleCell &out) const {
@@ -541,6 +679,18 @@ bool CU::get_visible_cell(row_id_t local_row_id, bool current_is_null, Transacti
 
   out.is_null = current_is_null;
   if (out.is_null) return true;
+
+  if (is_bitpacked()) {
+    // The row's bytes live inside a shared bit stream, so the caller cannot be
+    // pointed at them: decode into the cell's own buffer (reset() keeps that
+    // buffer's capacity, so this is not a per-row allocation).
+    const size_t width = m_header.field_desc.normalized_length;
+    out.owned_slot.resize(width, 0);
+    if (!decode_packed_slot(local_row_id, out.owned_slot.data())) return false;
+    out.slot = out.owned_slot.data();
+    out.logical_length = width;
+    return true;
+  }
 
   out.slot = get_data_address(local_row_id);
   if (out.slot == nullptr) return false;
@@ -608,6 +758,13 @@ int CU::write(const Rapid_context *context, row_id_t local_row_id, const uchar *
 
   uchar *dest = m_data.get() + local_row_id * m_header.field_desc.normalized_length;
   if (data == nullptr) {
+    if (is_bitpacked()) {
+      // A packed row has no slot to clear: `dest` points into a bit stream
+      // shared with its neighbours, so zeroing normalized_length bytes would
+      // corrupt their codes. The stale code stays and the null mask hides it.
+      update_statistics(nullptr, 0);
+      return ShannonBase::SHANNON_SUCCESS;
+    }
     // Overwriting with NULL abandons whatever the slot pointed at just as much
     // as overwriting with a value does -- Snapshot restoration reaches this with an
     // already-populated slot -- so the old reference has to be retired here
@@ -618,6 +775,19 @@ int CU::write(const Rapid_context *context, row_id_t local_row_id, const uchar *
     // A NULL still has to reach the statistics: null_count/null_fraction are
     // exactly what this path used to drop by returning without a call.
     update_statistics(nullptr, 0);
+  } else if (is_bitpacked() && pack_value_locked(local_row_id, data, len)) {
+    // The code carries the value; the statistics still want the field image.
+    update_statistics(data, len);
+  } else if (is_bitpacked()) {
+    // A packed column is always fixed-width (pack() refuses every other shape),
+    // so the value only ever outgrows the domain: unpack and write the slot.
+    unpack_locked();
+    if (len == 0) {
+      std::memset(dest, 0, m_header.field_desc.normalized_length);
+    } else {
+      std::memcpy(dest, data, std::min(len, m_header.field_desc.normalized_length));
+    }
+    update_statistics(data, len);
   } else if (m_varlen_pool) {
     // Retire whatever reference the slot already holds.  write() is the
     // no-version path, so nothing can still select the old bytes -- but the
@@ -681,6 +851,11 @@ int CU::update(const Rapid_context *context, row_id_t local_row_id, const uchar 
       const int decomp_ret = decompress_locked();
       if (decomp_ret != ShannonBase::SHANNON_SUCCESS) return decomp_ret;
     }
+    // The version journal stores canonical slot images and rollback_update()
+    // republishes them verbatim, so a packed column has to fall back before the
+    // before-image is captured. Re-packing around a version chain is a later
+    // step; losing the encoding here is a missed optimisation, not a wrong row.
+    unpack_locked();
 
     const size_t slot_len = m_header.field_desc.normalized_length;
     uchar *current_slot = m_data.get() + local_row_id * slot_len;
@@ -842,6 +1017,11 @@ int CU::rollback_update(row_id_t local_row_id, Transaction::ID expected_txn_id, 
   std::unique_ptr<ColumnVersionManager::Column_Version> head;
   if (!m_version_manager->pop_head(local_row_id, head, expected_txn_id) || !head) return HA_ERR_GENERIC;
 
+  // update() already unpacked, so this is a belt-and-braces guard against a
+  // journal restored under a packed CU: publishing slot bytes into a bit stream
+  // would corrupt every neighbouring row.
+  unpack_locked();
+
   const size_t slot_len = m_header.field_desc.normalized_length;
   uchar *current_slot = m_data.get() + local_row_id * slot_len;
 
@@ -893,6 +1073,9 @@ int CU::compress() {
   // Fast path: already compressed or disabled.
   if (m_is_compressed.load(std::memory_order_acquire)) return ShannonBase::SHANNON_SUCCESS;
   if (m_header.field_desc.compression_level == Compress::COMPRESS_LEVEL::NONE) return ShannonBase::SHANNON_SUCCESS;
+  // A packed stream is not a slot array: the per-stripe compressor would treat
+  // bit fields as row images and produce a payload nothing can read back.
+  if (is_bitpacked()) return ShannonBase::SHANNON_SUCCESS;
 
   std::lock_guard lock(m_data_mutex);
   // Re-check under lock (another thread may have just compressed).
@@ -1113,6 +1296,10 @@ int CU::serialize(std::ostream &out, size_t snapshot_row_count, bool checkpoint)
 }
 
 int CU::serialize_payload(std::ostream &out, size_t snapshot_row_count, bool checkpoint) const {
+  // The snapshot format has no place for the stream's width/bias yet, so a
+  // packed CU would be persisted as slot bytes that reload as garbage values.
+  // Fail loudly instead of writing a checkpoint nobody can read back.
+  ut_a(m_header.field_desc.encoding != Compress::ENCODING_TYPE::BITPACK);
   // Reuse an existing compressed payload. Only non-checkpoint snapshots attempt
   // new compression; checkpoints keep an uncompressed CU in its current format.
   std::lock_guard lock(m_data_mutex);
@@ -1446,7 +1633,7 @@ int CU::read_snapshot(DictionaryRestoreContext *dictionaries, std::istream &in, 
         snapshot.row_count != snapshot.uncompressed_bytes / snapshot.slot_width)
       return HA_ERR_GENERIC;
   }
-  if (enc > static_cast<uint8_t>(Compress::ENCODING_TYPE::VARLEN)) return HA_ERR_GENERIC;
+  if (enc > static_cast<uint8_t>(Compress::ENCODING_TYPE::BITPACK)) return HA_ERR_GENERIC;
   if (snapshot.compression_algorithm > static_cast<uint8_t>(CU_CompressAlgo::ZLIB)) return HA_ERR_GENERIC;
 
   snapshot.payload.resize(snapshot.payload_bytes);
@@ -1554,6 +1741,9 @@ int CU::read_snapshot(DictionaryRestoreContext *dictionaries, std::istream &in, 
 int CU::restore_snapshot(const DecodedSnapshot &snapshot) {
   // All checks passed — commit to live state
   std::lock_guard lock(m_data_mutex);
+  // Snapshots carry canonical slot images, so a restored CU starts unpacked.
+  m_packed = Compress::BitPackedColumn{};
+  m_packed_rows = 0;
 
   // Ensure our buffer is large enough.
   if (snapshot.uncompressed_bytes > m_data_capacity.load(std::memory_order_relaxed)) {

@@ -38,7 +38,9 @@
 #include <zstd.h>
 namespace ShannonBase {
 namespace Compress {
-enum class ENCODING_TYPE { NONE = 0, SORTED, VARLEN };
+// Appended, never inserted: the value is persisted as a uint8 in the CU header
+// and in the column metadata, so existing snapshots must keep their meaning.
+enum class ENCODING_TYPE { NONE = 0, SORTED, VARLEN, BITPACK };
 enum class COMPRESS_ALGO { DEFAULT = 0, NONE, ZLIB, ZSTD, LZ4 };
 enum class COMPRESS_LEVEL { DEFAULT = 0, NONE, ZLIB, ZSTD, LZ4 };
 

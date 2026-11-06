@@ -27,6 +27,7 @@
 #include "storage/rapid_engine/monitor/rapid_monitor.h"
 
 #include <limits.h>
+#include <array>
 #include <chrono>
 #include <shared_mutex>
 
@@ -691,6 +692,18 @@ void Imcu::evaluate_simple_predicate_vectorized(Rapid_scan_context *context, con
     return;
   }
 
+  // A packed column has no per-row slot address for the batch pointer list
+  // below; decode each cell through the snapshot-aware resolver until the packed
+  // range kernel replaces this loop.
+  if (cu->is_bitpacked()) {
+    for (size_t i = 0; i < num_rows; ++i) {
+      const TruthValue tv = evaluate_predicate_truth_at_row(context, pred, start_row + i);
+      (tv == TruthValue::TRUE_VALUE) ? Utils::Util::bit_array_set(&result, i)
+                                     : Utils::Util::bit_array_reset(&result, i);
+    }
+    return;
+  }
+
   if (cu->has_varlen_pool()) {
     for (size_t i = 0; i < num_rows; ++i) {
       const row_id_t local_row_id = start_row + i;
@@ -1006,6 +1019,21 @@ void Imcu::update_storage_index() {
       // the safe direction: pruning is allowed to skip less, never more.
       if (m_header.null_masks[col_idx] && Utils::Util::bit_array_get(m_header.null_masks[col_idx].get(), row_idx)) {
         m_header.storage_index->update_null(col_idx);
+        continue;
+      }
+
+      // A packed cell has no slot image to resolve: decode the code instead.
+      // BITPACK only applies to fixed-width integers, so the string branches
+      // below are unreachable for it.
+      if (cu->is_bitpacked()) {
+        std::array<uchar, 16> slot{};
+        const size_t width = cu->get_normalized_length();
+        if (width > slot.size() || !cu->decode_packed_slot(row_idx, slot.data())) continue;
+        if (is_numeric) {
+          m_header.storage_index->update(
+              col_idx, Utils::Util::get_field_numeric<double>(source_field, slot.data(), nullptr,
+                                                              m_owner_table->meta().db_low_byte_first));
+        }
         continue;
       }
 
