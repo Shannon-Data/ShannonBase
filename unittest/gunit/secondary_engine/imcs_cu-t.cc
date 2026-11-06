@@ -14,11 +14,14 @@
    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
 
 #include <gtest/gtest.h>
+#include <array>
 #include <filesystem>
 #include <fstream>
 #include <future>
+#include <limits>
 #include <memory>
 #include <sstream>
+#include <vector>
 
 #include "storage/rapid_engine/imcs/col0stats.h"
 #include "storage/rapid_engine/imcs/cu.h"
@@ -79,6 +82,45 @@ std::string native_record(bool empty = false) {
 void update_native_crc(std::string &bytes) {
   const auto crc = Utils::crc32c_compute(bytes.data(), bytes.size() - sizeof(uint32_t), 0);
   std::memcpy(bytes.data() + bytes.size() - sizeof(crc), &crc, sizeof(crc));
+}
+
+FieldMetadata native_bitpack_field(enum_field_types type, size_t slot_width) {
+  auto field = native_field();
+  field.type = type;
+  field.pack_length = slot_width;
+  field.normalized_length = slot_width;
+  field.encoding = Compress::ENCODING_TYPE::BITPACK;
+  return field;
+}
+
+// Independent CU v2 record for a bit-packable integer column. The payload is
+// the canonical little-endian slot image, which is what a load writes before
+// CU::pack() runs.
+std::string native_packed_record(enum_field_types type, size_t slot_width, const std::vector<int64_t> &values) {
+  std::string bytes;
+  auto pod = [&](auto value) { bytes.append(reinterpret_cast<const char *>(&value), sizeof(value)); };
+  pod(CU_SERIAL_MAGIC);
+  pod(uint16_t{2});
+  pod(uint8_t{0});   // flags
+  pod(uint32_t{0});  // column ID
+  pod(static_cast<uint8_t>(type));
+  pod(static_cast<uint8_t>(Compress::ENCODING_TYPE::BITPACK));
+  pod(uint8_t{0});  // no compression
+  bytes.append(6, '\0');
+  pod(uint64_t{slot_width});
+  pod(uint64_t{slot_width});
+  pod(uint64_t{values.size() * slot_width});
+  pod(uint64_t{values.size()});
+  pod(double{0});
+  pod(double{0});
+  pod(double{0});
+  pod(uint64_t{values.size() * slot_width});
+  for (const auto value : values) {
+    const auto bits = static_cast<uint64_t>(value);
+    for (size_t i = 0; i < slot_width; ++i) bytes.push_back(static_cast<char>(bits >> (8 * i)));
+  }
+  pod(Utils::crc32c_compute(bytes.data(), bytes.size(), 0));
+  return bytes;
 }
 
 FieldMetadata native_dictionary_field() {
@@ -319,6 +361,99 @@ TEST(NativeCuPersistence, OutputExceptionsReturnFailure) {
   std::ostream output(&buffer);
   output.exceptions(std::ios::badbit);
   EXPECT_NO_THROW(EXPECT_NE(column.serialize(output, 2, true), SHANNON_SUCCESS));
+}
+
+TEST(BitPackedCuStorage, PackRoundTripsCanonicalSlotsThroughVisibleCell) {
+  auto pool = native_pool();
+  auto field = native_bitpack_field(MYSQL_TYPE_LONG, 4);
+  CU column(nullptr, field, 0, 8, pool);
+  const std::vector<int64_t> values{1000, -1000, 0, 999};
+
+  std::istringstream input(native_packed_record(MYSQL_TYPE_LONG, 4, values));
+  ASSERT_EQ(column.deserialize(nullptr, input, values.size()), SHANNON_SUCCESS);
+  ASSERT_FALSE(column.is_bitpacked());
+
+  // -1000..0..1000 spans 2000 -> 11 bits per code instead of a 4-byte slot.
+  EXPECT_EQ(column.pack(values.size()), 11);
+  ASSERT_TRUE(column.is_bitpacked());
+  EXPECT_EQ(column.bitpack_width(), 11);
+  EXPECT_EQ(column.pack(values.size()), 11);  // already packed: no repack
+
+  for (size_t row = 0; row < values.size(); ++row) {
+    // This is the decode CU::get_visible_cell() runs for a packed cell (a
+    // standalone CU has no owning IMCU to bound get_visible_cell by).
+    std::array<uchar, 4> slot{};
+    ASSERT_TRUE(column.decode_packed_slot(row, slot.data()));
+    int32_t decoded = 0;
+    std::memcpy(&decoded, slot.data(), sizeof(decoded));
+    EXPECT_EQ(decoded, values[row]);
+  }
+
+  column.unpack();
+  EXPECT_FALSE(column.is_bitpacked());
+  // Unpacking restores the slot images, so packing again selects the same
+  // domain and decodes back to the same values.
+  EXPECT_EQ(column.pack(values.size()), 11);
+  for (size_t row = 0; row < values.size(); ++row) {
+    std::array<uchar, 4> slot{};
+    ASSERT_TRUE(column.decode_packed_slot(row, slot.data()));
+    int32_t decoded = 0;
+    std::memcpy(&decoded, slot.data(), sizeof(decoded));
+    EXPECT_EQ(decoded, values[row]);
+  }
+}
+
+TEST(BitPackedCuStorage, PackKeepsNarrowIntegersBelowTheirSlotWidth) {
+  auto pool = native_pool();
+  auto field = native_bitpack_field(MYSQL_TYPE_TINY, 1);
+  CU column(nullptr, field, 0, 8, pool);
+  const std::vector<int64_t> values{-5, 7, 2};
+
+  std::istringstream input(native_packed_record(MYSQL_TYPE_TINY, 1, values));
+  ASSERT_EQ(column.deserialize(nullptr, input, values.size()), SHANNON_SUCCESS);
+  EXPECT_EQ(column.pack(values.size()), 4);  // span -5..7 = 12 -> 4 bits
+  ASSERT_TRUE(column.is_bitpacked());
+
+  for (size_t row = 0; row < values.size(); ++row) {
+    std::array<uchar, 1> slot{};
+    ASSERT_TRUE(column.decode_packed_slot(row, slot.data()));
+    int8_t decoded = 0;
+    std::memcpy(&decoded, slot.data(), sizeof(decoded));
+    EXPECT_EQ(decoded, values[row]);
+  }
+}
+
+TEST(BitPackedCuStorage, PackRefusesIneligibleColumns) {
+  auto pool = native_pool();
+
+  // Not tagged BITPACK.
+  {
+    auto field = native_field();
+    CU column(nullptr, field, 0, 4, pool);
+    std::istringstream input(native_record());
+    ASSERT_EQ(column.deserialize(nullptr, input, 2), SHANNON_SUCCESS);
+    EXPECT_EQ(column.pack(2), 0);
+    EXPECT_FALSE(column.is_bitpacked());
+  }
+
+  // No rows written.
+  {
+    auto field = native_bitpack_field(MYSQL_TYPE_LONG, 4);
+    CU column(nullptr, field, 0, 4, pool);
+    EXPECT_EQ(column.pack(0), 0);
+    EXPECT_FALSE(column.is_bitpacked());
+  }
+
+  // A domain wider than the codec supports: the full int64 span stays canonical.
+  {
+    auto field = native_bitpack_field(MYSQL_TYPE_LONGLONG, 8);
+    CU column(nullptr, field, 0, 4, pool);
+    const std::vector<int64_t> values{std::numeric_limits<int64_t>::min(), std::numeric_limits<int64_t>::max()};
+    std::istringstream input(native_packed_record(MYSQL_TYPE_LONGLONG, 8, values));
+    ASSERT_EQ(column.deserialize(nullptr, input, values.size()), SHANNON_SUCCESS);
+    EXPECT_EQ(column.pack(values.size()), 0);
+    EXPECT_FALSE(column.is_bitpacked());
+  }
 }
 
 // Test FieldMetadata structure

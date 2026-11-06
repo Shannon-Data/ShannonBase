@@ -51,6 +51,7 @@
 #include "storage/rapid_engine/include/rapid_types.h"
 
 #include "storage/rapid_engine/compress/algorithms.h"
+#include "storage/rapid_engine/compress/bitpack.h"
 #include "storage/rapid_engine/compress/dictionary/dictionary.h"
 #include "storage/rapid_engine/imcs/col0stats.h"
 #include "storage/rapid_engine/imcs/table0meta.h"
@@ -365,6 +366,36 @@ class CU : public MemoryObject {
   /** Return the VarlenDataPool, or nullptr if this CU does not use one. */
   inline VarlenDataPool *get_varlen_pool() const { return m_varlen_pool.get(); }
 
+  /**
+   * Repack rows [0, row_count) into a bit-packed stream laid over m_data.
+   *
+   * Only a BITPACK column is eligible (fixed-width integers, no varlen pool, no
+   * dictionary), and only when the observed [min, max] span fits
+   * BitPackedColumn::kMaxWidth. NULL cells keep whatever code the slot held;
+   * the column's null mask stays authoritative.
+   *
+   * Caller MUST hold the owning IMCU's mutation mutex exclusively: readers do
+   * not take m_data_mutex, so the stream must not change under them.
+   *
+   * @return bits per code now in use, or 0 when the column keeps canonical slots.
+   */
+  uint8_t pack(size_t row_count = 0);
+
+  /** Restore canonical slots from the packed stream. No-op when not packed. */
+  void unpack();
+
+  /** True while m_data holds a packed stream instead of canonical slots. */
+  inline bool is_bitpacked() const { return m_packed.valid(); }
+
+  /** Bits per packed code; 0 when the column is not packed. */
+  inline uint8_t bitpack_width() const { return m_packed.width(); }
+
+  /**
+   * Decode one packed cell into `slot`, which must hold normalized_length bytes.
+   * False when the column is not packed or the row is outside the stream.
+   */
+  bool decode_packed_slot(row_id_t local_row_id, uchar *slot) const;
+
  private:
   inline bool needs_dictionary() const {
     return (m_header.field_desc.type == MYSQL_TYPE_VARCHAR || m_header.field_desc.type == MYSQL_TYPE_STRING ||
@@ -402,6 +433,16 @@ class CU : public MemoryObject {
    * hold m_data_mutex exclusively (retire() takes the pool lock).
    */
   void retire_slot_varlen_ref_locked(const uchar *slot);
+
+  /**
+   * Pack one incoming cell value. False when the column is not packed or the
+   * value falls outside the packed domain, in which case the stream is left
+   * untouched. Caller MUST hold m_data_mutex exclusively.
+   */
+  bool pack_value_locked(row_id_t local_row_id, const uchar *data, size_t len);
+
+  /** Unpack without locking. Caller MUST hold m_data_mutex exclusively. */
+  void unpack_locked();
 
   int serialize_payload(std::ostream &out, size_t snapshot_row_count, bool checkpoint) const;
   int deserialize_payload(DictionaryRestoreContext *dictionaries, std::istream &in, size_t expected_rows);
@@ -478,6 +519,12 @@ class CU : public MemoryObject {
 
   std::unique_ptr<uchar[], PoolDeleter> m_data;
   std::atomic<size_t> m_data_capacity{0};  // allocated bytes in m_data
+
+  // Bit-packed stream over m_data (encoding == BITPACK only). The stream is
+  // narrower than the canonical slots it replaces, so it always fits the same
+  // buffer; m_packed_rows is how many rows it currently describes.
+  Compress::BitPackedColumn m_packed;
+  size_t m_packed_rows{0};
 
   // --- Stripe-based compression (latency-optimized) ---
   // Each stripe covers STRIPE_ROWS rows and is compressed independently,

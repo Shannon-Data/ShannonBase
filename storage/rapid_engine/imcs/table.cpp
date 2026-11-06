@@ -33,6 +33,7 @@
 #include "scope_guard.h"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <numeric>
 #include <regex>
@@ -694,7 +695,7 @@ RpdTable::RpdTable(const TABLE *&mysql_table, const TableConfig &config)
     }
 
     Compress::ENCODING_TYPE encoding = Compress::ENCODING_TYPE::NONE;
-    const char *const patt_str = "RAPID_COLUMN\\s*=\\s*ENCODING\\s*=\\s*(SORTED|VARLEN)";
+    const char *const patt_str = "RAPID_COLUMN\\s*=\\s*ENCODING\\s*=\\s*(SORTED|VARLEN|BITPACK)";
     std::regex column_encoding_patt(patt_str, std::regex_constants::nosubs | std::regex_constants::icase);
 
     if (std::regex_search(comment, column_encoding_patt)) {
@@ -702,6 +703,8 @@ RpdTable::RpdTable(const TABLE *&mysql_table, const TableConfig &config)
         encoding = Compress::ENCODING_TYPE::SORTED;
       else if (comment.find("VARLEN") != std::string::npos)
         encoding = Compress::ENCODING_TYPE::VARLEN;
+      else if (comment.find("BITPACK") != std::string::npos)
+        encoding = Compress::ENCODING_TYPE::BITPACK;
     }
 
     FieldMetadata fm;
@@ -1326,6 +1329,18 @@ row_id_t Table::locate_row(const Rapid_load_context *context, uchar *rowdata) {
         break;
       }
       if (value->flags.is_null) continue;
+      if (cu->is_bitpacked()) {
+        // No slot image to dereference: compare the decoded value.
+        std::array<uchar, 16> slot{};
+        const size_t width = cu->get_normalized_length();
+        if (width > slot.size() || !cu->decode_packed_slot(local, slot.data())) {
+          matches = false;
+          break;
+        }
+        matches = value->length == width && (width == 0 || std::memcmp(slot.data(), value->data, width) == 0);
+        if (!matches) break;
+        continue;
+      }
       const uchar *slot = cu->get_data_address(local);
       auto dict = cu->dictionary();
       if (dict && cu->real_type() != MYSQL_TYPE_ENUM && cu->real_type() != MYSQL_TYPE_SET) {
