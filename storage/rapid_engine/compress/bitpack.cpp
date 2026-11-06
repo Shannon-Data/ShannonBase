@@ -113,5 +113,54 @@ bool BitPackedColumn::SetValue(size_t row, int64_t value) {
   return SetCode(row, code);
 }
 
+bool BitPackedColumn::MatchValueRange(size_t row_begin, size_t count, int64_t low, int64_t high, uint8_t *bits,
+                                     size_t bits_bytes) const {
+  if (!valid() || bits == nullptr || bits_bytes < (count + 7) / 8) return false;
+  if (count == 0) return true;
+  if (row_begin >= m_rows) return false;
+
+  const size_t rows = std::min(count, m_rows - row_begin);
+  // Unsigned wrap makes a bound outside the column domain match nothing,
+  // without a separate range check.
+  const uint64_t low_code = static_cast<uint64_t>(low) - static_cast<uint64_t>(m_bias);
+  const uint64_t high_code = static_cast<uint64_t>(high) - static_cast<uint64_t>(m_bias);
+  const auto set_if_match = [&](size_t i, uint64_t code) {
+    if (code >= low_code && code <= high_code) bits[i >> 3] |= static_cast<uint8_t>(1u << (i & 7u));
+  };
+
+  // 8/16/32 bits per code land on whole bytes, so the stream is an array of
+  // little-endian codes of that width.
+  const size_t byte = (row_begin * m_width) >> 3;
+  if (m_width == 8) {
+    for (size_t i = 0; i < rows; ++i) set_if_match(i, m_buffer[byte + i]);
+    return true;
+  }
+  if (m_width == 16 || m_width == 32) {
+    const size_t step = m_width / 8;
+    for (size_t i = 0; i < rows; ++i) {
+      const uint8_t *src = m_buffer + byte + i * step;
+      uint64_t code = 0;
+      if (m_width == 16) {
+        uint16_t word = 0;
+        std::memcpy(&word, src, sizeof(word));
+        code = word;
+      } else {
+        uint32_t word = 0;
+        std::memcpy(&word, src, sizeof(word));
+        code = word;
+      }
+      set_if_match(i, code);
+    }
+    return true;
+  }
+
+  for (size_t i = 0; i < rows; ++i) {
+    uint64_t code = 0;
+    if (!GetCode(row_begin + i, &code)) return false;
+    set_if_match(i, code);
+  }
+  return true;
+}
+
 }  // namespace Compress
 }  // namespace ShannonBase
