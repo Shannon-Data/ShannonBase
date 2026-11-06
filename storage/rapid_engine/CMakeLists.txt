@@ -60,6 +60,7 @@ LIST(APPEND SHANNON_RAPID_INCLUDE_DIRS
 # --- Source files ---
 SET(SHANNON_RAPID_COMPRESS_SOURCES
   compress/algorithms.cpp
+  compress/bitpack.cpp
   compress/dictionary/dictionary.cpp
 )
 
