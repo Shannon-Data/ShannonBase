@@ -292,6 +292,7 @@ SET(SERVER_TESTS
   segfault
   select_lex_visitor
   sha2_password
+  simd_kernels
   sql_table
   subquery_syntax
   table_cache
@@ -369,6 +370,7 @@ SET(RAPID_TESTS
   rapid_bloom_filter
   rapid_ml
   rapid_storage_index
+  simd_kernels
   transaction_journal_purge
 )
 

@@ -84,7 +84,7 @@ VectorizedTableScanIterator::~VectorizedTableScanIterator() {
 
 size_t VectorizedTableScanIterator::CalculateOptimalBatchSize(double expected_rows) {
   const size_t base_size = std::max<size_t>(SHANNON_VECTOR_WIDTH, 128);
-  size_t l3_cache_size{8 * 1024 * 1024};
+  size_t l3_cache_size{8 * SHANNON_MB};
 #if defined(CACHE_L3_SIZE)
   l3_cache_size = CACHE_L3_SIZE;
 #endif

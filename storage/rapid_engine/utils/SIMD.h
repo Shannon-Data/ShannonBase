@@ -26,12 +26,15 @@
 #ifndef __SHANNONBASE_UTILS_SIMD_H__
 #define __SHANNONBASE_UTILS_SIMD_H__
 
+#include "storage/rapid_engine/include/rapid_arch_inf.h"
 #include "storage/rapid_engine/include/rapid_const.h"
 
+// The platform/ISA macros come from rapid_arch_inf.h, so every translation unit
+// that includes this header sees the same kernel set.
 #if defined(SHANNON_X86_PLATFORM)
-#include <immintrin.h>  // for AVX2 path
+#include <immintrin.h>  // SSE2..AVX2 intrinsics
 #elif defined(SHANNON_ARM_PLATFORM)
-#include <arm_neon.h>  // for NEON path
+#include <arm_neon.h>  // NEON intrinsics
 #endif
 
 #include <algorithm>
@@ -77,33 +80,17 @@ size_t popcount_bitmap(const std::vector<uint8_t> &bm);
 // Arithmetic Operations
 // ============================================================================
 
-// Sum Oper
-template <typename T>
-T sum_avx2(const T *data, const uint8_t *null_mask, size_t row_count);
-template <typename T>
-T sum_sse4(const T *data, const uint8_t *null_mask, size_t row_count);
-template <typename T>
-T sum_neon(const T *data, const uint8_t *null_mask, size_t row_count);
+// Sum Oper. The per-ISA entry points are non-template overloads in
+// SIMD_Impl.h (one per element type); only the scalar reference stays a
+// template, because it is instantiated for every supported T.
 template <typename T>
 T sum_generic(const T *data, const uint8_t *null_mask, size_t row_count);
 
 // Min Oper
 template <typename T>
-T min_avx2(const T *data, const uint8_t *null_mask, size_t row_count);
-template <typename T>
-T min_sse4(const T *data, const uint8_t *null_mask, size_t row_count);
-template <typename T>
-T min_neon(const T *data, const uint8_t *null_mask, size_t row_count);
-template <typename T>
 T min_generic(const T *data, const uint8_t *null_mask, size_t row_count);
 
 // Max Oper
-template <typename T>
-T max_avx2(const T *data, const uint8_t *null_mask, size_t row_count);
-template <typename T>
-T max_sse4(const T *data, const uint8_t *null_mask, size_t row_count);
-template <typename T>
-T max_neon(const T *data, const uint8_t *null_mask, size_t row_count);
 template <typename T>
 T max_generic(const T *data, const uint8_t *null_mask, size_t row_count);
 
@@ -120,15 +107,6 @@ size_t count_non_null_generic(const uint8_t *null_mask, size_t row_count);
 // Filtering Operations
 // ============================================================================
 
-template <typename T>
-size_t filter_avx2(const T *data, const uint8_t *null_mask, size_t row_count, std::function<bool(T)> predicate,
-                   std::vector<size_t> &output_indices);
-template <typename T>
-size_t filter_sse4(const T *data, const uint8_t *null_mask, size_t row_count, std::function<bool(T)> predicate,
-                   std::vector<size_t> &output_indices);
-template <typename T>
-size_t filter_neon(const T *data, const uint8_t *null_mask, size_t row_count, std::function<bool(T)> predicate,
-                   std::vector<size_t> &output_indices);
 template <typename T, typename Allocator>
 size_t filter_generic(const T *data, const uint8_t *null_mask, size_t row_count, std::function<bool(T)> predicate,
                       std::vector<size_t, Allocator> &output_indices);
