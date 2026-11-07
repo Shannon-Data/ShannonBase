@@ -588,10 +588,14 @@ static bool committed_binlog_propagation_loop() {
       target = consumer.committed.load();
     }
     if (catalog.empty()) continue;
-    if (consumer.fault.load() || global_configuration()) {
+    if (consumer.fault.load()) {
       quarantine(catalog, consumer.reset.load()
                               ? "Source binlog was reset; unload and reload the table"
                               : "Source configuration or commit position is unsupported; unload and reload the table");
+      continue;
+    }
+    if (const char *config_error = global_configuration()) {
+      quarantine(catalog, config_error);
       continue;
     }
     if (target <= commit_position(start)) continue;
