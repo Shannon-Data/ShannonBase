@@ -276,6 +276,14 @@ inline bool mul_overflow(T a, U b, R *r) {
 #define CACHE_L2_SIZE @CACHE_L2@
 #define CACHE_L3_SIZE @CACHE_L3@
 
+// The sizes above come from a CPUID probe at configure time. A probe that
+// misfires yields an implausible figure, and a working set derived from it
+// would collapse to a single row; use these when dividing a grant by a cache.
+// One bad probe must not turn into a batch of one.
+#define CACHE_L1_BYTES (CACHE_L1_SIZE >= (8 * 1024) ? CACHE_L1_SIZE : (32 * 1024))
+#define CACHE_L2_BYTES (CACHE_L2_SIZE >= (64 * 1024) ? CACHE_L2_SIZE : (256 * 1024))
+#define CACHE_L3_BYTES (CACHE_L3_SIZE >= (1024 * 1024) ? CACHE_L3_SIZE : (8 * 1024 * 1024))
+
 #define SHANNON_ALIGNAS alignas(CACHE_LINE_SIZE)
 
 #if defined(SHANNON_AVX512_VECT_SUPPORTED)

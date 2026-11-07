@@ -398,11 +398,36 @@ class CU : public MemoryObject {
   /** Bits per packed code; 0 when the column is not packed. */
   inline uint8_t bitpack_width() const { return m_packed.width(); }
 
+  /** Bias the packed codes are relative to; 0 when the column is not packed. */
+  inline int64_t bitpack_bias() const { return m_packed.bias(); }
+
+  /** Largest value the packed domain can represent; 0 when not packed. */
+  inline int64_t bitpack_max_value() const {
+    return m_packed.valid() ? m_packed.bias() + static_cast<int64_t>(m_packed.max_code()) : 0;
+  }
+
+  /**
+   * Set bit i for every row in [row_begin, row_begin + count) whose packed value
+   * lies in [low, high]. `bits` is cleared first; NULL cells carry no code, so
+   * the caller must AND out its null mask afterwards.
+   * @return false when the column is not packed or `bits` cannot hold `count`.
+   */
+  bool match_value_range(size_t row_begin, size_t count, int64_t low, int64_t high, bit_array_t &bits) const;
+
   /**
    * Decode one packed cell into `slot`, which must hold normalized_length bytes.
    * False when the column is not packed or the row is outside the stream.
    */
   bool decode_packed_slot(row_id_t local_row_id, uchar *slot) const;
+
+  /**
+   * Decode [row_begin, row_begin + count) into `dst`, one normalized-length slot
+   * per row at `stride` bytes. A scan fills a whole batch with one tight loop
+   * instead of building a cell per row.
+   * @return false when the column is not packed, `stride` is too small, or the
+   * range leaves the packed stream.
+   */
+  bool decode_packed_range(size_t row_begin, size_t count, uchar *dst, size_t stride) const;
 
  private:
   inline bool needs_dictionary() const {

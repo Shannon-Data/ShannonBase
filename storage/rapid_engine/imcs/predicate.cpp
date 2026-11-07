@@ -25,6 +25,7 @@
 */
 #include <algorithm>
 #include <cstring>
+#include <limits>
 
 #include "storage/rapid_engine/imcs/predicate.h"
 
@@ -1885,6 +1886,61 @@ std::string Simple_Predicate::to_string() const {
 
   oss << value.as_string();
   return oss.str();
+}
+
+std::optional<std::pair<int64_t, int64_t>> Simple_Predicate::integer_range(int64_t domain_min,
+                                                                           int64_t domain_max) const {
+  if (domain_max < domain_min) return std::nullopt;
+  const auto as_int = [](const PredicateValue &v, int64_t &out) {
+    if (v.type != PredicateValueType::INT64) return false;
+    out = v.int_value;
+    return true;
+  };
+
+  int64_t low = 0, high = 0, bound = 0;
+  switch (op) {
+    case PredicateOperator::EQUAL:
+      if (!as_int(value, bound)) return std::nullopt;
+      low = high = bound;
+      break;
+    case PredicateOperator::LESS_THAN:
+      if (!as_int(value, bound)) return std::nullopt;
+      // Nothing is below the smallest int64.
+      if (bound == std::numeric_limits<int64_t>::lowest()) return std::make_pair(int64_t{1}, int64_t{0});
+      low = domain_min;
+      high = bound - 1;
+      break;
+    case PredicateOperator::LESS_EQUAL:
+      if (!as_int(value, bound)) return std::nullopt;
+      low = domain_min;
+      high = bound;
+      break;
+    case PredicateOperator::GREATER_THAN:
+      if (!as_int(value, bound)) return std::nullopt;
+      if (bound == std::numeric_limits<int64_t>::max()) return std::make_pair(int64_t{1}, int64_t{0});
+      low = bound + 1;
+      high = domain_max;
+      break;
+    case PredicateOperator::GREATER_EQUAL:
+      if (!as_int(value, bound)) return std::nullopt;
+      low = bound;
+      high = domain_max;
+      break;
+    case PredicateOperator::BETWEEN: {
+      int64_t upper = 0;
+      if (!as_int(value, bound) || !as_int(value2, upper)) return std::nullopt;
+      low = bound;
+      high = upper;  // an inverted BETWEEN is empty by construction
+      break;
+    }
+    default:
+      return std::nullopt;
+  }
+
+  // Bounds outside the domain select no extra row; clamping only narrows.
+  if (low < domain_min) low = domain_min;
+  if (high > domain_max) high = domain_max;
+  return std::make_pair(low, high);
 }
 
 double Simple_Predicate::estimate_selectivity(const StorageIndex *storage_index) const {

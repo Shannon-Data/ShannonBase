@@ -114,7 +114,7 @@ bool BitPackedColumn::SetValue(size_t row, int64_t value) {
 }
 
 bool BitPackedColumn::MatchValueRange(size_t row_begin, size_t count, int64_t low, int64_t high, uint8_t *bits,
-                                     size_t bits_bytes) const {
+                                      size_t bits_bytes) const {
   if (!valid() || bits == nullptr || bits_bytes < (count + 7) / 8) return false;
   if (count == 0) return true;
   if (row_begin >= m_rows) return false;

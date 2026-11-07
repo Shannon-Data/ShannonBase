@@ -48,7 +48,8 @@
 #include "storage/rapid_engine/imcs/storage0index.h"
 #include "storage/rapid_engine/include/rapid_config.h"
 #include "storage/rapid_engine/include/rapid_types.h"
-#include "storage/rapid_engine/trx/transaction.h"  // Transaction_Journal
+#include "storage/rapid_engine/monitor/rapid_monitor.h"  // rapid_counters
+#include "storage/rapid_engine/trx/transaction.h"        // Transaction_Journal
 #include "storage/rapid_engine/utils/memory_pool.h"
 
 class Field;
@@ -533,6 +534,20 @@ class Imcu : public MemoryObject {
     }
     const char *const table_name = context->m_table_name.c_str();
 
+    // A bit-packed column has no per-row address: decode into a scratch buffer
+    // and hand out pointers into it, instead of building a cell per row.
+    std::vector<std::vector<uchar>> &packed_scratch = context->packed_scratch;
+    std::vector<size_t> &packed_widths = context->packed_widths;
+    packed_scratch.resize(proj_size);
+    packed_widths.assign(proj_size, 0);
+    bool any_packed = false;
+    for (size_t j = 0; j < proj_size; ++j) {
+      if (proj_cus[j] != nullptr && proj_cus[j]->is_bitpacked()) {
+        packed_widths[j] = proj_cus[j]->get_normalized_length();
+        any_packed = true;
+      }
+    }
+
     uint32_t batch_offsets[SHANNON_BATCH_NUM];
     uint32_t batch_lengths[SHANNON_BATCH_NUM];
     // Reusable buffer to avoid per-chunk heap allocation.
@@ -568,6 +583,12 @@ class Imcu : public MemoryObject {
       if (predicate_mask.is_all_false()) continue;
       const bool all_pass = predicate_mask.is_all_true();
 
+      if (any_packed) {
+        for (size_t j = 0; j < proj_size; ++j)
+          if (packed_widths[j] != 0) packed_scratch[j].resize(batch_size * packed_widths[j]);
+      }
+      size_t unpacked_rows = 0;
+
       for (size_t i = 0; i < batch_size; ++i) {
         if (!all_pass && !Utils::Util::bit_array_get_fast(predicate_mask.data, i)) continue;
 
@@ -576,6 +597,18 @@ class Imcu : public MemoryObject {
           CU *cu = proj_cus[j];
           const bool current_is_null =
               proj_null_masks[j] && Utils::Util::bit_array_get(proj_null_masks[j], local_row_id);
+
+          const size_t packed_width = packed_widths[j];
+          if (packed_width != 0) {
+            uchar *slot = packed_scratch[j].data() + i * packed_width;
+            if (!current_is_null && cu->decode_packed_slot(local_row_id, slot)) {
+              row_buffer[j] = slot;
+              ++unpacked_rows;
+            } else {
+              row_buffer[j] = nullptr;
+            }
+            continue;
+          }
 
           if (!cu || !cu->get_visible_cell(local_row_id, current_is_null, context->m_extra_info.m_trxid,
                                            context->m_extra_info.m_scn, context->m_trx, table_name, visible_cells[j])) {
@@ -592,6 +625,9 @@ class Imcu : public MemoryObject {
         // rest of the block is skipped for good.
         if (context->limit > 0 && context->rows_returned >= context->limit) return scanned - batch_size + i + 1;
       }
+      if (unpacked_rows != 0)
+        RapidMonitor::rapid_counters.query_bitpacked_unpack_rows_total.fetch_add(unpacked_rows,
+                                                                                 std::memory_order_relaxed);
     }
 
     return scanned;
@@ -932,6 +968,20 @@ class Imcu : public MemoryObject {
     }
     const char *const table_name = context->m_table_name.c_str();
 
+    // A packed column is decoded one batch at a time into scratch, so a scan
+    // pays one tight loop per batch instead of a cell per row.
+    std::vector<std::vector<uchar>> &packed_scratch = context->packed_scratch;
+    std::vector<size_t> &packed_widths = context->packed_widths;
+    packed_scratch.resize(proj_size);
+    packed_widths.assign(proj_size, 0);
+    bool any_packed = false;
+    for (size_t j = 0; j < proj_size; ++j) {
+      if (proj_cus[j] != nullptr && proj_cus[j]->is_bitpacked()) {
+        packed_widths[j] = proj_cus[j]->get_normalized_length();
+        any_packed = true;
+      }
+    }
+
     for (size_t chunk_start = start_offset; chunk_start < end; chunk_start += SHANNON_BATCH_NUM) {
       std::shared_lock mutation_lock(m_mutation_mutex);
       size_t batch_size = std::min<size_t>(SHANNON_BATCH_NUM, end - chunk_start);
@@ -955,6 +1005,18 @@ class Imcu : public MemoryObject {
       // Whole-chunk pass (no filter, nothing hidden): skip the per-row bit probe.
       const bool all_pass = predicate_mask.is_all_true();
 
+      if (any_packed) {
+        for (size_t j = 0; j < proj_size; ++j) {
+          if (packed_widths[j] == 0) continue;
+          packed_scratch[j].resize(batch_size * packed_widths[j]);
+          if (!proj_cus[j]->decode_packed_range(chunk_start, batch_size, packed_scratch[j].data(), packed_widths[j]))
+            packed_widths[j] = 0;  // out of the stream: fall back per row
+          else
+            RapidMonitor::rapid_counters.query_bitpacked_unpack_rows_total.fetch_add(batch_size,
+                                                                                     std::memory_order_relaxed);
+        }
+      }
+
       for (size_t i = 0; i < batch_size; ++i) {
         if (!all_pass && !Utils::Util::bit_array_get_fast(predicate_mask.data, i)) continue;
 
@@ -963,6 +1025,12 @@ class Imcu : public MemoryObject {
           CU *cu = proj_cus[j];
           const bool current_is_null =
               proj_null_masks[j] && Utils::Util::bit_array_get(proj_null_masks[j], local_row_id);
+
+          const size_t packed_width = packed_widths[j];
+          if (packed_width != 0) {
+            row_buffer[j] = current_is_null ? nullptr : packed_scratch[j].data() + i * packed_width;
+            continue;
+          }
 
           if (!cu || !cu->get_visible_cell(local_row_id, current_is_null, context->m_extra_info.m_trxid,
                                            context->m_extra_info.m_scn, context->m_trx, table_name, visible_cells[j])) {

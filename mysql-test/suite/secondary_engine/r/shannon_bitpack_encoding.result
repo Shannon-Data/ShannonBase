@@ -54,6 +54,21 @@ id
 SELECT COUNT(*), SUM(int_val), MIN(tiny_val), MAX(big_val) FROM t_bp;
 COUNT(*)	SUM(int_val)	MIN(tiny_val)	MAX(big_val)
 6	-499	0	1000000000002
+# The comparisons above are single integer ranges, so the packed stream
+# must have been matched a word at a time rather than decoded per row.
+# The scans that fed them decoded whole batches through the unpack kernel.
+SET USE_SECONDARY_ENGINE=OFF;
+SELECT CAST(VARIABLE_VALUE AS UNSIGNED) > 0 AS used_range_kernel
+FROM performance_schema.global_status
+WHERE VARIABLE_NAME = 'rapid_query_bitpacked_predicate_rows_total';
+used_range_kernel
+1
+SELECT CAST(VARIABLE_VALUE AS UNSIGNED) > 0 AS used_unpack_kernel
+FROM performance_schema.global_status
+WHERE VARIABLE_NAME = 'rapid_query_bitpacked_unpack_rows_total';
+used_unpack_kernel
+1
+SET USE_SECONDARY_ENGINE=FORCED;
 # The packed stream has to reach a checkpoint, and the restart after it
 # has to read it back: the CU snapshot carries the code width and bias.
 # The first restart reloads from InnoDB (there is no generation yet) and

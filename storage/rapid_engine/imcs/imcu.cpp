@@ -693,9 +693,34 @@ void Imcu::evaluate_simple_predicate_vectorized(Rapid_scan_context *context, con
   }
 
   // A packed column has no per-row slot address for the batch pointer list
-  // below; decode each cell through the snapshot-aware resolver until the packed
-  // range kernel replaces this loop.
+  // below. A comparison with an integer bound is exactly one inclusive range, so
+  // the codes can be matched a word at a time; anything else (NE, IN, LIKE, a
+  // fractional bound) still needs the per-row decode.
   if (cu->is_bitpacked()) {
+    const Field *fld = cu->field();
+    const int64_t domain_min = cu->bitpack_bias();
+    const int64_t domain_max = cu->bitpack_max_value();
+    // The codes are signed (pack() derives the bias from sign-extended slots),
+    // so an unsigned column crossing 2^63 would compare the wrong way.
+    const bool signed_codes = fld != nullptr && !(fld->is_flag_set(UNSIGNED_FLAG) && domain_min < 0);
+
+    if (signed_codes) {
+      const auto range = pred->integer_range(domain_min, domain_max);
+      if (range && cu->match_value_range(start_row, num_rows, range->first, range->second, result)) {
+        // NULL cells keep no code, so a stale code could otherwise match.
+        if (col_id < m_header.null_masks.size() && m_header.null_masks[col_id]) {
+          const bit_array_t *null_mask = m_header.null_masks[col_id].get();
+          for (size_t i = 0; i < num_rows; ++i) {
+            if (Utils::Util::bit_array_get_fast(null_mask->data, start_row + i))
+              Utils::Util::bit_array_reset(&result, i);
+          }
+        }
+        RapidMonitor::rapid_counters.query_bitpacked_predicate_rows_total.fetch_add(num_rows,
+                                                                                    std::memory_order_relaxed);
+        return;
+      }
+    }
+
     for (size_t i = 0; i < num_rows; ++i) {
       const TruthValue tv = evaluate_predicate_truth_at_row(context, pred, start_row + i);
       (tv == TruthValue::TRUE_VALUE) ? Utils::Util::bit_array_set(&result, i)
@@ -873,6 +898,16 @@ void Imcu::check_visibility_for_rows(Rapid_scan_context *context, const std::vec
 void Imcu::evaluate_predicates_for_rows(Rapid_scan_context *context,
                                         const std::vector<std::unique_ptr<Predicate>> &predicates,
                                         const std::vector<row_id_t> &row_ids, bit_array_t &result) {
+  // A scan over consecutive rows is one interval, so evaluate it in a single
+  // call: a bit-packed column then matches its range on whole words instead of
+  // rebuilding a one-row mask per row.
+  bool contiguous = result.rows >= row_ids.size();
+  for (size_t i = 1; i < row_ids.size() && contiguous; ++i) contiguous = row_ids[i] == row_ids[i - 1] + 1;
+  if (contiguous && !row_ids.empty()) {
+    evaluate_predicates_vectorized(context, predicates, row_ids.front(), row_ids.size(), result);
+    return;
+  }
+
   for (size_t i = 0; i < row_ids.size(); ++i) {
     bit_array_t row_result(1);
     evaluate_predicates_vectorized(context, predicates, row_ids[i], 1, row_result);
@@ -1211,6 +1246,16 @@ size_t Imcu::garbage_collect(uint64 min_active_scn) {
   // Reclaimed varlen blocks have a different unit from MVCC versions.
   for (auto &[column, cu] : m_column_units)
     if (cu && cu->has_varlen_pool()) cu->get_varlen_pool()->reclaim();
+
+  // UPDATE falls back to canonical slots because the version journal stores slot
+  // images, and pack() refuses a column that still has a chain. Losing the last
+  // before-image is therefore the first moment the packed stream can come back;
+  // pack() is idempotent and re-checks the chain itself.
+  if (purged > 0) {
+    const size_t live_rows = get_row_count();
+    for (auto &[column, cu] : m_column_units)
+      if (cu && !cu->is_bitpacked()) cu->pack(live_rows);
+  }
   m_header.last_gc_time = std::chrono::system_clock::now();
   const auto duration =
       std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count();

@@ -495,6 +495,95 @@ TEST(BitPackedCuStorage, PackedSnapshotRoundTripsAndStaysSmallerThanSlots) {
   EXPECT_NE(plain.deserialize(nullptr, rejected, values.size()), SHANNON_SUCCESS);
 }
 
+TEST(BitPackedCuStorage, MatchValueRangeSetsOnlyMatchingRows) {
+  auto pool = native_pool();
+  auto field = native_bitpack_field(MYSQL_TYPE_LONG, 4);
+  CU column(nullptr, field, 0, 16, pool);
+  const std::vector<int64_t> values{0, 5, 5, 9, 100, -7, 3};
+
+  std::istringstream input(native_packed_record(MYSQL_TYPE_LONG, 4, values));
+  ASSERT_EQ(column.deserialize(nullptr, input, values.size()), SHANNON_SUCCESS);
+  ASSERT_NE(0, column.pack(values.size()));
+
+  const auto matches = [&](int64_t low, int64_t high) {
+    bit_array_t bits(values.size());
+    EXPECT_TRUE(column.match_value_range(0, values.size(), low, high, bits));
+    std::vector<bool> out;
+    for (size_t i = 0; i < values.size(); ++i) out.push_back(Utils::Util::bit_array_get(&bits, i));
+    return out;
+  };
+  EXPECT_EQ(matches(5, 5), (std::vector<bool>{false, true, true, false, false, false, false}));
+  EXPECT_EQ(matches(3, 100), (std::vector<bool>{false, true, true, true, true, false, true}));
+  EXPECT_EQ(matches(-7, -7), (std::vector<bool>{false, false, false, false, false, true, false}));
+  // An impossible range (low > high) matches nothing; the caller's mask stays clear.
+  EXPECT_EQ(matches(6, 4), std::vector<bool>(values.size(), false));
+
+  // The domain the predicate path clamps its bounds against: -7..100 -> 7 bits.
+  EXPECT_EQ(column.bitpack_bias(), -7);
+  EXPECT_EQ(column.bitpack_width(), 7);
+  EXPECT_EQ(column.bitpack_max_value(), int64_t{-7} + ((int64_t{1} << 7) - 1));
+}
+
+TEST(BitPackedCuStorage, DecodePackedRangeFillsAScanBatch) {
+  auto pool = native_pool();
+  auto field = native_bitpack_field(MYSQL_TYPE_LONGLONG, 8);
+  CU column(nullptr, field, 0, 16, pool);
+  const std::vector<int64_t> values{0, 5, 5, 9, 100, -7, 3};
+
+  std::istringstream input(native_packed_record(MYSQL_TYPE_LONGLONG, 8, values));
+  ASSERT_EQ(column.deserialize(nullptr, input, values.size()), SHANNON_SUCCESS);
+  ASSERT_NE(0, column.pack(values.size()));
+
+  // One tight loop decodes the batch into a stride-8 array of canonical slots.
+  std::vector<uchar> batch(values.size() * sizeof(int64_t), 0xAA);
+  ASSERT_TRUE(column.decode_packed_range(0, values.size(), batch.data(), sizeof(int64_t)));
+  for (size_t i = 0; i < values.size(); ++i) {
+    int64_t decoded = 0;
+    std::memcpy(&decoded, batch.data() + i * sizeof(int64_t), sizeof(decoded));
+    EXPECT_EQ(decoded, values[i]) << "row " << i;
+  }
+
+  // A range that leaves the packed stream is refused, as is a stride narrower
+  // than the slot.
+  EXPECT_FALSE(column.decode_packed_range(values.size() - 1, 2, batch.data(), sizeof(int64_t)));
+  EXPECT_FALSE(column.decode_packed_range(0, values.size(), batch.data(), column.get_normalized_length() - 1));
+}
+
+TEST(BitPackedPredicateRange, IntegerRangeCoversEachComparison) {
+  const int64_t lo = -1000, hi = 1000;
+  const auto compare = [&](PredicateOperator op, int64_t bound) {
+    Simple_Predicate pred(0, op, PredicateValue(bound));
+    return pred.integer_range(lo, hi);
+  };
+  const auto is = [](const std::optional<std::pair<int64_t, int64_t>> &range, int64_t low, int64_t high) {
+    return range.has_value() && range->first == low && range->second == high;
+  };
+
+  EXPECT_TRUE(is(compare(PredicateOperator::EQUAL, 5), 5, 5));
+  EXPECT_TRUE(is(compare(PredicateOperator::LESS_THAN, 5), -1000, 4));
+  EXPECT_TRUE(is(compare(PredicateOperator::LESS_EQUAL, 5), -1000, 5));
+  EXPECT_TRUE(is(compare(PredicateOperator::GREATER_THAN, 5), 6, 1000));
+  EXPECT_TRUE(is(compare(PredicateOperator::GREATER_EQUAL, 5), 5, 1000));
+  // A bound outside the domain clamps; strictly-greater than a large bound is empty.
+  EXPECT_TRUE(is(compare(PredicateOperator::LESS_THAN, 5000), -1000, 1000));
+  auto empty = compare(PredicateOperator::GREATER_THAN, 5000);
+  ASSERT_TRUE(empty.has_value());
+  EXPECT_GT(empty->first, empty->second);
+
+  Simple_Predicate between(0, PredicateValue(int64_t{-7}), PredicateValue(int64_t{9}));
+  EXPECT_TRUE(is(between.integer_range(lo, hi), -7, 9));
+  Simple_Predicate inverted(0, PredicateValue(int64_t{9}), PredicateValue(int64_t{-7}));
+  auto inverted_range = inverted.integer_range(lo, hi);
+  ASSERT_TRUE(inverted_range.has_value());
+  EXPECT_GT(inverted_range->first, inverted_range->second);
+
+  // Not one range, or not an integer bound: the caller must evaluate per row.
+  EXPECT_FALSE(Simple_Predicate(0, PredicateOperator::NOT_EQUAL, PredicateValue(int64_t{5})).integer_range(lo, hi));
+  EXPECT_FALSE(
+      Simple_Predicate(0, PredicateOperator::LIKE, PredicateValue(std::string("%x%"))).integer_range(lo, hi));
+  EXPECT_FALSE(Simple_Predicate(0, PredicateOperator::GREATER_THAN, PredicateValue(1.5)).integer_range(lo, hi));
+}
+
 // Test FieldMetadata structure
 TEST(FieldMetadataTest, BasicProperties) {
   FieldMetadata field_meta;

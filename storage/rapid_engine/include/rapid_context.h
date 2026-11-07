@@ -332,6 +332,11 @@ class Rapid_scan_context : public Rapid_context {
   std::vector<Imcs::CU *> proj_cus;
   std::vector<bit_array_t *> proj_null_masks;
 
+  // A bit-packed column has no per-row address, so a scan decodes the whole
+  // batch into these buffers once and hands out pointers into them.
+  std::vector<std::vector<uchar>> packed_scratch;
+  std::vector<size_t> packed_widths;
+
   // bit_array_t sizes its storage in its constructor and reports is_all_*()
   // over exactly `rows`, so it is rebuilt only when the batch width changes.
   std::unique_ptr<bit_array_t> visibility_mask;
