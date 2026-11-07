@@ -676,6 +676,14 @@ bool CU::decode_packed_range(size_t row_begin, size_t count, uchar *dst, size_t 
   return true;
 }
 
+bool CU::reduce_packed_row(row_id_t local_row_id, PackedReduction &acc) const {
+  if (!m_packed.valid() || local_row_id >= m_packed_rows) return false;
+  int64_t value = 0;
+  if (!m_packed.GetValue(local_row_id, &value)) return false;
+  acc.add_value(value);
+  return true;
+}
+
 bool CU::match_value_range(size_t row_begin, size_t count, int64_t low, int64_t high, bit_array_t &bits) const {
   if (!m_packed.valid() || bits.data == nullptr) return false;
   const size_t bytes = (count + 7) / 8;

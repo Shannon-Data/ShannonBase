@@ -49,6 +49,7 @@ class Rapid_scan_context;
 namespace Imcs {
 class Imcs;
 class Cu;
+class CU;
 class Imcu;
 class RapidTable;
 class RpdTable;
@@ -78,15 +79,49 @@ struct ColumnChunkRecv : RecieverBase {
   /// A row could not be stored: the scan must fail, never silently drop it.
   bool append_failed{false};
 
+  // Projected columns whose chunk asked for a reduction instead of values. They
+  // are left out of the scan projection and reduced straight from the codes.
+  std::vector<uint32_t> reduced_cols;
+  // projection_cols minus reduced_cols, in the order the scan returns data.
+  std::vector<uint32_t> effective_proj;
+  std::vector<size_t> effective_lengths;
+
+  // CUs of reduced_cols for the IMCU the current row belongs to. Rows arrive in
+  // IMCU order, so this is refreshed once per IMCU, not once per row.
+  std::vector<CU *> reduced_cus;
+  row_id_t cached_begin{0};
+  row_id_t cached_end{0};
+  bool cache_valid{false};
+
   /// Number of rows actually materialised into chunks (≤ rows examined).
   size_t rows_received() const { return read_cnt; }
 
   inline bool accept_more() const { return !append_failed; }
 
+  /** True when this batch can be answered as a reduction for every column. */
+  bool can_reduction() const { return !reduced_cols.empty(); }
+
+  /** Give up reducing `col`; the caller re-runs finalize_projection(). */
+  void drop_reduction(uint32_t col);
+
+  /** Give up on every reduction (a source that cannot reduce still fills values). */
+  void disable_reductions() {
+    reduced_cols.clear();
+    for (auto &chunk : chunks) chunk.set_reduce_mask(0);
+    finalize_projection();
+  }
+
+  /** Set when a row could not be reduced although the batch asked for it. */
+  bool reduction_gap{false};
+
+  /** Rebuild effective_proj/effective_lengths from the current reduced set. */
+  void finalize_projection();
+
   void on_batch_begin() {
     read_cnt = 0;
     append_failed = false;
     row_ids.clear();
+    cache_valid = false;
   }
   void on_row(row_id_t rowid, const std::vector<const uchar *> &row_data);
 };
@@ -186,6 +221,18 @@ class RapidCursor : public MemoryObject {
   // to the next rows.
   int next(uchar *buf);
   boost::asio::awaitable<int> next_async(uchar *buf);
+
+  /**
+   * CU of `col` in the IMCU that owns `global_rowid`, when that CU still holds
+   * the column bit-packed. nullptr when the column is absent or unpacked, so a
+   * caller can fall back to reading values.
+   */
+  CU *reduce_column_cu(uint32 col, row_id_t global_rowid) const;
+
+  /** True when every IMCU from `from_imcu` on holds `col` bit-packed. */
+  bool column_packed_from(uint32 col, size_t from_imcu) const;
+
+  size_t rows_per_imcu() const;
 
   // read the data in data in batch mode. Vectorised / batch scan
   int next(size_t batch_size, std::pmr::vector<ShannonBase::Executor::ColumnChunk> &data, size_t &read_cnt);

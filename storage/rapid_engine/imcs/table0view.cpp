@@ -28,6 +28,8 @@
 #include "storage/rapid_engine/monitor/rapid_monitor.h"
 #include "storage/rapid_engine/populate/log_binlog_parser.h"
 
+#include <cstdio>
+#include <cstdlib>
 #include <limits>
 #include <map>
 #include <sstream>
@@ -663,18 +665,48 @@ int RapidCursor::next(size_t batch_size, std::pmr::vector<ShannonBase::Executor:
   }
 
   ColumnChunkRecv receiver{this, projection_cols, col_chunks, m_batch_row_ids, read_cnt};
-  scan_batch_internal(batch_size, projection_cols, receiver);
+  // A reduction needs every IMCU the scan can still reach to hold the column
+  // packed; rows that come from an unpacked CU have no code to read.
+  if (receiver.can_reduction()) {
+    const std::vector<uint32_t> candidates = receiver.reduced_cols;
+    for (uint32_t col : candidates)
+      if (!column_packed_from(col, m_scan_state.curr_imcu_idx)) receiver.drop_reduction(col);
+    receiver.finalize_projection();
+  }
+
+  scan_batch_internal(batch_size, receiver.effective_proj, receiver);
   // A refused append means rows were already consumed from the IMCUs.
   if (receiver.append_failed) {
     my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid batch scan overflowed its output chunk");
     return HA_ERR_GENERIC;
   }
+  if (receiver.reduction_gap) return HA_ERR_GENERIC;
   if (QueryKilled(m_scan_context.get())) return HA_ERR_QUERY_INTERRUPTED;
   if (read_cnt > 0) {
     m_rows_returned += static_cast<ha_rows>(read_cnt);
     return ShannonBase::SHANNON_SUCCESS;
   }
   return HA_ERR_END_OF_FILE;
+}
+
+CU *RapidCursor::reduce_column_cu(uint32 col, row_id_t global_rowid) const {
+  const size_t per_imcu = rows_per_imcu();
+  if (per_imcu == 0) return nullptr;
+  const size_t imcu_idx = static_cast<size_t>(global_rowid / per_imcu);
+  if (imcu_idx >= m_scan_imcus.size() || !m_scan_imcus[imcu_idx]) return nullptr;
+  CU *cu = m_scan_imcus[imcu_idx]->get_cu(col);
+  return (cu != nullptr && cu->is_bitpacked()) ? cu : nullptr;
+}
+
+size_t RapidCursor::rows_per_imcu() const { return m_rpd_table ? m_rpd_table->meta().rows_per_imcu : 0; }
+
+bool RapidCursor::column_packed_from(uint32 col, size_t from_imcu) const {
+  for (size_t idx = from_imcu; idx < m_scan_imcus.size(); ++idx) {
+    if (!m_scan_imcus[idx]) continue;
+    const CU *cu = m_scan_imcus[idx]->get_cu(col);
+    if (cu == nullptr || !cu->is_bitpacked()) return false;
+  }
+  return true;
 }
 
 std::unique_ptr<Executor::Morsel::ParallelSource> RapidCursor::create_parallel_source(
@@ -1286,6 +1318,9 @@ int RapidCursor::fill_index_batch(bool reverse, size_t max_rows, const std::vect
   const auto *key_desc = m_rpd_table->get_art_index_descriptor(static_cast<uint>(m_active_index));
   const auto *key_index = key_desc != nullptr ? m_rpd_table->get_index(key_desc->key_name) : nullptr;
   const bool need_keys = key_desc != nullptr && (key_index == nullptr || key_index->has_versioned_keys());
+  // The ART walk re-orders rows and re-checks keys per candidate, so this path
+  // keeps every column as values.
+  receiver.disable_reductions();
 
   // Offsets of the current same-IMCU run, materialized in one shot on flush.
   std::vector<uint32_t> run_offsets;
@@ -1426,14 +1461,36 @@ ColumnChunkRecv::ColumnChunkRecv(RapidCursor *c, const std::vector<uint32_t> &pr
   projection_lengths.reserve(proj.size());
   const auto &fields = c->table()->meta().fields;
   for (uint32_t col : proj) projection_lengths.push_back(col < fields.size() ? fields[col].normalized_length : 0);
+
+  // A chunk that asked for a reduction carries no values, so the scan must not
+  // produce them: leave the column out of the projection the scan walks.
+  for (size_t idx = 0; idx < proj.size(); ++idx)
+    if (proj[idx] < chunks.size() && chunks[proj[idx]].reduce_mask() != 0) reduced_cols.push_back(proj[idx]);
+  finalize_projection();
+}
+
+void ColumnChunkRecv::drop_reduction(uint32_t col) {
+  reduced_cols.erase(std::remove(reduced_cols.begin(), reduced_cols.end(), col), reduced_cols.end());
+  if (col < chunks.size()) chunks[col].set_reduce_mask(0);
+}
+
+void ColumnChunkRecv::finalize_projection() {
+  effective_proj.clear();
+  effective_lengths.clear();
+  for (size_t idx = 0; idx < projection_cols.size(); ++idx) {
+    const uint32_t col = projection_cols[idx];
+    if (std::find(reduced_cols.begin(), reduced_cols.end(), col) != reduced_cols.end()) continue;
+    effective_proj.push_back(col);
+    effective_lengths.push_back(projection_lengths[idx]);
+  }
 }
 
 void ColumnChunkRecv::on_row(row_id_t rowid, const std::vector<const uchar *> &row_data) {
   if (append_failed) return;
   // Check every target column first: a mid-row failure would leave the chunks
   // with different row counts.
-  for (size_t idx = 0; idx < projection_cols.size(); ++idx) {
-    const auto col_idx = projection_cols[idx];
+  for (size_t idx = 0; idx < effective_proj.size(); ++idx) {
+    const auto col_idx = effective_proj[idx];
     if (col_idx >= chunks.size()) continue;
     auto &chunk = chunks[col_idx];
     if (!chunk.valid() || chunk.full()) {
@@ -1441,14 +1498,49 @@ void ColumnChunkRecv::on_row(row_id_t rowid, const std::vector<const uchar *> &r
       return;
     }
   }
-  for (size_t idx = 0; idx < projection_cols.size(); ++idx) {
-    const auto col_idx = projection_cols[idx];
+  for (size_t idx = 0; idx < effective_proj.size(); ++idx) {
+    const auto col_idx = effective_proj[idx];
     if (col_idx >= chunks.size()) continue;
-    if (!chunks[col_idx].add(row_data[idx], projection_lengths[idx], row_data[idx] == nullptr)) {
+    if (!chunks[col_idx].add(row_data[idx], effective_lengths[idx], row_data[idx] == nullptr)) {
       append_failed = true;
       return;
     }
   }
+
+  // Reduced columns have no value in this row: accumulate the code instead.
+  if (!reduced_cols.empty()) {
+    if (!cache_valid || rowid < cached_begin || rowid >= cached_end) {
+      const size_t per_imcu = cursor != nullptr ? cursor->rows_per_imcu() : 0;
+      if (per_imcu == 0) {
+        reduction_gap = true;
+        return;
+      }
+      cached_begin = static_cast<row_id_t>(rowid / per_imcu) * per_imcu;
+      cached_end = cached_begin + static_cast<row_id_t>(per_imcu);
+      cache_valid = true;
+      reduced_cus.clear();
+      for (uint32_t col : reduced_cols) {
+        CU *cu = cursor->reduce_column_cu(col, rowid);
+        if (cu == nullptr) {
+          // The column was unpacked after the batch was prepared. Report it
+          // instead of answering with a reduction that misses this row.
+          reduction_gap = true;
+          return;
+        }
+        reduced_cus.push_back(cu);
+      }
+    }
+
+    for (size_t idx = 0; idx < reduced_cols.size(); ++idx) {
+      Executor::ColumnChunk &chunk = chunks[reduced_cols[idx]];
+      if (!reduced_cus[idx]->reduce_packed_row(rowid - cached_begin, chunk.mutable_reduction())) {
+        reduction_gap = true;
+        return;
+      }
+      ++chunk.mutable_reduction().rows;
+    }
+  }
+
   row_ids.push_back(rowid);
   ++read_cnt;
 }
