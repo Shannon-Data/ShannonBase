@@ -193,6 +193,8 @@ void collect_rapid_monitor_metrics(Metrics &metrics) {
       rapid_counters.query_bitpacked_predicate_rows_total.load(std::memory_order_relaxed);
   metrics.query_bitpacked_unpack_rows_total =
       rapid_counters.query_bitpacked_unpack_rows_total.load(std::memory_order_relaxed);
+  metrics.query_bitpacked_aggregate_rows_total =
+      rapid_counters.query_bitpacked_aggregate_rows_total.load(std::memory_order_relaxed);
   metrics.query_parallel_workers_total = rapid_counters.query_parallel_workers_total.load(std::memory_order_relaxed);
   metrics.query_parallel_tasks_total = rapid_counters.query_parallel_tasks_total.load(std::memory_order_relaxed);
   metrics.query_parallel_rows_total = rapid_counters.query_parallel_rows_total.load(std::memory_order_relaxed);

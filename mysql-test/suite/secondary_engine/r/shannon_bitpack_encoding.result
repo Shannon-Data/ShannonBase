@@ -54,6 +54,19 @@ id
 SELECT COUNT(*), SUM(int_val), MIN(tiny_val), MAX(big_val) FROM t_bp;
 COUNT(*)	SUM(int_val)	MIN(tiny_val)	MAX(big_val)
 6	-499	0	1000000000002
+# A GROUP BY needs the values, and a filter sits between the scan and the
+# aggregate: neither may take the code-reduction path, both must agree.
+SELECT int_val, COUNT(*), SUM(big_val) FROM t_bp GROUP BY int_val ORDER BY int_val;
+int_val	COUNT(*)	SUM(big_val)
+NULL	1	NULL
+-1000	1	999999999999
+-999	1	999999999998
+0	1	1000000000000
+500	1	1000000000002
+1000	1	1000000000001
+SELECT SUM(int_val), MIN(tiny_val), MAX(big_val) FROM t_bp WHERE plain > 5;
+SUM(int_val)	MIN(tiny_val)	MAX(big_val)
+-499	0	1000000000002
 # The comparisons above are single integer ranges, so the packed stream
 # must have been matched a word at a time rather than decoded per row.
 # The scans that fed them decoded whole batches through the unpack kernel.
@@ -102,6 +115,48 @@ id	tiny_val	int_val	big_val	plain
 5	NULL	NULL	NULL	NULL
 6	2	500	1000000000002	7
 7	5	250	1000000000003	1
+# An aggregate can read the codes instead of materialising the column,
+# but only a scan of a whole batch reaches that path: a handful of rows is
+# served from the scan's row buffer. So drive it with a table that fills
+# several batches, and check the numbers against InnoDB.
+CREATE TABLE t_bp_big (
+id INT PRIMARY KEY,
+bp_val INT COMMENT 'RAPID_COLUMN=ENCODING=BITPACK',
+plain INT
+) SECONDARY_ENGINE=RAPID;
+SET cte_max_recursion_depth = 20000;
+INSERT INTO t_bp_big
+WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 3000)
+SELECT n, n + 10, n % 3 FROM seq;
+ALTER TABLE t_bp_big SECONDARY_LOAD;
+SET USE_SECONDARY_ENGINE=OFF;
+SELECT CAST(VARIABLE_VALUE AS UNSIGNED) AS reduced_before FROM performance_schema.global_status
+WHERE VARIABLE_NAME = 'rapid_query_bitpacked_aggregate_rows_total';
+reduced_before
+0
+SET USE_SECONDARY_ENGINE=FORCED;
+SELECT COUNT(*), SUM(bp_val), MIN(bp_val), MAX(bp_val) FROM t_bp_big;
+COUNT(*)	SUM(bp_val)	MIN(bp_val)	MAX(bp_val)
+3000	4531500	11	3010
+SET USE_SECONDARY_ENGINE=OFF;
+SELECT CAST(VARIABLE_VALUE AS UNSIGNED) > 0 AS used_aggregate_kernel
+FROM performance_schema.global_status
+WHERE VARIABLE_NAME = 'rapid_query_bitpacked_aggregate_rows_total';
+used_aggregate_kernel
+1
+SET USE_SECONDARY_ENGINE=FORCED;
+# A GROUP BY still needs the values, and must stay correct.
+SELECT plain, COUNT(*), SUM(bp_val) FROM t_bp_big GROUP BY plain ORDER BY plain;
+plain	COUNT(*)	SUM(bp_val)
+0	1000	1511500
+1	1000	1509500
+2	1000	1510500
+# An UPDATE unpacks the column, so the reduction must fall back to values.
+UPDATE t_bp_big SET bp_val = bp_val + 1 WHERE id <= 10;
+SELECT COUNT(*), SUM(bp_val), MIN(bp_val), MAX(bp_val) FROM t_bp_big;
+COUNT(*)	SUM(bp_val)	MIN(bp_val)	MAX(bp_val)
+3000	4531510	12	3010
+DROP TABLE t_bp_big;
 SELECT COUNT(*), SUM(big_val) FROM t_bp;
 COUNT(*)	SUM(big_val)
 6	5000000000005

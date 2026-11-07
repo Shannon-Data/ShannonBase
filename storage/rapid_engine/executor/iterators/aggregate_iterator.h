@@ -695,6 +695,16 @@ class VectorizedAggregateIterator final : public RowIterator, public ResMgmt::Ev
 
   bool SetupBatchChunks();
   void ResolveGroupKeyFields();
+
+  /**
+   * Ask the batch source to reduce a bit-packed column instead of materialising
+   * it, for the columns whose only consumers are COUNT/SUM/MIN/MAX. Grouping
+   * keys, expressions and anything non-vectorizable keep the value path.
+   */
+  void RequestPackedReductions();
+
+  /** Fold one batch that arrived as a reduction rather than as values. */
+  int AddReducedBatch(const PackedReduction &reduction, const VectorizedGroupProcessor::AggregateInfo &info);
   bool RestoreGroupKeyField(size_t row_idx);
 
   // Batch processing

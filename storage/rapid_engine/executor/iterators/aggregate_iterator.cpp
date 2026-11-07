@@ -2748,6 +2748,11 @@ int VectorizedAggregateIterator::ProcessVectorizedAggregates(const std::pmr::vec
         !col_chunks[info.batch_chunk_idx].valid())
       continue;
     const ColumnChunk &chunk = col_chunks[info.batch_chunk_idx];
+    // The producer reduced the column in storage instead of materialising it.
+    if (chunk.has_reduction()) {
+      if (AddReducedBatch(chunk.reduction(), info) != kSuccess) return kFatalError;
+      continue;
+    }
     size_t non_null = ColumnChunkOper::CountNonNull(chunk, row_count);
 
     switch (info.type) {
@@ -3300,10 +3305,142 @@ bool VectorizedAggregateIterator::SetupBatchChunks() {
   }
 
   if (!m_vectorizer.current_batch.initialized && SetupColumnChunks()) return true;
+  // A packed column whose only consumers are COUNT/SUM/MIN/MAX does not have to
+  // be materialised: the scan reduces the codes and reports it per batch.
+  RequestPackedReductions();
   ResolveGroupKeyFields();
   if (thd()->is_error()) return true;
   m_batch_chunks_initialized = true;
   return false;
+}
+
+namespace {
+// my_decimal from an accumulated int128_t sum, exactly. Once per batch, so the
+// decimal string conversion costs nothing measurable.
+my_decimal DecimalFromInt128(int128_t value) {
+  uint128_t magnitude = value < 0 ? -static_cast<uint128_t>(value) : static_cast<uint128_t>(value);
+  char digits[48];
+  char *begin = digits + sizeof(digits);
+  *--begin = '\0';
+  do {
+    *--begin = static_cast<char>('0' + static_cast<int>(magnitude % 10));
+    magnitude /= 10;
+  } while (magnitude != 0);
+  if (value < 0) *--begin = '-';
+
+  my_decimal converted;
+  if (str2my_decimal(E_DEC_OK, begin, std::strlen(begin), &my_charset_bin, &converted) != E_DEC_OK)
+    int2my_decimal(E_DEC_OK, 0, false, &converted);
+  return converted;
+}
+}  // namespace
+
+void VectorizedAggregateIterator::RequestPackedReductions() {
+  if (m_batch_source == nullptr) return;
+  // Only a source that serves whole rows of one scan can carry a reduction
+  // through; a filter, join or re-ordering operator cannot.
+  if (!m_batch_source->SupportsPackedReduction()) return;
+  // A grouping key is read as a value (it identifies the group) and a HASH
+  // aggregate keeps the rows around, so neither can be reduced away.
+  if (m_strategy == AggregateStrategy::HASH) return;
+  if (!m_join->group_list.empty() || m_join->having_cond != nullptr) return;
+
+  struct Want {
+    size_t chunk_idx;
+    uint8_t mask;
+    bool blocked;  // some consumer needs the values
+  };
+  std::vector<Want> wants;
+  const auto want_for = [&wants](size_t chunk_idx) -> Want & {
+    for (auto &w : wants)
+      if (w.chunk_idx == chunk_idx) return w;
+    wants.push_back({chunk_idx, 0, false});
+    return wants.back();
+  };
+
+  for (const auto &info : m_vectorizer.aggregate_infos) {
+    if (info.source_field == nullptr || info.value_expr != nullptr) continue;
+    if (info.batch_chunk_idx == static_cast<size_t>(-1) || info.batch_chunk_idx >= m_batch_col_chunks.size()) continue;
+    // The producer can only skip a column it would otherwise have filled, i.e.
+    // one the scan projection carries.
+    TABLE *field_table = info.source_field->table;
+    if (field_table == nullptr || field_table->read_set == nullptr ||
+        !bitmap_is_set(field_table->read_set, info.source_field->field_index())) {
+      want_for(info.batch_chunk_idx).blocked = true;
+      continue;
+    }
+    uint8_t bits = 0;
+    if (info.vectorizable) {
+      switch (info.type) {
+        case Item_sum::COUNT_FUNC:
+          bits = to_mask(ReduceBit::kCount);
+          break;
+        case Item_sum::SUM_FUNC:
+          bits = to_mask(ReduceBit::kSum);
+          break;
+        case Item_sum::MIN_FUNC:
+        case Item_sum::MAX_FUNC:
+          bits = to_mask(ReduceBit::kMinMax);
+          break;
+        default:
+          break;
+      }
+    }
+    // Only the fixed-width integer shapes BITPACK stores can be reduced.
+    if (bits != 0 && Utils::Util::is_string(info.source_field->type())) bits = 0;
+
+    Want &want = want_for(info.batch_chunk_idx);
+    if (bits == 0)
+      want.blocked = true;
+    else
+      want.mask |= bits;
+  }
+
+  for (const Want &want : wants)
+    if (!want.blocked && m_batch_col_chunks[want.chunk_idx].valid())
+      m_batch_col_chunks[want.chunk_idx].set_reduce_mask(want.mask);
+}
+
+int VectorizedAggregateIterator::AddReducedBatch(const PackedReduction &reduction,
+                                                 const VectorizedGroupProcessor::AggregateInfo &info) {
+  switch (info.type) {
+    case Item_sum::COUNT_FUNC:
+      down_cast<Item_sum_count *>(info.item)->add_value(reduction.non_null);
+      break;
+    case Item_sum::SUM_FUNC: {
+      // A batch of nothing but NULLs adds no row, exactly as the value path.
+      if (reduction.non_null == 0) break;
+      my_decimal delta = DecimalFromInt128(reduction.sum);
+      if (m_vectorizer.Sum(down_cast<Item_sum_sum *>(info.item), info.source_field, delta)) return kFatalError;
+      break;
+    }
+    case Item_sum::MIN_FUNC:
+    case Item_sum::MAX_FUNC: {
+      if (!reduction.any) break;
+      const longlong value =
+          static_cast<longlong>(info.type == Item_sum::MIN_FUNC ? reduction.min_value : reduction.max_value);
+      TABLE *source_table = info.source_field->table;
+      const uint source_field_index = info.source_field->field_index();
+      // Field::store() requires the column to be writable; an input column of
+      // the aggregate is not, so mark it for the duration of the store exactly
+      // as the value path does.
+      const bool restore_write_set = source_table != nullptr && source_table->write_set != nullptr &&
+                                     !bitmap_is_set(source_table->write_set, source_field_index);
+      if (restore_write_set) bitmap_set_bit(source_table->write_set, source_field_index);
+      info.source_field->set_notnull();
+      const type_conversion_status status =
+          info.source_field->store(value, info.source_field->is_flag_set(UNSIGNED_FLAG));
+      if (restore_write_set) bitmap_clear_bit(source_table->write_set, source_field_index);
+      if (status == TYPE_ERR_BAD_VALUE) return kFatalError;
+      if (info.item->aggregator_add()) return kFatalError;
+      break;
+    }
+    default:
+      return kFatalError;
+  }
+  RapidMonitor::rapid_counters.query_bitpacked_aggregate_rows_total.fetch_add(reduction.rows,
+                                                                              std::memory_order_relaxed);
+  return kSuccess;
 }
 
 // Hoist out of BuildHashGroupKeyFromBatch()'s row loop everything that is

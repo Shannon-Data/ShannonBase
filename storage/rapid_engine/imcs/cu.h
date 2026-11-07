@@ -429,6 +429,12 @@ class CU : public MemoryObject {
    */
   bool decode_packed_range(size_t row_begin, size_t count, uchar *dst, size_t stride) const;
 
+  /**
+   * Decode one packed row straight into a reduction, with no slot written.
+   * False when the column is not packed or the row is outside the stream.
+   */
+  bool reduce_packed_row(row_id_t local_row_id, PackedReduction &acc) const;
+
  private:
   inline bool needs_dictionary() const {
     return (m_header.field_desc.type == MYSQL_TYPE_VARCHAR || m_header.field_desc.type == MYSQL_TYPE_STRING ||

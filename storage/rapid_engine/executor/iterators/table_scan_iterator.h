@@ -192,6 +192,12 @@ namespace Executor {
 class VectorizedTableScanIterator final : public TableRowIterator, public BatchReadable {
  public:
   bool PreservesBatchNullRows() const override { return true; }
+
+  // The random-access scan hands a batch straight from the IMCUs, so a packed
+  // column can be reduced in storage. An ART walk re-orders rows and re-checks
+  // keys per candidate, so it keeps materialising values.
+  bool SupportsPackedReduction() const override { return m_index_no < 0 && m_filter == nullptr; }
+
   VectorizedTableScanIterator(THD *thd, TABLE *mtable, double expected_rows, ha_rows *examined_rows,
                               std::unique_ptr<Imcs::Predicate> predicate = nullptr,
                               const std::vector<uint32_t> &projection = {}, ha_rows limit = HA_POS_ERROR,
