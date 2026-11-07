@@ -228,6 +228,17 @@ inline bool PrepareBudgetedString(String *value, std::pmr::vector<char> *buffer,
   return true;
 }
 
+// What a consumer wants from a bit-packed column instead of its values. Scoped
+// and explicitly typed: a mask is never read as a plain int by accident, and the
+// values combine into the uint8_t mask ColumnChunk stores.
+enum class ReduceBit : uint8_t {
+  kCount = 1u << 0,
+  kSum = 1u << 1,
+  kMinMax = 1u << 2,
+};
+
+constexpr uint8_t to_mask(ReduceBit bit) noexcept { return static_cast<uint8_t>(bit); }
+
 class ColumnChunk {
  public:
   // ColumnChunk is deliberately single-consumer. Parallel operators must own
@@ -361,7 +372,23 @@ class ColumnChunk {
    * overwrites every byte of a non-NULL fixed-width value, so clearing the whole
    * capacity here only burns memory bandwidth on the analytical hot path.
    */
-  inline void clear() noexcept { m_current_size = 0; }
+  inline void clear() noexcept {
+    m_current_size = 0;
+    m_reduction.reset();
+  }
+
+  /**
+   * A consumer that only needs COUNT/SUM/MIN/MAX of a bit-packed column can ask
+   * the producer to reduce the codes in storage instead of materialising them.
+   * The producer fills reduction() and leaves the value buffer untouched; a
+   * chunk that did not get reduced simply keeps carrying values, which the
+   * consumer still accepts.
+   */
+  inline void set_reduce_mask(uint8_t mask) noexcept { m_reduce_mask = mask; }
+  inline uint8_t reduce_mask() const noexcept { return m_reduce_mask; }
+  inline bool has_reduction() const noexcept { return m_reduction.rows != 0; }
+  inline PackedReduction &mutable_reduction() noexcept { return m_reduction; }
+  inline const PackedReduction &reduction() const noexcept { return m_reduction; }
 
   void resize(size_t new_size) {
     assert(new_size <= m_chunk_size);
@@ -470,6 +497,11 @@ class ColumnChunk {
   // Cached raw pointer to m_null_mask->data — avoids unique_ptr::get() + ->data
   // indirection on the nullable hot path.
   uint8_t *m_null_mask_data{nullptr};
+
+  // COUNT/SUM/MIN/MAX bits this consumer wants from a packed column, and what
+  // the producer accumulated for the current batch.
+  uint8_t m_reduce_mask{0};
+  PackedReduction m_reduction;
 };
 
 /**
@@ -794,6 +826,17 @@ class BatchReadable {
    * dynamic_cast probe and stay on the row path when it returns false.
    */
   virtual bool SupportsBatchRead() const { return true; }
+
+  /**
+   * True when ReadBatch() can hand a bit-packed column back as a reduction
+   * (ColumnChunk::set_reduce_mask()) instead of its values.
+   *
+   * Only a source that serves whole rows of one scan may answer this: an
+   * operator that filters, re-orders or re-encodes rows cannot carry a
+   * reduction through, so it keeps the default and the consumer materialises
+   * values as usual.
+   */
+  virtual bool SupportsPackedReduction() const { return false; }
 
   /**
    * Fill col_chunks with up to `capacity` rows directly from columnar storage.

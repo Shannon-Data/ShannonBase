@@ -25,6 +25,7 @@
 */
 #ifndef __SHANNONBASE_RPD_TYPES_H__
 #define __SHANNONBASE_RPD_TYPES_H__
+#include <algorithm>
 #include <cassert>
 #include <cstring>
 #include <limits>
@@ -470,6 +471,50 @@ typedef struct BitArray {
 } BitArray_t;
 
 using bit_array_t = BitArray_t;
+
+/**
+ * Reduction over one batch of a bit-packed column, accumulated from its codes.
+ * The values are already in the column's domain (bias applied), so batches that
+ * came from different CUs -- with different biases -- fold with the same
+ * merge(): sum and count add, min/max compare on values.
+ */
+struct PackedReduction {
+  uint64_t rows{0};      // rows covered by this reduction
+  uint64_t non_null{0};  // rows that carried a code
+  int128_t sum{0};       // sum of the values
+  int64_t min_value{0};
+  int64_t max_value{0};
+  bool any{false};  // at least one non-NULL value
+
+  inline void reset() noexcept { *this = PackedReduction{}; }
+
+  inline void add_value(int64_t value) noexcept {
+    sum += value;
+    if (!any) {
+      min_value = max_value = value;
+      any = true;
+    } else {
+      min_value = std::min(min_value, value);
+      max_value = std::max(max_value, value);
+    }
+    ++non_null;
+  }
+
+  inline void merge(const PackedReduction &other) noexcept {
+    rows += other.rows;
+    sum += other.sum;
+    non_null += other.non_null;
+    if (!other.any) return;
+    if (!any) {
+      min_value = other.min_value;
+      max_value = other.max_value;
+      any = true;
+    } else {
+      min_value = std::min(min_value, other.min_value);
+      max_value = std::max(max_value, other.max_value);
+    }
+  }
+};
 
 using mysql_field_t = struct mysql_field_info {
   // whether field nullable or not.

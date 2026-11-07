@@ -549,6 +549,44 @@ TEST(BitPackedCuStorage, DecodePackedRangeFillsAScanBatch) {
   EXPECT_FALSE(column.decode_packed_range(0, values.size(), batch.data(), column.get_normalized_length() - 1));
 }
 
+TEST(BitPackedCuStorage, ReducePackedRowsAccumulatesCodes) {
+  auto pool = native_pool();
+  auto field = native_bitpack_field(MYSQL_TYPE_LONGLONG, 8);
+  CU column(nullptr, field, 0, 16, pool);
+  const std::vector<int64_t> values{0, 5, 5, 9, 100, -7, 3};
+
+  std::istringstream input(native_packed_record(MYSQL_TYPE_LONGLONG, 8, values));
+  ASSERT_EQ(column.deserialize(nullptr, input, values.size()), SHANNON_SUCCESS);
+  ASSERT_NE(0, column.pack(values.size()));
+
+  PackedReduction acc;
+  for (size_t i = 0; i < values.size(); ++i) {
+    ASSERT_TRUE(column.reduce_packed_row(i, acc)) << "row " << i;
+    ++acc.rows;
+  }
+  EXPECT_EQ(acc.rows, values.size());
+  EXPECT_EQ(acc.non_null, values.size());
+  EXPECT_EQ(acc.sum, static_cast<__int128>(115));  // 0+5+5+9+100-7+3
+  EXPECT_EQ(acc.min_value, -7);
+  EXPECT_EQ(acc.max_value, 100);
+  EXPECT_TRUE(acc.any);
+
+  // A row outside the packed stream is refused, so a caller never silently
+  // reduces a shorter range than it asked for.
+  EXPECT_FALSE(column.reduce_packed_row(values.size(), acc));
+
+  // Segments fold like values, whatever bias produced them.
+  PackedReduction other;
+  other.add_value(-7);
+  other.rows = 1;
+  acc.merge(other);
+  EXPECT_EQ(acc.rows, values.size() + 1);
+  EXPECT_EQ(acc.non_null, values.size() + 1);
+  EXPECT_EQ(acc.sum, static_cast<__int128>(108));
+  EXPECT_EQ(acc.min_value, -7);
+  EXPECT_EQ(acc.max_value, 100);
+}
+
 TEST(BitPackedPredicateRange, IntegerRangeCoversEachComparison) {
   const int64_t lo = -1000, hi = 1000;
   const auto compare = [&](PredicateOperator op, int64_t bound) {
@@ -579,8 +617,7 @@ TEST(BitPackedPredicateRange, IntegerRangeCoversEachComparison) {
 
   // Not one range, or not an integer bound: the caller must evaluate per row.
   EXPECT_FALSE(Simple_Predicate(0, PredicateOperator::NOT_EQUAL, PredicateValue(int64_t{5})).integer_range(lo, hi));
-  EXPECT_FALSE(
-      Simple_Predicate(0, PredicateOperator::LIKE, PredicateValue(std::string("%x%"))).integer_range(lo, hi));
+  EXPECT_FALSE(Simple_Predicate(0, PredicateOperator::LIKE, PredicateValue(std::string("%x%"))).integer_range(lo, hi));
   EXPECT_FALSE(Simple_Predicate(0, PredicateOperator::GREATER_THAN, PredicateValue(1.5)).integer_range(lo, hi));
 }
 

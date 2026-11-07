@@ -130,7 +130,9 @@ ColumnChunk::ColumnChunk(ColumnChunk &&other) noexcept
       m_cols_buffer(std::move(other.m_cols_buffer)),
       m_cols_buffer_data(other.m_cols_buffer_data),
       m_null_mask(std::move(other.m_null_mask)),
-      m_null_mask_data(other.m_null_mask_data) {
+      m_null_mask_data(other.m_null_mask_data),
+      m_reduce_mask(other.m_reduce_mask),
+      m_reduction(other.m_reduction) {
   other.m_source_fld = nullptr;
   other.m_type = MYSQL_TYPE_NULL;
   other.m_field_width = 0;
@@ -140,6 +142,8 @@ ColumnChunk::ColumnChunk(ColumnChunk &&other) noexcept
   other.m_chunk_size = 0;
   other.m_cols_buffer_data = nullptr;
   other.m_null_mask_data = nullptr;
+  other.m_reduce_mask = 0;
+  other.m_reduction.reset();
 }
 
 ColumnChunk &ColumnChunk::operator=(ColumnChunk &&other) noexcept {
@@ -164,6 +168,8 @@ void ColumnChunk::swap(ColumnChunk &other) {
   std::swap(m_cols_buffer_data, other.m_cols_buffer_data);
   std::swap(m_null_mask, other.m_null_mask);
   std::swap(m_null_mask_data, other.m_null_mask_data);
+  std::swap(m_reduce_mask, other.m_reduce_mask);
+  std::swap(m_reduction, other.m_reduction);
 }
 
 ColumnChunk::Buffer ColumnChunk::allocate_buffer(size_t capacity) {
@@ -220,6 +226,8 @@ void ColumnChunk::copy_from(const ColumnChunk &other) {
   m_table = other.m_table;
   m_chunk_size = other.m_chunk_size;
   m_current_size = other.m_current_size;
+  m_reduce_mask = other.m_reduce_mask;
+  m_reduction = other.m_reduction;
 
   // A failed allocation leaves this copy invalid; checked by valid().
   if (!initialize_buffers()) return;
