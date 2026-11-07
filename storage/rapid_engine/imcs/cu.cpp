@@ -662,6 +662,28 @@ bool CU::decode_packed_slot(row_id_t local_row_id, uchar *slot) const {
   return true;
 }
 
+bool CU::decode_packed_range(size_t row_begin, size_t count, uchar *dst, size_t stride) const {
+  const size_t width = m_header.field_desc.normalized_length;
+  if (!m_packed.valid() || dst == nullptr || stride < width) return false;
+  if (row_begin + count > m_packed_rows) return false;
+
+  uchar *out = dst;
+  for (size_t row = row_begin; row < row_begin + count; ++row, out += stride) {
+    int64_t value = 0;
+    if (!m_packed.GetValue(row, &value)) return false;
+    bits_to_slot(static_cast<uint64_t>(value), out, width);
+  }
+  return true;
+}
+
+bool CU::match_value_range(size_t row_begin, size_t count, int64_t low, int64_t high, bit_array_t &bits) const {
+  if (!m_packed.valid() || bits.data == nullptr) return false;
+  const size_t bytes = (count + 7) / 8;
+  if (count > bits.rows || bits.size < bytes) return false;
+  if (bytes > 0) std::memset(bits.data, 0, bytes);
+  return m_packed.MatchValueRange(row_begin, count, low, high, bits.data, bits.size);
+}
+
 bool CU::pack_value_locked(row_id_t local_row_id, const uchar *data, size_t len) {
   if (!m_packed.valid() || data == nullptr || local_row_id >= m_packed.rows()) return false;
 

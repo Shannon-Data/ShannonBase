@@ -57,6 +57,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "include/field_types.h"  // enum_field_types
@@ -537,6 +538,15 @@ class Simple_Predicate : public Predicate {
   std::string to_string() const override;
   bool equals(const Predicate &other) const override;
   double estimate_selectivity(const StorageIndex *storage_index = nullptr) const override;
+
+  /**
+   * The inclusive integer range [low, high] this comparison selects inside
+   * [domain_min, domain_max], or nullopt when it is not a single range
+   * (NOT_EQUAL, IN, LIKE, a non-integer bound) and the caller has to evaluate
+   * row by row. An impossible range comes back as low > high, which matches
+   * nothing.
+   */
+  std::optional<std::pair<int64_t, int64_t>> integer_range(int64_t domain_min, int64_t domain_max) const;
 
  public:
   uint32 column_id{UINT32_MAX};            // Column index

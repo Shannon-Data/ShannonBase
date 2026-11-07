@@ -140,6 +140,8 @@ struct Metrics {
   uint64_t query_vectorized_expression_rows_total{0};
   uint64_t query_like_mask_rows_total{0};
   uint64_t cu_bitpacked_columns_total{0};
+  uint64_t query_bitpacked_predicate_rows_total{0};
+  uint64_t query_bitpacked_unpack_rows_total{0};
   uint64_t query_parallel_workers_total{0};
   uint64_t query_parallel_tasks_total{0};
   uint64_t query_parallel_rows_total{0};
@@ -229,6 +231,8 @@ struct RapidCounters {
   std::atomic<uint64_t> query_vectorized_expression_rows_total{0};
   std::atomic<uint64_t> query_like_mask_rows_total{0};
   std::atomic<uint64_t> cu_bitpacked_columns_total{0};
+  std::atomic<uint64_t> query_bitpacked_predicate_rows_total{0};
+  std::atomic<uint64_t> query_bitpacked_unpack_rows_total{0};
   std::atomic<uint64_t> query_parallel_workers_total{0};
   std::atomic<uint64_t> query_parallel_tasks_total{0};
   std::atomic<uint64_t> query_parallel_rows_total{0};

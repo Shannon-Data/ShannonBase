@@ -1528,7 +1528,7 @@ int VectorizedHashJoinIterator::TryBuildParallelHashTable() {
   // the finalize reservations really fail and the serial replay is exercised.
   std::optional<ResMgmt::BoundedMemoryResource::Reservation> withhold_finalize;
   if (refuse_finalize) withhold_finalize.emplace(&m_build_memory, m_build_memory.limit() - m_build_memory.used());
-  const size_t cache_bytes = std::max<size_t>(1, CACHE_L2_SIZE / kFinalizeCacheDivisor);
+  const size_t cache_bytes = std::max<size_t>(1, CACHE_L2_BYTES / kFinalizeCacheDivisor);
   const size_t cache_partitions = CeilDivide(SaturatingMultiply(rows, final_row_bytes), cache_bytes);
   // Enough independent work for workers, without shrinking partitions below
   // an input batch merely to chase the cache-size estimate.
