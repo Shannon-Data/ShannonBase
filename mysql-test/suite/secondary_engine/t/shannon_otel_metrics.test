@@ -1,0 +1,87 @@
+##############################################################################
+# Kernel observability goes out through the telemetry metrics service.
+#
+# The per-operator counters are what tells an operator why a query picked the
+# scalar kernel, spilled, or gave up on a bloom filter. They are deliberately not
+# status variables: SHOW GLOBAL STATUS stays the small documented surface, and a
+# release build keeps these counters purely so an exporter can read them.
+#
+# performance_schema owns the read path. The engine registers a "rapid" meter,
+# and the counters are pulled through a callback when an exporter scrapes, so a
+# metric costs nothing until somebody reads it.
+#
+# Registration is lazy, and this test is as much about when as about what: the
+# plugin's init callback runs from plugin_register_builtin_and_init_core_se(),
+# which is before initialize_performance_schema(), so psi_metric_v1 still holds
+# uninitialised locks there. The first statement that ends on the Rapid handler
+# registers the meter instead. So: after a workload the meter exists, it is
+# complete, and a further statement does not register it a second time.
+##############################################################################
+CREATE DATABASE sh_otel;
+USE sh_otel;
+
+CREATE TABLE t_otel (
+  id INT PRIMARY KEY,
+  grp INT,
+  val INT
+) SECONDARY_ENGINE=RAPID;
+
+--disable_warnings
+SET USE_SECONDARY_ENGINE=FORCED;
+INSERT INTO t_otel VALUES (1,1,10),(2,1,20),(3,2,30),(4,2,40),(5,3,50);
+ALTER TABLE t_otel SECONDARY_LOAD;
+--enable_warnings
+
+--echo #
+--echo # A workload that has to run on the Rapid handler. The group-by is what
+--echo # pushes the aggregate counters, and this statement is also the one that
+--echo # registers the meter.
+SELECT grp, COUNT(*), SUM(val) FROM t_otel GROUP BY grp ORDER BY grp;
+
+--echo #
+--echo # A second statement on the same handler. Registration already happened,
+--echo # so this one must not add anything.
+SELECT COUNT(*) FROM t_otel;
+
+# Forced off again: it applies to every table, so it would send the
+# performance_schema queries themselves to a secondary engine.
+SET USE_SECONDARY_ENGINE=OFF;
+
+if (`SELECT @@performance_schema`) {
+  --echo #
+  --echo # Nothing was dropped on the way in: a duplicate or malformed
+  --echo # definition would show up here instead of silently vanishing.
+  SHOW GLOBAL STATUS LIKE 'Performance_schema_meter_lost';
+  SHOW GLOBAL STATUS LIKE 'Performance_schema_metric_lost';
+  --echo #
+  --echo # The meter is registered, exactly once.
+  SELECT COUNT(*) FROM performance_schema.setup_meters WHERE NAME = 'rapid';
+
+  --echo #
+  --echo # ... with the full set of per-operator counters.
+  SELECT COUNT(*) FROM performance_schema.setup_metrics WHERE METER = 'rapid';
+
+  --echo #
+  --echo # All of them asynchronous integer counters: performance_schema pulls the
+  --echo # value when an exporter scrapes instead of the engine pushing it, which
+  --echo # is what keeps the hot paths at one atomic add.
+  SELECT COUNT(*) FROM performance_schema.setup_metrics
+    WHERE METER = 'rapid' AND METRIC_TYPE = 'ASYNC COUNTER'
+      AND NUM_TYPE = 'INTEGER';
+
+  --echo #
+  --echo # The exported contract, by name.
+  SELECT NAME FROM performance_schema.setup_metrics
+    WHERE METER = 'rapid' ORDER BY NAME;
+
+  --echo #
+  --echo # And nothing leaked back into SHOW GLOBAL STATUS. These names are the
+  --echo # ones an operator would reach for, and all three stay unset: the
+  --echo # documented surface does not grow just because the engine can count.
+  SELECT COUNT(*) FROM performance_schema.global_status
+    WHERE VARIABLE_NAME IN ('rapid_query_scans_total',
+                            'rapid_query_vectorized_aggregate_batch_rows_total',
+                            'rapid_query_hash_join_bloom_rejects_total');
+}
+
+DROP DATABASE sh_otel;
