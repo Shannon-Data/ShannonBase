@@ -102,6 +102,7 @@ SET(SHANNON_POPULATE_SOURCES
 
 SET(SHANNON_MONITOR_SOURCES
     monitor/rapid_monitor.cpp
+    monitor/rapid_telemetry.cc
 )
 
 SET(SHANNON_TRX_SOURCES

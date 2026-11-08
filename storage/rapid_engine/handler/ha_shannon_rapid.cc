@@ -95,6 +95,7 @@
 #include "storage/rapid_engine/include/rapid_context.h"
 #include "storage/rapid_engine/ml/query_arbitrator.h"  // Query Arbitrator
 #include "storage/rapid_engine/monitor/rapid_monitor.h"
+#include "storage/rapid_engine/monitor/rapid_telemetry.h"
 #include "storage/rapid_engine/optimizer/optimizer.h"
 #include "storage/rapid_engine/optimizer/path/access_path.h"
 #include "storage/rapid_engine/optimizer/utils.h"
@@ -237,6 +238,9 @@ int ha_rapid::close() {
   during the join probe, after the build side has finished scanning.
 */
 int ha_rapid::reset() {
+  // First statement through the engine is the earliest moment the telemetry
+  // metrics service can be reached (see rapid_telemetry.h); a no-op afterwards.
+  ShannonBase::RapidMonitor::ensure_rapid_metrics();
   RAPID_LOG_STATS("stmt_end");
   return ShannonBase::SHANNON_SUCCESS;
 }
@@ -2930,6 +2934,9 @@ static int Shannonbase_Rapid_Init(MYSQL_PLUGIN p) {
 }
 
 static int Shannonbase_Rapid_Deinit(MYSQL_PLUGIN) {
+  // Drop the metrics first: performance_schema holds raw pointers into the
+  // engine's counters for as long as the meter stays registered.
+  ShannonBase::RapidMonitor::unregister_rapid_metrics();
   ShannonBase::ResMgmt::work_governor().stop();
   ShannonBase::Autopilot::SelfLoadManager::m_accept_requests.store(false);
   // self-loader worker

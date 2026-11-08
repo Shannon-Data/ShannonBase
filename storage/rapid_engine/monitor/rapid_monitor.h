@@ -45,12 +45,11 @@
 #define RAPID_INSTRUMENTATION 1
 #endif
 
-#if RAPID_INSTRUMENTATION
+// Counters back the metrics an exporter reads, so they are compiled and updated
+// in every build. What stays debug-only is the per-statement RAPID_STATS line
+// below; nothing here is exposed through SHOW GLOBAL STATUS.
 #define RAPID_COUNT(field, value) \
   (::ShannonBase::RapidMonitor::rapid_counters.field.fetch_add((value), std::memory_order_relaxed))
-#else
-#define RAPID_COUNT(field, value) ((void)(value))
-#endif
 
 #if RAPID_INSTRUMENTATION
 namespace ShannonBase {
@@ -166,8 +165,7 @@ struct Metrics {
   uint64_t query_offload_total{0};
   uint64_t query_offload_fallback_total{0};
 
-#if RAPID_INSTRUMENTATION
-  // Per-operator instrumentation: diagnosis only, absent from release.
+  // Per-operator metrics: read by the telemetry exporter, never by SHOW STATUS.
   uint64_t query_scans_total{0};
   uint64_t query_index_lookups_total{0};
   uint64_t query_vectorized_window_rows_total{0};
@@ -222,7 +220,6 @@ struct Metrics {
   uint64_t query_vectorized_aggregate_hash_memory_peak_bytes_max{0};
   uint64_t query_vectorized_sort_rows_total{0};
   uint64_t query_vectorized_sort_spill_rows_total{0};
-#endif
 
   //  Transactions
   uint64_t active_transactions{0};
@@ -262,7 +259,7 @@ struct RapidCounters {
   std::atomic<uint64_t> query_offload_total{0};
   std::atomic<uint64_t> query_offload_fallback_total{0};
 
-#if RAPID_INSTRUMENTATION
+  // Per-operator metrics: read by the telemetry exporter, never by SHOW STATUS.
   std::atomic<uint64_t> query_scans_total{0};
   std::atomic<uint64_t> query_index_lookups_total{0};
   std::atomic<uint64_t> query_vectorized_window_rows_total{0};
@@ -315,7 +312,6 @@ struct RapidCounters {
   std::atomic<uint64_t> query_vectorized_aggregate_hash_memory_peak_bytes_max{0};
   std::atomic<uint64_t> query_vectorized_sort_rows_total{0};
   std::atomic<uint64_t> query_vectorized_sort_spill_rows_total{0};
-#endif
 
   // Transactions
   std::atomic<uint64_t> active_transactions{0};
@@ -398,12 +394,10 @@ inline void rapid_counter_vectorized_aggregate_hash_stats(uint64_t batch_rows, u
   RAPID_COUNT(query_vectorized_aggregate_dict_cache_hits_total, cache_hits);
   RAPID_COUNT(query_vectorized_aggregate_dict_cache_misses_total, cache_misses);
   RAPID_COUNT(query_vectorized_aggregate_hash_mem_peak_bytes_sum_total, peak_bytes);
-#if RAPID_INSTRUMENTATION
   auto &peak_max = rapid_counters.query_vectorized_aggregate_hash_memory_peak_bytes_max;
   uint64_t observed = peak_max.load(std::memory_order_relaxed);
   while (observed < peak_bytes && !peak_max.compare_exchange_weak(observed, peak_bytes, std::memory_order_relaxed)) {
   }
-#endif
 }
 
 // Rows sorted by the vectorized sort, and rows it wrote to sorted runs on disk.

@@ -1,0 +1,106 @@
+CREATE DATABASE sh_otel;
+USE sh_otel;
+CREATE TABLE t_otel (
+id INT PRIMARY KEY,
+grp INT,
+val INT
+) SECONDARY_ENGINE=RAPID;
+SET USE_SECONDARY_ENGINE=FORCED;
+INSERT INTO t_otel VALUES (1,1,10),(2,1,20),(3,2,30),(4,2,40),(5,3,50);
+ALTER TABLE t_otel SECONDARY_LOAD;
+#
+# A workload that has to run on the Rapid handler. The group-by is what
+# pushes the aggregate counters, and this statement is also the one that
+# registers the meter.
+SELECT grp, COUNT(*), SUM(val) FROM t_otel GROUP BY grp ORDER BY grp;
+grp	COUNT(*)	SUM(val)
+1	2	30
+2	2	70
+3	1	50
+#
+# A second statement on the same handler. Registration already happened,
+# so this one must not add anything.
+SELECT COUNT(*) FROM t_otel;
+COUNT(*)
+5
+SET USE_SECONDARY_ENGINE=OFF;
+#
+# Nothing was dropped on the way in: a duplicate or malformed
+# definition would show up here instead of silently vanishing.
+SHOW GLOBAL STATUS LIKE 'Performance_schema_meter_lost';
+Variable_name	Value
+Performance_schema_meter_lost	0
+SHOW GLOBAL STATUS LIKE 'Performance_schema_metric_lost';
+Variable_name	Value
+Performance_schema_metric_lost	0
+#
+# The meter is registered, exactly once.
+SELECT COUNT(*) FROM performance_schema.setup_meters WHERE NAME = 'rapid';
+COUNT(*)
+1
+#
+# ... with the full set of per-operator counters.
+SELECT COUNT(*) FROM performance_schema.setup_metrics WHERE METER = 'rapid';
+COUNT(*)
+36
+#
+# All of them asynchronous integer counters: performance_schema pulls the
+# value when an exporter scrapes instead of the engine pushing it, which
+# is what keeps the hot paths at one atomic add.
+SELECT COUNT(*) FROM performance_schema.setup_metrics
+WHERE METER = 'rapid' AND METRIC_TYPE = 'ASYNC COUNTER'
+      AND NUM_TYPE = 'INTEGER';
+COUNT(*)
+36
+#
+# The exported contract, by name.
+SELECT NAME FROM performance_schema.setup_metrics
+WHERE METER = 'rapid' ORDER BY NAME;
+NAME
+rapid.aggregate.batch_rows
+rapid.aggregate.dict_cache.hits
+rapid.aggregate.dict_cache.misses
+rapid.aggregate.hash_peak_bytes.max
+rapid.aggregate.hash_peak_bytes.sum
+rapid.aggregate.row_materializations
+rapid.aggregate.spill_rows
+rapid.bitpack.aggregate_rows
+rapid.bitpack.columns
+rapid.bitpack.predicate_rows
+rapid.bitpack.unpack_rows
+rapid.gc.purged_versions
+rapid.gc.runs
+rapid.joins.bloom.builds
+rapid.joins.bloom.bytes
+rapid.joins.bloom.checks
+rapid.joins.bloom.disabled
+rapid.joins.bloom.rejects
+rapid.joins.bloom.scan_rejects
+rapid.joins.spill_rows
+rapid.parallel.fallbacks
+rapid.parallel.rows
+rapid.parallel.spills
+rapid.parallel.tasks
+rapid.parallel.workers
+rapid.query.index_lookups
+rapid.query.offload
+rapid.query.offload.fallbacks
+rapid.query.rows.read
+rapid.query.scans
+rapid.sort.rows
+rapid.sort.spill_rows
+rapid.window.scalar_rows
+rapid.window.simd_rows
+rapid.window.spill_bytes
+rapid.window.spill_rows
+#
+# And nothing leaked back into SHOW GLOBAL STATUS. These names are the
+# ones an operator would reach for, and all three stay unset: the
+# documented surface does not grow just because the engine can count.
+SELECT COUNT(*) FROM performance_schema.global_status
+WHERE VARIABLE_NAME IN ('rapid_query_scans_total',
+'rapid_query_vectorized_aggregate_batch_rows_total',
+'rapid_query_hash_join_bloom_rejects_total');
+COUNT(*)
+0
+DROP DATABASE sh_otel;
