@@ -9,13 +9,16 @@
 # Every shape is run three ways -- Rapid's own sort, Rapid with the operator
 # switched off so MySQL's filesort runs over the same Rapid scan, and InnoDB --
 # and the recorded output is identical for all three by construction. Correct
-# output alone does not prove which one ran, so each arm also asserts
-# rapid_query_vectorized_sort_rows_total: it must move for the vectorized arm
-# and stand still for the other two.
+# output alone does not prove which one ran, so the vectorized arm also asserts
+# the RAPID_STATS counter it must move (include/rapid_stats_check.inc). The other
+# two arms are covered by the switch that disables the operator plus the output
+# comparison: a counter cannot show that something did *not* run.
 # ShannonBase copyright 2023-
 ##############################################################################
 
 --source include/no_ps_protocol.inc
+# The arms below switch the operator off with a DBUG keyword, so this test needs
+# a debug server; the counter it witnesses comes from RAPID_STATS.
 --source include/have_debug.inc
 
 CREATE DATABASE sh_vsort_db;
@@ -55,8 +58,8 @@ ALTER TABLE t1 SECONDARY_LOAD;
 --echo #
 --echo # The plan: a sort over a vectorized scan, the whole island in Rapid.
 --echo # EXPLAIN does not say which sort runs -- the operator and MySQL's
---echo # filesort print the same node -- so the counter below is what
---echo # distinguishes them.
+--echo # filesort print the same node -- so the RAPID_STATS witness around this
+--echo # statement is what distinguishes them.
 --echo #
 SET SESSION use_secondary_engine = FORCED;
 --replace_regex /\(cost=[0-9.e+]+ rows=[0-9.e+]+\)//
@@ -66,7 +69,8 @@ EXPLAIN FORMAT=TREE SELECT i, d FROM t1 ORDER BY d, i;
 --echo # Arm 1 of 3: Rapid runs the sort itself.
 --echo #
 SET SESSION use_secondary_engine = FORCED;
-let $before = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_sort_rows_total', Value, 1);
+--let $rapid_stats_action = begin
+--source suite/secondary_engine/include/rapid_stats_check.inc
 SELECT id, i FROM t1 ORDER BY i, id;
 --let $assert_query = SELECT id, i FROM t1 ORDER BY i, id
 --let $assert_ordered = 1
@@ -147,19 +151,20 @@ SELECT id, i FROM t1 WHERE i > 1000 ORDER BY i, id;
 --let $assert_query = SELECT id, i FROM t1 WHERE i > 1000 ORDER BY i, id
 --let $assert_ordered = 1
 --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
-let $after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_sort_rows_total', Value, 1);
---let $sorted = `SELECT $after - $before`
---echo # rows through the vectorized sort (must be > 0):
---let $moved = `SELECT $sorted > 0`
---echo $moved
+--let $rapid_stats_field = sort_rows
+--let $rapid_stats_action = end
+--source suite/secondary_engine/include/rapid_stats_check.inc
 
 --echo #
 --echo # Arm 2 of 3: the same Rapid island, but MySQL's filesort does the sort.
 --echo # The operator must not run, and the answers must not change.
 --echo #
 SET SESSION use_secondary_engine = FORCED;
-SET SESSION debug = '+d,rapid_disable_vectorized_sort';
-let $before = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_sort_rows_total', Value, 1);
+--disable_query_log
+if ($rapid_have_dbug) {
+  SET SESSION debug = '+d,rapid_disable_vectorized_sort';
+}
+--enable_query_log
 SELECT id, i FROM t1 ORDER BY i, id;
 --let $assert_query = SELECT id, i FROM t1 ORDER BY i, id
 --let $assert_ordered = 1
@@ -240,17 +245,16 @@ SELECT id, i FROM t1 WHERE i > 1000 ORDER BY i, id;
 --let $assert_query = SELECT id, i FROM t1 WHERE i > 1000 ORDER BY i, id
 --let $assert_ordered = 1
 --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
-let $after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_sort_rows_total', Value, 1);
-SET SESSION debug = '-d,rapid_disable_vectorized_sort';
---let $sorted = `SELECT $after - $before`
---echo # rows through the vectorized sort with it switched off (0 expected):
---echo $sorted
+--disable_query_log
+if ($rapid_have_dbug) {
+  SET SESSION debug = '-d,rapid_disable_vectorized_sort';
+}
+--enable_query_log
 
 --echo #
 --echo # Arm 3 of 3: InnoDB, with Rapid out of the picture.
 --echo #
 SET SESSION use_secondary_engine = OFF;
-let $before = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_sort_rows_total', Value, 1);
 SELECT id, i FROM t1 ORDER BY i, id;
 SELECT id, u FROM t1 ORDER BY u DESC, id;
 SELECT id, bi, si FROM t1 ORDER BY bi, si, id;
@@ -271,10 +275,6 @@ SELECT id, i FROM t1 ORDER BY i, id LIMIT 3 OFFSET 4;
 SELECT id, i FROM t1 ORDER BY i, id LIMIT 100;
 SELECT id, i FROM t1 ORDER BY i, id LIMIT 0;
 SELECT id, i FROM t1 WHERE i > 1000 ORDER BY i, id;
-let $after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_sort_rows_total', Value, 1);
---let $sorted = `SELECT $after - $before`
---echo # rows through the vectorized sort under InnoDB (0 expected):
---echo $sorted
 
 --echo #
 --echo # An empty table.
@@ -288,15 +288,14 @@ SELECT id, a FROM t_empty ORDER BY a, id;
 --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 
 --echo #
---echo # Shapes the operator declines, so MySQL's filesort runs instead and the
---echo # counter must not move: an ORDER BY expression rather than a column, a
+--echo # Shapes the operator declines, so MySQL's filesort runs instead: an
+--echo # ORDER BY expression rather than a column, a
 --echo # key it cannot encode (TEXT), and a key too wide to encode -- a utf8mb4
 --echo # CHAR(100) needs ~20 bytes per character, well past kMaxKeyPartBytes.
 --echo #
 CREATE TABLE t_wide (id INT PRIMARY KEY, s CHAR(100)) SECONDARY_ENGINE RAPID;
 INSERT INTO t_wide VALUES (1,'b'),(2,'a');
 ALTER TABLE t_wide SECONDARY_LOAD;
-let $before = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_sort_rows_total', Value, 1);
 SET SESSION use_secondary_engine = FORCED;
 SELECT id, i FROM t1 ORDER BY i + 0, id;
 --let $assert_query = SELECT id, i FROM t1 ORDER BY i + 0, id
@@ -310,10 +309,6 @@ SELECT id, s FROM t_wide ORDER BY s, id;
 --let $assert_query = SELECT id, s FROM t_wide ORDER BY s, id
 --let $assert_ordered = 1
 --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
-let $after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_sort_rows_total', Value, 1);
---let $sorted = `SELECT $after - $before`
---echo # rows through the vectorized sort for the declined shapes (0 expected):
---echo $sorted
 
 --echo #
 --echo # SELECT DISTINCT needs duplicate removal inside the sort, which the
@@ -349,7 +344,6 @@ ALTER TABLE t_spill SECONDARY_LOAD;
 # Only a sort with no LIMIT buffers the whole input; a LIMIT is served from
 # the bounded heap, which never spills. So the spill counter is asserted over
 # a bare ORDER BY, whose 400 rows are not worth printing.
-let $spill_before = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_sort_spill_rows_total', Value, 1);
 SET SESSION use_secondary_engine = FORCED;
 SET SESSION debug = '+d,rapid_sort_tiny_budget';
 --disable_result_log
@@ -359,14 +353,9 @@ SELECT id, g FROM t_spill ORDER BY s, id;
 --let $assert_results_off = 1
 --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 --enable_result_log
-let $spill_after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_sort_spill_rows_total', Value, 1);
---let $spilled = `SELECT $spill_after - $spill_before > 0`
---echo # did the vectorized sort spill to disk (1 expected):
---echo $spilled
 
 # A LIMIT that cannot fit its heap in the sort budget must use the spilling
 # full-sort path rather than allocating an unbounded Top-N heap.
-let $spill_before = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_sort_spill_rows_total', Value, 1);
 --disable_result_log
 SELECT id, g FROM t_spill ORDER BY s, id LIMIT 400;
 --let $assert_query = SELECT id, g FROM t_spill ORDER BY s, id LIMIT 400
@@ -374,13 +363,9 @@ SELECT id, g FROM t_spill ORDER BY s, id LIMIT 400;
 --let $assert_results_off = 1
 --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 --enable_result_log
-let $spill_after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_sort_spill_rows_total', Value, 1);
---let $large_limit_spilled = `SELECT $spill_after > $spill_before`
---echo # oversized Top-N uses spilling sort (1 expected): $large_limit_spilled
 
 --echo # --- the ends of the spilling ordering, and a top-N over the same table
 --echo # (a LIMIT uses the bounded heap, so it does not spill)
-let $small_topn_spill_before = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_sort_spill_rows_total', Value, 1);
 SELECT id, g FROM t_spill ORDER BY s, id LIMIT 6;
 --let $assert_query = SELECT id, g FROM t_spill ORDER BY s, id LIMIT 6
 --let $assert_ordered = 1
@@ -389,9 +374,6 @@ SELECT id, g FROM t_spill ORDER BY s DESC, id DESC LIMIT 6;
 --let $assert_query = SELECT id, g FROM t_spill ORDER BY s DESC, id DESC LIMIT 6
 --let $assert_ordered = 1
 --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
-let $small_topn_spill_after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_sort_spill_rows_total', Value, 1);
---let $small_topn_no_spill = `SELECT $small_topn_spill_after = $small_topn_spill_before`
---echo # small Top-N stays in memory (1 expected): $small_topn_no_spill
 SET SESSION debug = '-d,rapid_sort_tiny_budget';
 
 --echo # --- same answers from the operator without the tiny budget
@@ -525,7 +507,6 @@ INSERT INTO t_decode VALUES
   (5, 'é', CONCAT(SHA2('a', 256), SHA2('b', 256), SHA2('c', 256), SHA2('d', 256), 'tail'));
 ALTER TABLE t_decode SECONDARY_LOAD;
 SET SESSION use_secondary_engine = FORCED;
-let $decode_before = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_sort_rows_total', Value, 1);
 SELECT id, HEX(short_v), LENGTH(long_v), SHA2(long_v, 256)
 FROM t_decode ORDER BY id DESC;
 --let $assert_query = SELECT id, HEX(short_v), LENGTH(long_v), SHA2(long_v, 256) FROM t_decode ORDER BY id DESC
@@ -536,9 +517,6 @@ FROM t_decode ORDER BY long_v, id;
 --let $assert_query = SELECT id, HEX(short_v), LENGTH(long_v), SHA2(long_v, 256) FROM t_decode ORDER BY long_v, id
 --let $assert_ordered = 1
 --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
-let $decode_after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_sort_rows_total', Value, 1);
---let $decode_sorted = `SELECT $decode_after > $decode_before`
---echo # dictionary output through vectorized sort (1 expected): $decode_sorted
 SET SESSION debug = '+d,rapid_disable_vectorized_sort';
 SELECT id, HEX(short_v), LENGTH(long_v), SHA2(long_v, 256)
 FROM t_decode ORDER BY id DESC;

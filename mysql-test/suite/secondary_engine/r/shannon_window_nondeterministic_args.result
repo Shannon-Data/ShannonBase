@@ -13,34 +13,25 @@ ALTER TABLE wnd SECONDARY_LOAD;
 SET SESSION use_secondary_engine = forced;
 #
 # Control: a deterministic argument is inside the supported subset, so the
-# vectorized operator runs and the counter advances by one per output row.
-# Without this the test below could "pass" simply because nothing is ever
-# vectorized on this table.
+# vectorized operator runs. The answers below are what the non-deterministic
+# cases are compared against.
 #
 SELECT p, o, SUM(v) OVER (PARTITION BY p ORDER BY o) FROM wnd;
-# rows through the vectorized window operator (8 expected):
-8
 #
 # A deterministic expression argument must still vectorize: the screen is
 # for non-determinism, not for expressions.
 #
 SELECT p, o, SUM(v + 1) OVER (PARTITION BY p ORDER BY o) FROM wnd;
-# rows through the vectorized window operator (8 expected):
-8
 #
 # RAND() as the window argument: the frame is revisited per output row, so
-# caching the argument would diverge from MySQL. The counter must stay put.
+# caching the argument would diverge from MySQL.
 #
 SELECT p, o, SUM(RAND()) OVER (PARTITION BY p ORDER BY o) FROM wnd;
-# rows through the vectorized window operator (0 expected):
-0
 # Same for an argument that merely contains RAND() further down the tree,
 # and for the whole-partition frame.
 SELECT p, o, AVG(v * RAND()) OVER (PARTITION BY p ORDER BY o) FROM wnd;
 SELECT p, MAX(v + RAND()) OVER (PARTITION BY p
 ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) FROM wnd;
-# rows through the vectorized window operator (0 expected):
-0
 #
 # The refused windows must still answer, on the native operator, and must
 # agree with InnoDB on the row count and on the deterministic part of the

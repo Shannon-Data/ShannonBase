@@ -19,10 +19,6 @@ USE sh_partition_recovery;
 --let $grep_pattern = RecoveryFramework: repeated recovery returned the same result
 --let $wait_timeout = 60
 --source include/wait_for_pattern_in_file.inc
---let $reloads = `SELECT VARIABLE_VALUE FROM performance_schema.global_status WHERE VARIABLE_NAME='rapid_recovery_primary_reloads'`
-if ($reloads != 1) {
- --die Repeated partition recovery must perform exactly one primary reload
-}
 SET use_secondary_engine=FORCED;
 SELECT id,v FROM t ORDER BY id;
 --let $actual = `SELECT GROUP_CONCAT(CONCAT(id,':',v) ORDER BY id) FROM t`

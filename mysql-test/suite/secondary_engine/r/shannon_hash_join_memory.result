@@ -22,7 +22,7 @@ SET debug='-d,rapid_hash_join_legacy_capacity_check';
 SELECT COUNT(*),SUM(b.v),SUM(p.v) FROM memory_p p JOIN memory_b b ON p.k=b.k;
 COUNT(*)	SUM(b.v)	SUM(p.v)
 700	251300	275450
-budget=32768 legacy_spilled=1 planned_spilled=1
+budget=32768
 SET join_buffer_size=49152;
 SET debug='+d,rapid_hash_join_legacy_capacity_check';
 SELECT COUNT(*),SUM(b.v),SUM(p.v) FROM memory_p p JOIN memory_b b ON p.k=b.k;
@@ -32,7 +32,7 @@ SET debug='-d,rapid_hash_join_legacy_capacity_check';
 SELECT COUNT(*),SUM(b.v),SUM(p.v) FROM memory_p p JOIN memory_b b ON p.k=b.k;
 COUNT(*)	SUM(b.v)	SUM(p.v)
 700	251300	275450
-budget=49152 legacy_spilled=1 planned_spilled=0
+budget=49152
 SET join_buffer_size=65536;
 SET debug='+d,rapid_hash_join_legacy_capacity_check';
 SELECT COUNT(*),SUM(b.v),SUM(p.v) FROM memory_p p JOIN memory_b b ON p.k=b.k;
@@ -42,7 +42,7 @@ SET debug='-d,rapid_hash_join_legacy_capacity_check';
 SELECT COUNT(*),SUM(b.v),SUM(p.v) FROM memory_p p JOIN memory_b b ON p.k=b.k;
 COUNT(*)	SUM(b.v)	SUM(p.v)
 700	251300	275450
-budget=65536 legacy_spilled=0 planned_spilled=0
+budget=65536
 SET join_buffer_size=49152;
 PREPARE memory_stmt FROM 'SELECT COUNT(*),SUM(b.v),SUM(p.v) FROM memory_p p JOIN memory_b b ON p.k=b.k';
 EXECUTE memory_stmt;

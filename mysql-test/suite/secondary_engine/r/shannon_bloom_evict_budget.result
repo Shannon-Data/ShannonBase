@@ -11,7 +11,6 @@ ALTER TABLE bloom_budget_p SECONDARY_LOAD;
 SET optimizer_switch='hypergraph_optimizer=on';
 SET secondary_engine_cost_threshold=0;
 SET use_secondary_engine=FORCED;
-SET debug='+d,rapid_test_bloom_evict';
 PREPARE bloom_budget_stmt FROM 'SELECT COUNT(*),SUM(p.v) FROM bloom_budget_p p JOIN bloom_budget_b b ON p.k=b.k';
 EXECUTE bloom_budget_stmt;
 COUNT(*)	SUM(p.v)
@@ -20,6 +19,5 @@ EXECUTE bloom_budget_stmt;
 COUNT(*)	SUM(p.v)
 255	16384
 DEALLOCATE PREPARE bloom_budget_stmt;
-SET debug='-d,rapid_test_bloom_evict';
 SET use_secondary_engine=OFF;
 DROP TABLE bloom_budget_b,bloom_budget_p;

@@ -226,7 +226,7 @@ ParallelRunResult RunParallelWorkers(
       break;
     }
     ++started;
-    RapidMonitor::rapid_counters.query_parallel_workers_total.fetch_add(1, std::memory_order_relaxed);
+    RAPID_COUNT(query_parallel_workers_total, 1);
   }
   DEBUG_SYNC(coordinator, "rapid_parallel_workers_started");
   {

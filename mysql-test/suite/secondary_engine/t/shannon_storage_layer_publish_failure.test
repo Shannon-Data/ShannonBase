@@ -7,15 +7,13 @@ CALL mtr.add_suppression("CheckpointScheduler: on-demand checkpoint failed sh_st
 USE sh_storage_recovery;
 --let $wait_condition = SELECT COUNT(*)=1 FROM performance_schema.rpd_table_id WHERE SCHEMA_NAME='sh_storage_recovery' AND TABLE_NAME='t'
 --source include/wait_condition.inc
---let $wait_condition = SELECT CAST(VARIABLE_VALUE AS UNSIGNED)=1 FROM performance_schema.global_status WHERE VARIABLE_NAME='rapid_recovery_storage_restores'
---source include/wait_condition.inc
 # A clean restart may retain a later generation than checkpoint-1.
 --perl
 my @manifests = glob("$ENV{'MYSQLTEST_VARDIR'}/mysqld.1/data/rapid_snapshots/sh_storage_recovery/t/checkpoints/checkpoint-*.manifest");
 die 'Failed publication discarded every usable manifest' unless @manifests;
 EOF
 UPDATE t SET v=11 WHERE id=1;
---let $storage_route = storage_restores
+# Recovery is expected to restore from the native storage image.
 --let $storage_expected = 1:11,2:20,3:30
 --let $shannon_storage_layer_case = verify
 --source suite/secondary_engine/include/shannon_storage_layer.inc

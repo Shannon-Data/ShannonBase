@@ -8,7 +8,8 @@ SET SESSION sql_log_bin=OFF;
 UPDATE t SET v=11 WHERE id=1;
 SET SESSION sql_log_bin=ON;
 --let $storage_restart_debug = --loose-rapid_schema_embedding=OFF
---let $storage_route = primary_reloads
+# Recovery is expected to fall back to a primary reload: the native image is
+# unavailable or unusable, so the rows come back through the SQL layer.
 --let $storage_expected = 1:11,2:20,3:30
 --let $shannon_storage_layer_case = manual_load
 --source suite/secondary_engine/include/shannon_storage_layer.inc

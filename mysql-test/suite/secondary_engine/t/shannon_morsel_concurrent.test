@@ -48,12 +48,16 @@ SET rapid_parallel_workers=2;
 --disable_warnings
 SET optimizer_switch='hypergraph_optimizer=on';
 --enable_warnings
---let $before = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_parallel_workers_total', Value, 1)
---let $retry_before = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_parallel_fallbacks_total', Value, 1)
+--let $status = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_parallel_worker_status', Value, 1)
+--let $rejected_before = `SELECT CAST(SUBSTRING_INDEX(SUBSTRING_INDEX('$status','rejected=',-1),' ',1) AS UNSIGNED)`
+--let $peak_before = `SELECT CAST(SUBSTRING_INDEX(SUBSTRING_INDEX(SUBSTRING_INDEX('$status','peak=',-1),' ',1),' ',1) AS UNSIGNED)`
 SELECT SUM(v)=2450035000,COUNT(*)=70000 FROM t;
---let $after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_parallel_workers_total', Value, 1)
---let $retry_after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_parallel_fallbacks_total', Value, 1)
---let $bounded = `SELECT $before=$after AND $retry_after>$retry_before`
+--let $status = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_parallel_worker_status', Value, 1)
+--let $rejected_after = `SELECT CAST(SUBSTRING_INDEX(SUBSTRING_INDEX('$status','rejected=',-1),' ',1) AS UNSIGNED)`
+--let $peak_after = `SELECT CAST(SUBSTRING_INDEX(SUBSTRING_INDEX(SUBSTRING_INDEX('$status','peak=',-1),' ',1),' ',1) AS UNSIGNED)`
+# A refused lease is what a fallback to serial replay looks like to the governor,
+# and the peak staying put proves the fallback started no extra threads.
+--let $bounded = `SELECT $rejected_after>$rejected_before AND $peak_after=$peak_before`
 if ($bounded == 0) {
  --die Worker admission overflow did not fall back without starting more threads
 }

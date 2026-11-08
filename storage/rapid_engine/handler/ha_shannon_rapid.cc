@@ -225,6 +225,22 @@ int ha_rapid::close() {
   return ShannonBase::SHANNON_SUCCESS;
 }
 
+/**
+  Statement end, and the only place the internal counters are sampled.
+
+  They are diagnosis, not an interface: SHOW STATUS does not publish them and a
+  release build does not even keep them (see RapidMonitor). A debug build can ask
+  for what the statement just contributed with
+  SET SESSION debug='+d,rapid_stats', which turns this into one error-log line
+  per statement. Sampling here rather than when a scan or an index walk ends is
+  what makes that line describe the whole statement: a bloom filter rejects rows
+  during the join probe, after the build side has finished scanning.
+*/
+int ha_rapid::reset() {
+  RAPID_LOG_STATS("stmt_end");
+  return ShannonBase::SHANNON_SUCCESS;
+}
+
 int ha_rapid::info(unsigned int flags) {
   if (!(flags & HA_STATUS_VARIABLE)) return ShannonBase::SHANNON_SUCCESS;
 
@@ -1676,119 +1692,35 @@ static int rapid_shutdown(handlerton *, ha_panic_function) {
 // Enum labels of the propagation_mode system variable (see rapid_sync_mode_typelib).
 static const char *rapid_propagation_mode_names[] = {"DIRECT_NOTIFICATION", "REDO_LOG_PARSE", "HYBRID", nullptr};
 
-// These globals are refreshed by refresh_rapid_export_vars() and exposed
-// as SHOW STATUS variables so that Prometheus / mysqld_exporter can scrape
-// them.  All names are prefixed with "rapid_" for easy identification.
+// Status variables, exposed through refresh_rapid_export_vars() so that
+// Prometheus / mysqld_exporter can scrape them without code changes.
 //
-// Single source of truth: X(export_name, RapidMonitor::Metrics field).
-// The struct field, the refresh assignment and the SHOW_VAR entry are all
-// generated from this list, so adding a metric is a one-line change.
-#define RAPID_STATUS_VARS(X)                                                                                        \
-  X(mempool_capacity_bytes, mempool_capacity_bytes)                                                                 \
-  X(mempool_allocated_bytes, mempool_allocated_bytes)                                                               \
-  X(mempool_used_bytes, mempool_used_bytes)                                                                         \
-  X(mempool_peak_usage_bytes, mempool_peak_usage_bytes)                                                             \
-  X(mempool_alloc_count, mempool_alloc_count)                                                                       \
-  X(mempool_dealloc_count, mempool_dealloc_count)                                                                   \
-  X(mempool_failed_allocs, mempool_failed_allocs)                                                                   \
-  X(mempool_expansion_count, mempool_expansion_count)                                                               \
-  X(mempool_defrag_count, mempool_defrag_count)                                                                     \
-  X(loaded_tables, loaded_tables)                                                                                   \
-  X(loaded_part_tables, loaded_part_tables)                                                                         \
-  X(total_imcus, total_imcus)                                                                                       \
-  X(total_cus, total_cus)                                                                                           \
-  X(total_rows, total_rows)                                                                                         \
-  X(total_physical_rows, total_physical_rows)                                                                       \
-  X(estimated_data_size_bytes, estimated_data_size_bytes)                                                           \
-  X(estimated_compressed_size_bytes, estimated_compressed_size_bytes)                                               \
-  X(pop_thread_running, rapid_pop_thread_running)                                                                   \
-  X(pop_loop_counter, rapid_pop_loop_counter)                                                                       \
-  X(pop_data_remaining_bytes, rapid_pop_data_sz)                                                                    \
-  X(pop_buffer_tables, total_buffer_tables)                                                                         \
-  X(pop_tables_in_progress, tables_in_progress)                                                                     \
-  X(pop_worker_threads, total_worker_threads)                                                                       \
-  X(pop_worker_pending_bytes, worker_pending_bytes)                                                                 \
-  X(bg_queue_size, bg_pool_queue_size)                                                                              \
-  X(bg_active_workers, bg_active_workers)                                                                           \
-  X(bg_total_workers, bg_total_workers)                                                                             \
-  X(bg_concurrent_gc, bg_concurrent_gc)                                                                             \
-  X(bg_concurrent_compact, bg_concurrent_compact)                                                                   \
-  X(bg_concurrent_stats, bg_concurrent_stats)                                                                       \
-  X(bg_tasks_submitted, bg_tasks_submitted)                                                                         \
-  X(bg_tasks_completed, bg_tasks_completed)                                                                         \
-  X(bg_tasks_failed, bg_tasks_failed)                                                                               \
-  X(bg_tasks_cancelled, bg_tasks_cancelled)                                                                         \
-  X(bg_tasks_retried, bg_tasks_retried)                                                                             \
-  X(gc_total_runs, gc_total_runs)                                                                                   \
-  X(gc_total_purged_rows, gc_total_purged_rows)                                                                     \
-  X(gc_total_purged_versions, gc_total_purged_versions)                                                             \
-  X(gc_last_run_scn, gc_last_run_scn)                                                                               \
-  X(gc_last_run_duration_us, gc_last_run_duration_us)                                                               \
-  X(recovery_storage_restores, recovery_storage_restores)                                                           \
-  X(recovery_primary_reloads, recovery_primary_reloads)                                                             \
-  X(compact_total_runs, compact_total_runs)                                                                         \
-  X(compact_total_merged_rows, compact_total_merged_rows)                                                           \
-  X(compact_last_run_duration_us, compact_last_run_duration_us)                                                     \
-  X(query_scans_total, query_scans_total)                                                                           \
-  X(query_index_lookups_total, query_index_lookups_total)                                                           \
-  X(query_rows_read_total, query_rows_read_total)                                                                   \
-  X(query_offload_total, query_offload_total)                                                                       \
-  X(query_vectorized_window_rows_total, query_vectorized_window_rows_total)                                         \
-  X(query_vectorized_window_simd_rows_total, query_vectorized_window_simd_rows_total)                               \
-  X(query_vectorized_window_scalar_rows_total, query_vectorized_window_scalar_rows_total)                           \
-  X(query_vectorized_window_spill_rows_total, query_vectorized_window_spill_rows_total)                             \
-  X(query_vectorized_window_spill_bytes_total, query_vectorized_window_spill_bytes_total)                           \
-  X(query_hash_join_bloom_builds_total, query_hash_join_bloom_builds_total)                                         \
-  X(query_hash_join_bloom_bytes_total, query_hash_join_bloom_bytes_total)                                           \
-  X(query_hash_join_bloom_checks_total, query_hash_join_bloom_checks_total)                                         \
-  X(query_hash_join_bloom_rejects_total, query_hash_join_bloom_rejects_total)                                       \
-  X(query_hash_join_bloom_scan_rejects_total, query_hash_join_bloom_scan_rejects_total)                             \
-  X(query_hash_join_bloom_disabled_total, query_hash_join_bloom_disabled_total)                                     \
-  X(query_vectorized_hash_join_spill_rows_total, query_vectorized_hash_join_spill_rows_total)                       \
-  X(query_vectorized_aggregate_spill_rows_total, query_vectorized_aggregate_spill_rows_total)                       \
-  X(query_vectorized_aggregate_batch_rows_total, query_vectorized_aggregate_batch_rows_total)                       \
-  X(query_vectorized_aggregate_scaled_values_total, query_vectorized_aggregate_scaled_values_total)                 \
-  X(query_vectorized_aggregate_scalar_decimal_values_total, query_vectorized_aggregate_scalar_decimal_values_total) \
-  X(query_vectorized_sort_batch_rows_total, query_vectorized_sort_batch_rows_total)                                 \
-  X(query_vectorized_ref_batch_rows_total, query_vectorized_ref_batch_rows_total)                                   \
-  X(query_vectorized_expression_rows_total, query_vectorized_expression_rows_total)                                 \
-  X(query_parallel_workers_total, query_parallel_workers_total)                                                     \
-  X(query_parallel_tasks_total, query_parallel_tasks_total)                                                         \
-  X(query_parallel_rows_total, query_parallel_rows_total)                                                           \
-  X(query_parallel_spills_total, query_parallel_spills_total)                                                       \
-  X(query_parallel_fallbacks_total, query_parallel_fallbacks_total)                                                 \
-  X(query_parallel_join_build_rows_total, query_parallel_join_build_rows_total)                                     \
-  X(query_parallel_join_build_workers_total, query_parallel_join_build_workers_total)                               \
-  X(query_parallel_join_finalize_partitions_total, query_parallel_join_finalize_partitions_total)                   \
-  X(query_parallel_join_finalize_workers_total, query_parallel_join_finalize_workers_total)                         \
-  X(query_parallel_join_build_fallbacks_total, query_parallel_join_build_fallbacks_total)                           \
-  X(query_like_mask_rows_total, query_like_mask_rows_total)                                                         \
-  X(query_like_scalar_rows_total, query_like_scalar_rows_total)                                                     \
-  X(query_dictionary_predicate_rows_total, query_dictionary_predicate_rows_total)                                   \
-  X(cu_bitpacked_columns_total, cu_bitpacked_columns_total)                                                         \
-  X(query_bitpacked_predicate_rows_total, query_bitpacked_predicate_rows_total)                                     \
-  X(query_bitpacked_unpack_rows_total, query_bitpacked_unpack_rows_total)                                           \
-  X(query_bitpacked_aggregate_rows_total, query_bitpacked_aggregate_rows_total)                                     \
-  X(query_vectorized_like_rows_total, query_vectorized_like_rows_total)                                             \
-  X(query_vectorized_dictionary_minmax_rows_total, query_vectorized_dictionary_minmax_rows_total)                   \
-  X(query_late_predicate_rows_total, query_late_predicate_rows_total)                                               \
-  X(query_late_projection_cells_total, query_late_projection_cells_total)                                           \
-  X(query_scalar_expression_rows_total, query_scalar_expression_rows_total)                                         \
-  X(query_vectorized_stream_batch_rows_total, query_vectorized_stream_batch_rows_total)                             \
-  X(query_vectorized_materialize_batch_rows_total, query_vectorized_materialize_batch_rows_total)                   \
-  X(query_vectorized_aggregate_row_materializations_total, query_vectorized_aggregate_row_materializations_total)   \
-  X(query_vectorized_aggregate_dict_cache_hits_total, query_vectorized_aggregate_dict_cache_hits_total)             \
-  X(query_vectorized_aggregate_dict_cache_misses_total, query_vectorized_aggregate_dict_cache_misses_total)         \
-  X(query_vectorized_aggregate_hash_mem_peak_bytes_sum_total,                                                       \
-    query_vectorized_aggregate_hash_mem_peak_bytes_sum_total)                                                       \
-  X(query_vectorized_aggregate_hash_memory_peak_bytes_max, query_vectorized_aggregate_hash_memory_peak_bytes_max)   \
-  X(query_vectorized_sort_rows_total, query_vectorized_sort_rows_total)                                             \
-  X(query_vectorized_sort_spill_rows_total, query_vectorized_sort_spill_rows_total)                                 \
-  X(query_offload_fallback_total, query_offload_fallback_total)                                                     \
-  X(active_transactions, active_transactions)                                                                       \
-  X(transaction_commits_total, transaction_commits_total)                                                           \
-  X(transaction_rollbacks_total, transaction_rollbacks_total)
+// This is the operational interface: what an operator or a monitoring rule can
+// act on. Everything else the kernel counts while executing a query is
+// instrumentation, and instrumentation does not belong in a permanent public
+// interface -- nor in a release binary. Those counters live under DBUG (see
+// RapidMonitor), so a release build carries neither their storage nor their
+// update.
+//
+// Single source of truth: X(export_name, RapidMonitor::Metrics field). The
+// struct field, the refresh assignment and the SHOW_VAR entry are all generated
+// from this list, so adding a metric is a one-line change.
+#define RAPID_STATUS_VARS(X)                                          \
+  X(mempool_capacity_bytes, mempool_capacity_bytes)                   \
+  X(mempool_used_bytes, mempool_used_bytes)                           \
+  X(mempool_failed_allocs, mempool_failed_allocs)                     \
+  X(loaded_tables, loaded_tables)                                     \
+  X(total_rows, total_rows)                                           \
+  X(estimated_compressed_size_bytes, estimated_compressed_size_bytes) \
+  X(pop_tables_in_progress, tables_in_progress)                       \
+  X(pop_data_remaining_bytes, rapid_pop_data_sz)                      \
+  X(bg_queue_size, bg_pool_queue_size)                                \
+  X(bg_tasks_failed, bg_tasks_failed)                                 \
+  X(query_rows_read_total, query_rows_read_total)                     \
+  X(query_offload_total, query_offload_total)                         \
+  X(query_offload_fallback_total, query_offload_fallback_total)
 
+/** One field per exported status variable. */
 struct RapidExportVars {
 #define X(f, src) ulonglong f{0};
   RAPID_STATUS_VARS(X)
@@ -1820,6 +1752,9 @@ static int show_rapid_change_propagation_status(THD *, SHOW_VAR *var, char *) {
   return 0;
 }
 
+// Summary renderers: they read live kernel state instead of accumulating it, so
+// they cost nothing on the query path and are registered in every build. Only
+// the instrumentation counters (see RapidMonitor) are debug-only.
 static int show_rapid_parallel_worker_status(THD *, SHOW_VAR *var, char *buffer) {
   const auto &governor = ShannonBase::ResMgmt::work_governor();
   const auto stats = governor.parallel_snapshot();
@@ -1920,12 +1855,12 @@ static SHOW_VAR rapid_runtime_status_variables[] = {
 #undef X
         {"rapid_mempool_usage_percentage", (char *)&rapid_export_vars.mempool_usage_percentage, SHOW_DOUBLE,
          SHOW_SCOPE_GLOBAL},
+    {"rapid_change_propagation_status", (char *)&show_rapid_change_propagation_status, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
     {"rapid_sys_pool_status", (char *)&show_rapid_sys_pool_status, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
     {"rapid_parallel_worker_status", (char *)&show_rapid_parallel_worker_status, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
     {"rapid_resource_status", (char *)&show_rapid_resource_status, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
     {"rapid_resource_plan", (char *)&show_rapid_resource_plan, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
     {"rapid_resource_io_status", (char *)&show_rapid_resource_io_status, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
-    {"rapid_change_propagation_status", (char *)&show_rapid_change_propagation_status, SHOW_FUNC, SHOW_SCOPE_GLOBAL},
 
     {NullS, NullS, SHOW_LONG, SHOW_SCOPE_GLOBAL}};
 
@@ -2788,8 +2723,26 @@ static MYSQL_SYSVAR_BOOL(schema_embedding,
                             nullptr, nullptr, true  // default ON                            
                         );
 // clang-format on
+// The configuration surface, in three layers.
+//
+// Core knobs shape how a deployment uses the engine and are documented as the
+// supported interface. Advanced knobs are deployment controls (resource groups,
+// admission limits, spill budgets, synchronization timeouts) that a supported
+// configuration may still need. Everything below them is internal: the engine
+// keeps its defaults and stops advertising the knob, while a diagnostics build
+// still exposes it so the regression suite can force the conditions it tests.
 static struct SYS_VAR *rapid_system_variables[] = {
+    // Core.
+    MYSQL_SYSVAR(memory_size_max),
+    MYSQL_SYSVAR(parallel_workers),
     MYSQL_SYSVAR(resource_isolation),
+    MYSQL_SYSVAR(change_propagation_mode),
+    MYSQL_SYSVAR(use_dynamic_offload),
+    MYSQL_SYSVAR(self_load_enabled),
+    MYSQL_SYSVAR(reload_on_restart),
+    MYSQL_SYSVAR(schema_embedding),
+
+    // Advanced deployment configuration.
     MYSQL_SYSVAR(resource_ap_limit),
     MYSQL_SYSVAR(resource_sync_limit),
     MYSQL_SYSVAR(resource_maint_limit),
@@ -2798,22 +2751,21 @@ static struct SYS_VAR *rapid_system_variables[] = {
     MYSQL_SYSVAR(resource_sync_group),
     MYSQL_SYSVAR(resource_maint_group),
     MYSQL_SYSVAR(resource_maint_user_group),
-    MYSQL_SYSVAR(memory_size_max),
     MYSQL_SYSVAR(sort_spill_size_max),
     MYSQL_SYSVAR(materialize_spill_size_max),
     MYSQL_SYSVAR(window_spill_size_max),
     MYSQL_SYSVAR(window_spill_size_total),
     MYSQL_SYSVAR(query_sync_timeout_ms),
-    MYSQL_SYSVAR(parallel_workers),
     MYSQL_SYSVAR(parallel_max_workers),
+    MYSQL_SYSVAR(propagation_mode),
+    MYSQL_SYSVAR(self_load_interval_seconds),
+
+    // Internal tuning knobs: load batching, self-load admission, and how GC
+    // sizes and schedules a purge. They are configuration, not instrumentation,
+    // so they stay registered in every build and no longer wrap a #if.
     MYSQL_SYSVAR(parallel_load_max),
     MYSQL_SYSVAR(parallel_part_load_threshold),
-    MYSQL_SYSVAR(propagation_mode),
-    MYSQL_SYSVAR(change_propagation_mode),
     MYSQL_SYSVAR(async_column_threshold),
-    MYSQL_SYSVAR(use_dynamic_offload),
-    MYSQL_SYSVAR(self_load_enabled),
-    MYSQL_SYSVAR(self_load_interval_seconds),
     MYSQL_SYSVAR(self_load_skip_quiet_check),
     MYSQL_SYSVAR(self_load_base_relation_fill_percentage),
     MYSQL_SYSVAR(max_purger_timeout),
@@ -2821,8 +2773,6 @@ static struct SYS_VAR *rapid_system_variables[] = {
     MYSQL_SYSVAR(min_versions_for_purge),
     MYSQL_SYSVAR(purge_efficiency_threshold),
     MYSQL_SYSVAR(gc_interval_scn),
-    MYSQL_SYSVAR(reload_on_restart),
-    MYSQL_SYSVAR(schema_embedding),
     nullptr,
 };
 

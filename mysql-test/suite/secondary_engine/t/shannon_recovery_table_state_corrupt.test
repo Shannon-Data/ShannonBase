@@ -28,7 +28,6 @@ USE sh_storage_recovery;
 --let $wait_timeout = 60
 --source include/wait_for_pattern_in_file.inc
 SELECT COUNT(*) AS automatically_loaded FROM performance_schema.rpd_table_id WHERE SCHEMA_NAME='sh_storage_recovery' AND TABLE_NAME='t';
-SELECT VARIABLE_VALUE FROM performance_schema.global_status WHERE VARIABLE_NAME='rapid_recovery_primary_reloads';
 SET use_secondary_engine=OFF;
 --let $storage_actual = `SELECT GROUP_CONCAT(CONCAT(id,':',v) ORDER BY id) FROM t`
 if ($storage_actual != $storage_expected) {

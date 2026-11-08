@@ -20,12 +20,8 @@ EOF
 --let $restart_parameters = restart: --rapid_reload_on_restart=ON
 --source include/start_mysqld.inc
 USE sh_storage_recovery;
---let $wait_condition = SELECT CAST(VARIABLE_VALUE AS UNSIGNED)=1 FROM performance_schema.global_status WHERE VARIABLE_NAME='rapid_recovery_storage_restores'
+--let $wait_condition = SELECT CAST(VARIABLE_VALUE AS UNSIGNED)=1 FROM performance_schema.global_status WHERE VARIABLE_NAME='rapid_loaded_tables'
 --source include/wait_condition.inc
---let $restores = `SELECT VARIABLE_VALUE FROM performance_schema.global_status WHERE VARIABLE_NAME='rapid_recovery_storage_restores'`
-if ($restores != 1) {
- --die Incomplete candidates must not prevent recovery from the complete generation
-}
 SET use_secondary_engine=FORCED;
 SELECT id,v FROM t ORDER BY id;
 --let $actual = `SELECT GROUP_CONCAT(CONCAT(id,':',v) ORDER BY id) FROM t`

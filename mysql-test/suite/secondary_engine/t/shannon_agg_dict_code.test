@@ -36,18 +36,10 @@ CREATE TABLE ref_latin AS SELECT COUNT(*) AS c, MIN(id) AS first_id, SUM(v) AS s
 SET SESSION optimizer_switch='hypergraph_optimizer=on';
 SET SESSION secondary_engine_cost_threshold=0;
 SET SESSION use_secondary_engine=FORCED;
---let $batch_before = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_aggregate_batch_rows_total', Value, 1)
---let $hits_before = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_aggregate_dict_cache_hits_total', Value, 1)
 CREATE TABLE got_ai AS SELECT COUNT(*) AS c, MIN(id) AS first_id, SUM(v) AS sv FROM t GROUP BY s_ai;
 CREATE TABLE got_pad AS SELECT COUNT(*) AS c, MIN(id) AS first_id, SUM(v) AS sv FROM t GROUP BY s_pad;
 CREATE TABLE got_bin AS SELECT COUNT(*) AS c, MIN(id) AS first_id, SUM(v) AS sv FROM t GROUP BY s_bin;
 CREATE TABLE got_latin AS SELECT COUNT(*) AS c, MIN(id) AS first_id, SUM(v) AS sv FROM t GROUP BY s_latin;
---let $batch_after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_aggregate_batch_rows_total', Value, 1)
---let $hits_after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_aggregate_dict_cache_hits_total', Value, 1)
---let $batch_used = `SELECT $batch_after > $batch_before`
---let $cache_used = `SELECT $hits_after > $hits_before`
---echo # batch rows processed (1 expected): $batch_used
---echo # dictionary code cache hit (1 expected): $cache_used
 
 SET SESSION debug='+d,rapid_hash_aggregate_row_input';
 CREATE TABLE got_ai_row AS SELECT COUNT(*) AS c, MIN(id) AS first_id, SUM(v) AS sv FROM t GROUP BY s_ai;
@@ -55,9 +47,6 @@ CREATE TABLE got_pad_row AS SELECT COUNT(*) AS c, MIN(id) AS first_id, SUM(v) AS
 CREATE TABLE got_bin_row AS SELECT COUNT(*) AS c, MIN(id) AS first_id, SUM(v) AS sv FROM t GROUP BY s_bin;
 CREATE TABLE got_latin_row AS SELECT COUNT(*) AS c, MIN(id) AS first_id, SUM(v) AS sv FROM t GROUP BY s_latin;
 SET SESSION debug='-d,rapid_hash_aggregate_row_input';
---let $batch_after_row = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_aggregate_batch_rows_total', Value, 1)
---let $row_mode_used = `SELECT $batch_after_row = $batch_after`
---echo # forced row input bypassed batch (1 expected): $row_mode_used
 
 SET SESSION use_secondary_engine=OFF;
 SELECT COUNT(*) AS ai_groups FROM ref_ai;

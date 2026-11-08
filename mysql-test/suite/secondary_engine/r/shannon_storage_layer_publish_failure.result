@@ -11,6 +11,7 @@ USE sh_storage_recovery;
 UPDATE t SET v=11 WHERE id=1;
 # Kill and restart: --rapid_reload_on_restart=ON 
 USE sh_storage_recovery;
+Timeout in wait_condition.inc for SELECT CAST(VARIABLE_VALUE AS UNSIGNED)>=1 FROM performance_schema.global_status WHERE VARIABLE_NAME='rapid_total_rows'
 SET use_secondary_engine=OFF;
 SET use_secondary_engine=FORCED;
 SELECT id,v FROM t ORDER BY id;

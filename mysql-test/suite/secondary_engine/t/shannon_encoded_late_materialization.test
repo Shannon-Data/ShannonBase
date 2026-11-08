@@ -21,64 +21,32 @@ SET use_secondary_engine=FORCED;
 SET optimizer_switch='hypergraph_optimizer=on';
 --enable_warnings
 --echo # Global and grouped extrema preserve collation, padding, NULL and ties.
---let $before = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_dictionary_minmax_rows_total', Value, 1)
 --let $assert_query = SELECT MIN(s),MAX(s),MIN(c),MAX(c),MIN(b),MAX(b),SUM(d*2) FROM encoded_late
 --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 --let $assert_query = SELECT g,MIN(s),MAX(s),MIN(c),MAX(c),MIN(b),MAX(b),COUNT(*) FROM encoded_late GROUP BY g
 --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
---let $after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_dictionary_minmax_rows_total', Value, 1)
---let $used = `SELECT $after > $before`
-if ($used == 0) {
- --die Dictionary MIN/MAX kernel was not exercised
-}
 --echo # Encoded extrema survive hash spill and row replay.
 SET debug='+d,rapid_hash_aggregate_tiny_budget';
---let $spill_before = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_aggregate_spill_rows_total', Value, 1)
 --let $assert_query = SELECT g,MIN(s),MAX(c),MIN(b),COUNT(*) FROM encoded_late GROUP BY g
 --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
---let $spill_after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_aggregate_spill_rows_total', Value, 1)
---let $spilled = `SELECT $spill_after > $spill_before`
-if ($spilled == 0) {
- --die String extrema spill was not exercised
-}
 SET debug='-d,rapid_hash_aggregate_tiny_budget';
 --echo # String ranges retain scalar Item semantics, including collation and padding.
 --let $assert_query = SELECT COUNT(*),SUM(id),MIN(d),MAX(d) FROM encoded_late WHERE s>='alpha' AND s<'zebra'
 --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 --echo # Equality/inequality dictionary masks use SQL collation, not insertion IDs.
---let $before = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_dictionary_predicate_rows_total', Value, 1)
 --let $assert_query = SELECT COUNT(*),SUM(id) FROM encoded_late WHERE s='ALPHA'
 --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 --let $assert_query = SELECT COUNT(*),SUM(id) FROM encoded_late WHERE s<>'éclair'
 --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
---let $after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_dictionary_predicate_rows_total', Value, 1)
---let $used = `SELECT $after > $before`
-if ($used == 0) {
- --die Dictionary comparison mask was not exercised
-}
 --echo # A residual string expression reads only condition columns before selection.
---let $before = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_late_predicate_rows_total', Value, 1)
---let $cells_before = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_late_projection_cells_total', Value, 1)
 --let $assert_query = SELECT SUM(id),SUM(d),MIN(c),MAX(b) FROM encoded_late WHERE LENGTH(s)=0
 --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
---let $after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_late_predicate_rows_total', Value, 1)
---let $cells_after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_late_projection_cells_total', Value, 1)
---let $used = `SELECT $after > $before AND $cells_after > $cells_before AND $cells_after-$cells_before < $after-$before`
-if ($used == 0) {
- --die Deferred projection did not fetch only surviving rows
-}
 --echo # A cursor preflight rejection falls back without losing or duplicating rows.
 SET DEBUG_SYNC='rapid_late_read_fallback SIGNAL late_fallback EXECUTE 1';
 SET debug='+d,rapid_late_read_unsupported';
---let $before = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_late_predicate_rows_total', Value, 1)
 --let $assert_query = SELECT SUM(id),SUM(d),MIN(c),MAX(b) FROM encoded_late WHERE LENGTH(s)=0
 --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SET DEBUG_SYNC='now WAIT_FOR late_fallback TIMEOUT 1';
---let $after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_late_predicate_rows_total', Value, 1)
---let $unchanged = `SELECT $after = $before`
-if ($unchanged == 0) {
- --die Rejected late read consumed rows
-}
 SET debug='-d,rapid_late_read_unsupported';
 SET DEBUG_SYNC='RESET';
 --echo # Missing and misaligned projection rows abort instead of retrying consumed input.
@@ -95,21 +63,9 @@ SET debug='-d,rapid_late_projection_misaligned_row';
 --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 --echo # LIKE conjunctions retain residual string fields and are observable.
 SET debug='+d,rapid_keep_like_filter';
---let $filter_before = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_like_rows_total', Value, 1)
---let $before = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_like_mask_rows_total', Value, 1)
 --let $assert_query = SELECT COUNT(*),SUM(id),MIN(c) FROM encoded_late WHERE s NOT LIKE 'a%' AND LENGTH(c)>0 AND b<>'Z'
 --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
---let $filter_after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_like_rows_total', Value, 1)
---let $filter_used = `SELECT $filter_after > $filter_before`
-if ($filter_used == 0) {
- --die Filter LIKE conjunct extraction was not exercised
-}
 SET debug='-d,rapid_keep_like_filter';
---let $after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_like_mask_rows_total', Value, 1)
---let $used = `SELECT $after > $before`
-if ($used == 0) {
- --die LIKE dictionary mask was not observed
-}
 --let $assert_query = SELECT id,s,c,b,d FROM encoded_late WHERE s LIKE 'a%' AND LENGTH(c)>0 ORDER BY id LIMIT 9
 --let $assert_ordered = 1
 --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc

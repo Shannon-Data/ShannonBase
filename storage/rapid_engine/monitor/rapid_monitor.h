@@ -32,6 +32,54 @@
 #include <cstdint>
 #include <cstdio>
 
+#include "my_dbug.h"
+
+// Kernel instrumentation is compiled out of release builds. NDEBUG is what an
+// optimized build actually defines here; DBUG_OFF is honoured too in case a
+// build sets it. Then the counters' storage and their updates disappear instead
+// of only being hidden from SHOW STATUS. The operational surface is
+// RAPID_STATUS_VARS; everything below is diagnosis.
+#if defined(DBUG_OFF) || defined(NDEBUG)
+#define RAPID_INSTRUMENTATION 0
+#else
+#define RAPID_INSTRUMENTATION 1
+#endif
+
+#if RAPID_INSTRUMENTATION
+#define RAPID_COUNT(field, value) \
+  (::ShannonBase::RapidMonitor::rapid_counters.field.fetch_add((value), std::memory_order_relaxed))
+#else
+#define RAPID_COUNT(field, value) ((void)(value))
+#endif
+
+#if RAPID_INSTRUMENTATION
+namespace ShannonBase {
+namespace RapidMonitor {
+/**
+ * Logs what the statement just finished contributed, not the totals: a test asks
+ * "did this query reject any probe row" and a running total cannot answer it.
+ * `emit` is the DBUG flag, so the baseline keeps moving while the flag is off.
+ */
+void log_rapid_counters(const char *tag, bool emit);
+}  // namespace RapidMonitor
+}  // namespace ShannonBase
+
+/**
+ * Statement-end hook for the instrumentation counters. Debug builds only, and it
+ * writes to the error log rather than exposing anything through SQL: the counters
+ * are internal, and a release build has neither them nor this call.
+ */
+#define RAPID_LOG_STATS(tag)                                       \
+  do {                                                             \
+    if (DBUG_EVALUATE_IF("rapid_stats", true, false))              \
+      ::ShannonBase::RapidMonitor::log_rapid_counters(tag, true);  \
+    else                                                           \
+      ::ShannonBase::RapidMonitor::log_rapid_counters(tag, false); \
+  } while (0)
+#else
+#define RAPID_LOG_STATS(tag) ((void)0)
+#endif
+
 namespace ShannonBase {
 namespace Populate {
 class PopulatorImpl;
@@ -113,12 +161,15 @@ struct Metrics {
   uint64_t compact_total_merged_rows{0};
   uint64_t compact_last_run_duration_us{0};
 
-  //  Query Execution
-  uint64_t query_scans_total{0};
-  uint64_t query_index_lookups_total{0};
+  //  Query Execution -- operational subset.
   uint64_t query_rows_read_total{0};
   uint64_t query_offload_total{0};
   uint64_t query_offload_fallback_total{0};
+
+#if RAPID_INSTRUMENTATION
+  // Per-operator instrumentation: diagnosis only, absent from release.
+  uint64_t query_scans_total{0};
+  uint64_t query_index_lookups_total{0};
   uint64_t query_vectorized_window_rows_total{0};
   uint64_t query_vectorized_window_simd_rows_total{0};
   uint64_t query_vectorized_window_scalar_rows_total{0};
@@ -171,6 +222,7 @@ struct Metrics {
   uint64_t query_vectorized_aggregate_hash_memory_peak_bytes_max{0};
   uint64_t query_vectorized_sort_rows_total{0};
   uint64_t query_vectorized_sort_spill_rows_total{0};
+#endif
 
   //  Transactions
   uint64_t active_transactions{0};
@@ -205,12 +257,14 @@ struct RapidCounters {
   std::atomic<uint64_t> compact_total_merged_rows{0};
   std::atomic<uint64_t> compact_last_run_duration_us{0};
 
-  // Query Execution
-  std::atomic<uint64_t> query_scans_total{0};
-  std::atomic<uint64_t> query_index_lookups_total{0};
+  // Query Execution -- operational subset.
   std::atomic<uint64_t> query_rows_read_total{0};
   std::atomic<uint64_t> query_offload_total{0};
   std::atomic<uint64_t> query_offload_fallback_total{0};
+
+#if RAPID_INSTRUMENTATION
+  std::atomic<uint64_t> query_scans_total{0};
+  std::atomic<uint64_t> query_index_lookups_total{0};
   std::atomic<uint64_t> query_vectorized_window_rows_total{0};
   std::atomic<uint64_t> query_vectorized_window_simd_rows_total{0};
   std::atomic<uint64_t> query_vectorized_window_scalar_rows_total{0};
@@ -261,6 +315,7 @@ struct RapidCounters {
   std::atomic<uint64_t> query_vectorized_aggregate_hash_memory_peak_bytes_max{0};
   std::atomic<uint64_t> query_vectorized_sort_rows_total{0};
   std::atomic<uint64_t> query_vectorized_sort_spill_rows_total{0};
+#endif
 
   // Transactions
   std::atomic<uint64_t> active_transactions{0};
@@ -296,11 +351,9 @@ inline void rapid_counter_compact_run(uint64_t merged_rows, uint64_t duration_us
   rapid_counters.compact_last_run_duration_us.store(duration_us, std::memory_order_relaxed);
 }
 
-inline void rapid_counter_query_scan() { rapid_counters.query_scans_total.fetch_add(1, std::memory_order_relaxed); }
+inline void rapid_counter_query_scan() { RAPID_COUNT(query_scans_total, 1); }
 
-inline void rapid_counter_query_index_lookup() {
-  rapid_counters.query_index_lookups_total.fetch_add(1, std::memory_order_relaxed);
-}
+inline void rapid_counter_query_index_lookup() { RAPID_COUNT(query_index_lookups_total, 1); }
 
 inline void rapid_counter_query_rows_read(uint64_t n) {
   rapid_counters.query_rows_read_total.fetch_add(n, std::memory_order_relaxed);
@@ -324,50 +377,42 @@ inline void rapid_counter_query_offload() {
  */
 inline void rapid_counter_vectorized_window_kernel(uint64_t simd_rows, uint64_t scalar_rows, uint64_t spill_rows,
                                                    uint64_t spill_bytes) {
-  if (simd_rows != 0)
-    rapid_counters.query_vectorized_window_simd_rows_total.fetch_add(simd_rows, std::memory_order_relaxed);
-  if (scalar_rows != 0)
-    rapid_counters.query_vectorized_window_scalar_rows_total.fetch_add(scalar_rows, std::memory_order_relaxed);
-  if (spill_rows != 0)
-    rapid_counters.query_vectorized_window_spill_rows_total.fetch_add(spill_rows, std::memory_order_relaxed);
-  if (spill_bytes != 0)
-    rapid_counters.query_vectorized_window_spill_bytes_total.fetch_add(spill_bytes, std::memory_order_relaxed);
+  if (simd_rows != 0) RAPID_COUNT(query_vectorized_window_simd_rows_total, simd_rows);
+  if (scalar_rows != 0) RAPID_COUNT(query_vectorized_window_scalar_rows_total, scalar_rows);
+  if (spill_rows != 0) RAPID_COUNT(query_vectorized_window_spill_rows_total, spill_rows);
+  if (spill_bytes != 0) RAPID_COUNT(query_vectorized_window_spill_bytes_total, spill_bytes);
 }
 
 // Rows the vectorized hash join / hash aggregate wrote to a spill file.
 inline void rapid_counter_vectorized_hash_join_spill_row() {
-  rapid_counters.query_vectorized_hash_join_spill_rows_total.fetch_add(1, std::memory_order_relaxed);
+  RAPID_COUNT(query_vectorized_hash_join_spill_rows_total, 1);
 }
 inline void rapid_counter_vectorized_aggregate_spill_row() {
-  rapid_counters.query_vectorized_aggregate_spill_rows_total.fetch_add(1, std::memory_order_relaxed);
+  RAPID_COUNT(query_vectorized_aggregate_spill_rows_total, 1);
 }
 inline void rapid_counter_vectorized_aggregate_hash_stats(uint64_t batch_rows, uint64_t row_materializations,
                                                           uint64_t cache_hits, uint64_t cache_misses,
                                                           uint64_t peak_bytes) {
-  rapid_counters.query_vectorized_aggregate_batch_rows_total.fetch_add(batch_rows, std::memory_order_relaxed);
-  rapid_counters.query_vectorized_aggregate_row_materializations_total.fetch_add(row_materializations,
-                                                                                 std::memory_order_relaxed);
-  rapid_counters.query_vectorized_aggregate_dict_cache_hits_total.fetch_add(cache_hits, std::memory_order_relaxed);
-  rapid_counters.query_vectorized_aggregate_dict_cache_misses_total.fetch_add(cache_misses, std::memory_order_relaxed);
-  rapid_counters.query_vectorized_aggregate_hash_mem_peak_bytes_sum_total.fetch_add(peak_bytes,
-                                                                                    std::memory_order_relaxed);
+  RAPID_COUNT(query_vectorized_aggregate_batch_rows_total, batch_rows);
+  RAPID_COUNT(query_vectorized_aggregate_row_materializations_total, row_materializations);
+  RAPID_COUNT(query_vectorized_aggregate_dict_cache_hits_total, cache_hits);
+  RAPID_COUNT(query_vectorized_aggregate_dict_cache_misses_total, cache_misses);
+  RAPID_COUNT(query_vectorized_aggregate_hash_mem_peak_bytes_sum_total, peak_bytes);
+#if RAPID_INSTRUMENTATION
   auto &peak_max = rapid_counters.query_vectorized_aggregate_hash_memory_peak_bytes_max;
   uint64_t observed = peak_max.load(std::memory_order_relaxed);
   while (observed < peak_bytes && !peak_max.compare_exchange_weak(observed, peak_bytes, std::memory_order_relaxed)) {
   }
+#endif
 }
 
 // Rows sorted by the vectorized sort, and rows it wrote to sorted runs on disk.
-inline void rapid_counter_vectorized_sort_rows(uint64_t n) {
-  rapid_counters.query_vectorized_sort_rows_total.fetch_add(n, std::memory_order_relaxed);
-}
+inline void rapid_counter_vectorized_sort_rows(uint64_t n) { RAPID_COUNT(query_vectorized_sort_rows_total, n); }
 inline void rapid_counter_vectorized_sort_spill_rows(uint64_t n) {
-  rapid_counters.query_vectorized_sort_spill_rows_total.fetch_add(n, std::memory_order_relaxed);
+  RAPID_COUNT(query_vectorized_sort_spill_rows_total, n);
 }
 
-inline void rapid_counter_vectorized_window_rows(uint64_t n) {
-  rapid_counters.query_vectorized_window_rows_total.fetch_add(n, std::memory_order_relaxed);
-}
+inline void rapid_counter_vectorized_window_rows(uint64_t n) { RAPID_COUNT(query_vectorized_window_rows_total, n); }
 
 inline void rapid_counter_query_offload_fallback() {
   rapid_counters.query_offload_fallback_total.fetch_add(1, std::memory_order_relaxed);

@@ -58,17 +58,17 @@ INSERT INTO cardinality_p WITH RECURSIVE n AS
 ALTER TABLE cardinality_b SECONDARY_LOAD;
 ALTER TABLE cardinality_p SECONDARY_LOAD;
 SET use_secondary_engine=FORCED;
---let $before = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_hash_join_bloom_scan_rejects_total', Value, 1)
+--let $rapid_stats_action = begin
+--source suite/secondary_engine/include/rapid_stats_check.inc
 SET optimizer_trace='enabled=on';
 SELECT COUNT(*) FROM cardinality_p p JOIN cardinality_b b ON p.k=b.k;
 SET @observation=(SELECT TRACE FROM information_schema.OPTIMIZER_TRACE);
 SELECT o.actual_rows FROM JSON_TABLE(@observation, '$**.rapid_cardinality_observation'
   COLUMNS (op VARCHAR(16) PATH '$.operator', actual_rows INT PATH '$.actual_rows')) o
 WHERE o.op='scan' ORDER BY o.actual_rows;
---let $after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_hash_join_bloom_scan_rejects_total', Value, 1)
-if ($after <= $before) {
-  --die Expected runtime Bloom scan rejection
-}
+--let $rapid_stats_field = bloom_scan_rejects
+--let $rapid_stats_action = end
+--source suite/secondary_engine/include/rapid_stats_check.inc
 SET optimizer_trace='enabled=off';
 SET use_secondary_engine=OFF;
 DROP TABLE cardinality_p, cardinality_b;

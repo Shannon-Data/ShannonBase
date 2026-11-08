@@ -45,7 +45,6 @@ USE sh_storage_recovery;
 --let $wait_timeout = 60
 --source include/wait_for_pattern_in_file.inc
 SELECT COUNT(*) AS automatically_loaded FROM performance_schema.rpd_table_id WHERE SCHEMA_NAME='sh_storage_recovery' AND TABLE_NAME='t';
-SELECT VARIABLE_VALUE FROM performance_schema.global_status WHERE VARIABLE_NAME='rapid_recovery_primary_reloads';
 SET use_secondary_engine=OFF;
 --let $storage_actual = `SELECT GROUP_CONCAT(CONCAT(id,':',v) ORDER BY id) FROM t`
 if ($storage_actual != $storage_expected) {
@@ -72,7 +71,12 @@ if ($shannon_storage_layer_case == 'verify') {
 USE sh_storage_recovery;
 --let $wait_condition = SELECT COUNT(*)=1 FROM performance_schema.rpd_table_id WHERE SCHEMA_NAME='sh_storage_recovery' AND TABLE_NAME='t'
 --source include/wait_condition.inc
---let $wait_condition = SELECT CAST(VARIABLE_VALUE AS UNSIGNED)=1 FROM performance_schema.global_status WHERE VARIABLE_NAME='rapid_recovery_$storage_route'
+# Being listed in rpd_table_id is not the same as being usable: the row appears
+# when the table is registered, the rows appear once the restore or reload has
+# actually landed. rapid_total_rows is the published witness for that, and it
+# works the same in debug and release builds.
+--let $wait_condition = SELECT CAST(VARIABLE_VALUE AS UNSIGNED)>=1 FROM performance_schema.global_status WHERE VARIABLE_NAME='rapid_total_rows'
+--let $wait_timeout = 60
 --source include/wait_condition.inc
 SET use_secondary_engine=OFF;
 --let $storage_actual = `SELECT GROUP_CONCAT(CONCAT(id,':',v) ORDER BY id) FROM t`

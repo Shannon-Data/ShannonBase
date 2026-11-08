@@ -26,7 +26,6 @@ Note	1003	Query is executed in secondary engine; the actual query plan may diver
 SELECT SUM(v),COUNT(v) FROM t FORCE INDEX(k) WHERE k=1;
 SUM(v)	COUNT(v)
 1598	259
-# REF batch output (1 expected): 1
 # Sort/TopN -> LIMIT -> projection -> columnar materialization -> aggregate.
 EXPLAIN FORMAT=TREE SELECT /*+ NO_MERGE(d) */ SUM(d.v),COUNT(d.k)
 FROM (SELECT v,k FROM t ORDER BY k,id LIMIT 2049) d;
@@ -42,9 +41,6 @@ Note	1003	Query is executed in secondary engine; the actual query plan may diver
 SELECT /*+ NO_MERGE(d) */ SUM(d.v),COUNT(d.k) FROM (SELECT v,k FROM t ORDER BY k,id LIMIT 2049) d;
 SUM(d.v)	COUNT(d.k)
 -154935	1786
-sort_batches	stream_batches	materialize_batches
-1	1	1
-# all three batch edges used (1 expected): 1
 # Both sort and columnar materialization spill under bounded grants.
 SET SESSION debug='+d,rapid_sort_tiny_budget,rapid_materialize_tiny_cache';
 SET SESSION debug='-d,rapid_sort_tiny_budget,rapid_materialize_tiny_cache';

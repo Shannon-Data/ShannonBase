@@ -143,7 +143,6 @@ pkey	n
 491	1
 490	1
 489	1
-# build side spilled (1 expected): 1
 #
 # ---- A build side that fits must NOT spill (guards against always-spill) ----
 #
@@ -156,7 +155,6 @@ pkey	sb
 3	12
 4	16
 5	20
-# build side spilled (0 expected): 0
 #
 # ---- Numeric-only inputs: the batch consumer path ----
 #
@@ -295,7 +293,6 @@ pkey	n	sb
 491	1	NULL
 490	1	NULL
 489	1	NULL
-# build side spilled (1 expected): 1
 #
 # ---- One join key, larger than the whole join buffer ----
 #
@@ -376,7 +373,6 @@ COUNT(*)
 SELECT COUNT(*) FROM skew_probe WHERE pkey NOT IN (SELECT bkey FROM skew_build);
 COUNT(*)
 20
-# build side spilled (1 expected): 1
 # Auxiliary allocation failure must return an error and permit re-execution.
 SET SESSION debug = '+d,rapid_join_aux_bad_alloc';
 SELECT pkey, COUNT(*) AS n, SUM(bval) AS sb, SUM(pval) AS sp

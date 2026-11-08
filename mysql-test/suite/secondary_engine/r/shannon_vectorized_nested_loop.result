@@ -32,8 +32,6 @@ Note	1003	Query is executed in secondary engine; the actual query plan may diver
 SELECT COUNT(*),SUM(i.amount),COUNT(i.label) FROM o STRAIGHT_JOIN i FORCE INDEX(k) ON i.k=o.id;
 COUNT(*)	SUM(i.amount)	COUNT(i.label)
 1600	1098058	1455
-# aggregate consumed NLJ batches (1 expected): 1
-# NLJ consumed REF batches (1 expected): 1
 # A row-consuming aggregate keeps vectorized scans below the nested loop.
 SET optimizer_switch='hypergraph_optimizer=on';
 Warnings:

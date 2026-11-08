@@ -683,7 +683,7 @@ int VectorizedTableScanIterator::ReadPredicateBatch(std::pmr::vector<ColumnChunk
   m_operator_stats.rows_out += rows;
   ++m_operator_stats.batches;
   if (m_examined_rows != nullptr) *m_examined_rows += rows;
-  RapidMonitor::rapid_counters.query_late_predicate_rows_total.fetch_add(rows, std::memory_order_relaxed);
+  RAPID_COUNT(query_late_predicate_rows_total, rows);
   if (m_eof_reached) m_cardinality.Finish(thd(), "scan", m_operator_stats.rows_in);
   if (rows) {
     DEBUG_SYNC(thd(), "rapid_late_predicate_batch");

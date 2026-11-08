@@ -28,6 +28,7 @@
 #include <inttypes.h>
 #include <atomic>
 #include <chrono>
+#include <mutex>
 #include <shared_mutex>
 
 #include "storage/rapid_engine/imcs/imcs.h"
@@ -145,10 +146,13 @@ void collect_rapid_monitor_metrics(Metrics &metrics) {
   metrics.compact_last_run_duration_us = rapid_counters.compact_last_run_duration_us.load(std::memory_order_relaxed);
 
   //  Query Execution
+#if RAPID_INSTRUMENTATION
   metrics.query_scans_total = rapid_counters.query_scans_total.load(std::memory_order_relaxed);
   metrics.query_index_lookups_total = rapid_counters.query_index_lookups_total.load(std::memory_order_relaxed);
+#endif
   metrics.query_rows_read_total = rapid_counters.query_rows_read_total.load(std::memory_order_relaxed);
   metrics.query_offload_total = rapid_counters.query_offload_total.load(std::memory_order_relaxed);
+#if RAPID_INSTRUMENTATION
   metrics.query_vectorized_window_rows_total =
       rapid_counters.query_vectorized_window_rows_total.load(std::memory_order_relaxed);
   metrics.query_vectorized_window_simd_rows_total =
@@ -242,6 +246,7 @@ void collect_rapid_monitor_metrics(Metrics &metrics) {
       rapid_counters.query_vectorized_sort_rows_total.load(std::memory_order_relaxed);
   metrics.query_vectorized_sort_spill_rows_total =
       rapid_counters.query_vectorized_sort_spill_rows_total.load(std::memory_order_relaxed);
+#endif
   metrics.query_offload_fallback_total = rapid_counters.query_offload_fallback_total.load(std::memory_order_relaxed);
 
   //  Transactions
@@ -359,15 +364,19 @@ void print_rapid_monitor_info(FILE *file) {
   /*  Query Execution  */
   fprintf(file,
           "\n-- Query Execution --\n"
-          "rapid_query_scans_total               : %" PRIu64
-          "\n"
-          "rapid_query_index_lookups_total       : %" PRIu64
-          "\n"
           "rapid_query_rows_read_total           : %" PRIu64
           "\n"
           "rapid_query_offload_total             : %" PRIu64
           "\n"
-          "rapid_query_offload_fallback_total    : %" PRIu64
+          "rapid_query_offload_fallback_total    : %" PRIu64 "\n",
+          metrics.query_rows_read_total, metrics.query_offload_total, metrics.query_offload_fallback_total);
+
+#if RAPID_INSTRUMENTATION
+  /*  Query Execution -- diagnosis only, compiled out of release builds.  */
+  fprintf(file,
+          "rapid_query_scans_total               : %" PRIu64
+          "\n"
+          "rapid_query_index_lookups_total       : %" PRIu64
           "\n"
           "rapid_query_vectorized_window_rows_total: %" PRIu64
           "\n"
@@ -378,10 +387,10 @@ void print_rapid_monitor_info(FILE *file) {
           "rapid_query_vectorized_window_spill_rows_total: %" PRIu64
           "\n"
           "rapid_query_vectorized_window_spill_bytes_total: %" PRIu64 "\n",
-          metrics.query_scans_total, metrics.query_index_lookups_total, metrics.query_rows_read_total,
-          metrics.query_offload_total, metrics.query_offload_fallback_total, metrics.query_vectorized_window_rows_total,
+          metrics.query_scans_total, metrics.query_index_lookups_total, metrics.query_vectorized_window_rows_total,
           metrics.query_vectorized_window_simd_rows_total, metrics.query_vectorized_window_scalar_rows_total,
           metrics.query_vectorized_window_spill_rows_total, metrics.query_vectorized_window_spill_bytes_total);
+#endif
 
   /*  Transactions  */
   fprintf(file,
@@ -395,5 +404,196 @@ void print_rapid_monitor_info(FILE *file) {
 
   fprintf(file, "\n==\n");
 }
+
+#if RAPID_INSTRUMENTATION
+namespace {
+/** One counter the per-statement line reports. */
+struct CounterRef {
+  const char *name;
+  const std::atomic<uint64_t> *counter;
+};
+
+// Every counter the engine keeps, so a test can match any of them by name
+// without this table having to grow. The name is what the line prints: the
+// curated short names first (bloom_checks, sort_rows, ...) because tests read
+// them, then the counter's own name for everything else.
+// clang-format off
+constexpr CounterRef kStatCounters[] = {
+#define RAPID_STAT(name, field) {name, &rapid_counters.field},
+    RAPID_STAT("scans", query_scans_total) RAPID_STAT("bloom_checks", query_hash_join_bloom_checks_total) RAPID_STAT(
+        "bloom_rejects",
+        query_hash_join_bloom_rejects_total) RAPID_STAT("bloom_scan_rejects",
+                                                        query_hash_join_bloom_scan_rejects_total) RAPID_STAT("bloom_"
+                                                                                                             "disabled",
+                                                                                                             query_hash_join_bloom_disabled_total)
+        RAPID_STAT("parallel_rows", query_parallel_rows_total) RAPID_STAT("parallel_fallbacks", query_parallel_fallbacks_total) RAPID_STAT(
+            "sort_rows", query_vectorized_sort_rows_total) RAPID_STAT("sort_spill",
+                                                                      query_vectorized_sort_spill_rows_total) RAPID_STAT("window_rows",
+                                                                                                                         query_vectorized_window_rows_total)
+            RAPID_STAT("window_spill", query_vectorized_window_spill_rows_total) RAPID_STAT("bitpack_unpack", query_bitpacked_unpack_rows_total) RAPID_STAT(
+                "bitpack_predicate", query_bitpacked_predicate_rows_total) RAPID_STAT("bitpack_aggregate",
+                                                                                      query_bitpacked_aggregate_rows_total)
+                RAPID_STAT("late_rows", query_late_predicate_rows_total) RAPID_STAT("gc_total_runs", gc_total_runs) RAPID_STAT(
+                    "gc_total_purged_rows",
+                    gc_total_purged_rows) RAPID_STAT("gc_total_purged_versions",
+                                                     gc_total_purged_versions) RAPID_STAT("gc_last_run_scn",
+                                                                                          gc_last_run_scn)
+                    RAPID_STAT("gc_last_run_duration_us", gc_last_run_duration_us) RAPID_STAT("compact_total_runs", compact_total_runs) RAPID_STAT(
+                        "compact_total_merged_rows",
+                        compact_total_merged_rows) RAPID_STAT("compact_last_run_duration_us",
+                                                              compact_last_run_duration_us)
+                        RAPID_STAT("query_rows_read", query_rows_read_total) RAPID_STAT("query_offload", query_offload_total) RAPID_STAT(
+                            "query_offload_fallback",
+                            query_offload_fallback_total) RAPID_STAT("query_index_lookups", query_index_lookups_total)
+                            RAPID_STAT("window_simd_rows", query_vectorized_window_simd_rows_total) RAPID_STAT(
+                                "window_scalar_rows",
+                                query_vectorized_window_scalar_rows_total) RAPID_STAT("window_spill_bytes", query_vectorized_window_spill_bytes_total)
+                                RAPID_STAT("hash_join_spill_rows", query_vectorized_hash_join_spill_rows_total) RAPID_STAT(
+                                    "bloom_builds",
+                                    query_hash_join_bloom_builds_total) RAPID_STAT("bloom_bytes", query_hash_join_bloom_bytes_total)
+                                    RAPID_STAT("aggregate_spill_rows", query_vectorized_aggregate_spill_rows_total) RAPID_STAT(
+                                        "aggregate_batch_rows",
+                                        query_vectorized_aggregate_batch_rows_total)
+                                        RAPID_STAT("aggregate_scaled_values", query_vectorized_aggregate_scaled_values_total) RAPID_STAT(
+                                            "aggregate_scalar_decimal_values",
+                                            query_vectorized_aggregate_scalar_decimal_values_total)
+                                            RAPID_STAT("sort_batch_rows", query_vectorized_sort_batch_rows_total) RAPID_STAT(
+                                                "ref_batch_rows",
+                                                query_vectorized_ref_batch_rows_total) RAPID_STAT("expression_rows",
+                                                                                                  query_vectorized_expression_rows_total)
+                                                RAPID_STAT("like_mask_rows", query_like_mask_rows_total) RAPID_STAT(
+                                                    "bitpacked_columns",
+                                                    cu_bitpacked_columns_total) RAPID_STAT("parallel_workers", query_parallel_workers_total)
+                                                    RAPID_STAT("parallel_tasks", query_parallel_tasks_total) RAPID_STAT(
+                                                        "parallel_spills",
+                                                        query_parallel_spills_total)
+                                                        RAPID_STAT("join_build_rows", query_parallel_join_build_rows_total) RAPID_STAT(
+                                                            "join_build_workers", query_parallel_join_build_workers_total) RAPID_STAT("join_finalize_partitions",
+                                                                                                                                      query_parallel_join_finalize_partitions_total)
+                                                            RAPID_STAT("join_finalize_workers", query_parallel_join_finalize_workers_total) RAPID_STAT(
+                                                                "join_build_fallbacks",
+                                                                query_parallel_join_build_fallbacks_total) RAPID_STAT("like_scalar_rows",
+                                                                                                                      query_like_scalar_rows_total)
+                                                                RAPID_STAT("dictionary_predicate_rows", query_dictionary_predicate_rows_total) RAPID_STAT(
+                                                                    "like_rows",
+                                                                    query_vectorized_like_rows_total) RAPID_STAT("dicti"
+                                                                                                                 "onary"
+                                                                                                                 "_minm"
+                                                                                                                 "ax_"
+                                                                                                                 "rows",
+                                                                                                                 query_vectorized_dictionary_minmax_rows_total)
+                                                                    RAPID_STAT("late_projection_cells", query_late_projection_cells_total) RAPID_STAT(
+                                                                        "scalar_expression_rows",
+                                                                        query_scalar_expression_rows_total)
+                                                                        RAPID_STAT("stream_batch_rows", query_vectorized_stream_batch_rows_total) RAPID_STAT(
+                                                                            "materialize_batch_rows",
+                                                                            query_vectorized_materialize_batch_rows_total)
+                                                                            RAPID_STAT(
+                                                                                "aggregate_row_"
+                                                                                "materializations",
+                                                                                query_vectorized_aggregate_row_materializations_total)
+                                                                                RAPID_STAT(
+                                                                                    "aggregate_dict_cache_hits",
+                                                                                    query_vectorized_aggregate_dict_cache_hits_total)
+                                                                                    RAPID_STAT(
+                                                                                        "aggregate_dict_cache_"
+                                                                                        "misses",
+                                                                                        query_vectorized_aggregate_dict_cache_misses_total)
+                                                                                        RAPID_STAT(
+                                                                                            "aggregate_hash_mem_"
+                                                                                            "peak_bytes_sum",
+                                                                                            query_vectorized_aggregate_hash_mem_peak_bytes_sum_total)
+                                                                                            RAPID_STAT(
+                                                                                                "aggregate_hash_"
+                                                                                                "memory_peak_bytes_"
+                                                                                                "max",
+                                                                                                query_vectorized_aggregate_hash_memory_peak_bytes_max)
+                                                                                                RAPID_STAT(
+                                                                                                    "active_"
+                                                                                                    "transactions",
+                                                                                                    active_transactions)
+                                                                                                    RAPID_STAT(
+                                                                                                        "tra"
+                                                                                                        "nsa"
+                                                                                                        "cti"
+                                                                                                        "on_"
+                                                                                                        "com"
+                                                                                                        "mit"
+                                                                                                        "s",
+                                                                                                        transaction_commits_total)
+                                                                                                        RAPID_STAT(
+                                                                                                            "transa"
+                                                                                                            "ction_"
+                                                                                                            "rollba"
+                                                                                                            "cks",
+                                                                                                            transaction_rollbacks_total)
+                                                                                                            RAPID_STAT(
+                                                                                                                "re"
+                                                                                                                "co"
+                                                                                                                "ve"
+                                                                                                                "ry"
+                                                                                                                "_s"
+                                                                                                                "to"
+                                                                                                                "ra"
+                                                                                                                "ge"
+                                                                                                                "_r"
+                                                                                                                "es"
+                                                                                                                "to"
+                                                                                                                "re"
+                                                                                                                "s",
+                                                                                                                recovery_storage_restores)
+                                                                                                                RAPID_STAT(
+                                                                                                                    "re"
+                                                                                                                    "co"
+                                                                                                                    "ve"
+                                                                                                                    "ry"
+                                                                                                                    "_p"
+                                                                                                                    "ri"
+                                                                                                                    "ma"
+                                                                                                                    "ry"
+                                                                                                                    "_r"
+                                                                                                                    "el"
+                                                                                                                    "oa"
+                                                                                                                    "d"
+                                                                                                                    "s",
+                                                                                                                    recovery_primary_reloads)
+#undef RAPID_STAT
+};
+// clang-format on
+
+constexpr size_t kStatCounterCount = sizeof(kStatCounters) / sizeof(kStatCounters[0]);
+}  // namespace
+
+void log_rapid_counters(const char *tag, bool emit) {
+  // The baseline moves on every statement, so turning the flag on mid-session
+  // reports that statement rather than everything since the server started.
+  static std::mutex lock;
+  static uint64_t previous[kStatCounterCount] = {};
+
+  std::lock_guard<std::mutex> guard(lock);
+
+  uint64_t current[kStatCounterCount];
+  for (size_t i = 0; i < kStatCounterCount; ++i) current[i] = kStatCounters[i].counter->load(std::memory_order_relaxed);
+
+  if (emit) {
+    // One line per statement: a test that wants "did this query reject a probe
+    // row" cannot get an answer out of a running total.
+    char line[8192];
+    size_t used = static_cast<size_t>(snprintf(line, sizeof line, "RAPID_STATS [%s]", tag));
+    if (used >= sizeof line) used = sizeof line - 1;
+    for (size_t i = 0; i < kStatCounterCount && used + 64 < sizeof line; ++i) {
+      used += static_cast<size_t>(
+          snprintf(line + used, sizeof line - used, " %s=%" PRIu64, kStatCounters[i].name, current[i] - previous[i]));
+    }
+    if (used >= sizeof line) used = sizeof line - 1;
+    line[used++] = '\n';
+    line[used] = '\0';
+    fputs(line, stderr);
+  }
+
+  for (size_t i = 0; i < kStatCounterCount; ++i) previous[i] = current[i];
+}
+#endif
+
 }  // namespace RapidMonitor
 }  // namespace ShannonBase

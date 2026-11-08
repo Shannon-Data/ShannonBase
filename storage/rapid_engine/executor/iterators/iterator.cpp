@@ -1112,13 +1112,12 @@ bool VectorizedFilterIterator::EvaluateDictionaryPredicateBatch(const std::pmr::
     }
     if (matched) m_selection.push_back(row);
   }
-  auto &counters = RapidMonitor::rapid_counters;
   if (predicate->has_mysql_like()) {
-    counters.query_like_mask_rows_total.fetch_add(masked, std::memory_order_relaxed);
-    counters.query_like_scalar_rows_total.fetch_add(scalar, std::memory_order_relaxed);
-    counters.query_vectorized_like_rows_total.fetch_add(rows, std::memory_order_relaxed);
+    RAPID_COUNT(query_like_mask_rows_total, masked);
+    RAPID_COUNT(query_like_scalar_rows_total, scalar);
+    RAPID_COUNT(query_vectorized_like_rows_total, rows);
   } else {
-    counters.query_dictionary_predicate_rows_total.fetch_add(masked, std::memory_order_relaxed);
+    RAPID_COUNT(query_dictionary_predicate_rows_total, masked);
   }
   if (m_dictionary_residual) {
     const size_t candidates = m_selection.size();
@@ -1134,7 +1133,7 @@ bool VectorizedFilterIterator::EvaluateDictionaryPredicateBatch(const std::pmr::
     }
     m_selection.resize(kept);
     m_stats.scalar_fallback_rows += candidates;
-    counters.query_scalar_expression_rows_total.fetch_add(candidates, std::memory_order_relaxed);
+    RAPID_COUNT(query_scalar_expression_rows_total, candidates);
   }
   return true;
 }
@@ -1737,12 +1736,11 @@ int VectorizedFilterIterator::ReadSelectedBatchImpl(std::pmr::vector<ColumnChunk
         if (m_expression.Matches(row)) m_selection.push_back(m_input_selection.empty() ? row : m_input_selection[row]);
       used_vector_predicate = true;
       m_stats.expression_batch_rows += input_rows;
-      RapidMonitor::rapid_counters.query_vectorized_expression_rows_total.fetch_add(input_rows,
-                                                                                    std::memory_order_relaxed);
+      RAPID_COUNT(query_vectorized_expression_rows_total, input_rows);
     }
     if (thd()->is_error()) return 1;
     if (!used_vector_predicate) {
-      RapidMonitor::rapid_counters.query_scalar_expression_rows_total.fetch_add(input_rows, std::memory_order_relaxed);
+      RAPID_COUNT(query_scalar_expression_rows_total, input_rows);
       m_stats.scalar_fallback_rows += input_rows;
       m_selection.clear();
       if (!Reserve(m_selection, input_rows)) return 1;

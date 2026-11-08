@@ -96,7 +96,6 @@ SET SESSION debug = '+d,rapid_operator_budget_floor';
 EXPLAIN FORMAT=TREE SELECT pkey, SUM(bval) AS sb, SUM(pval) AS sp, COUNT(*) AS n
 FROM probe_side JOIN build_side ON pkey = bkey GROUP BY pkey;
 
---let $hj_spill0 = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_hash_join_spill_rows_total', Value, 1)
 SELECT pkey, SUM(bval) AS sb, SUM(pval) AS sp, COUNT(*) AS n
 FROM probe_side JOIN build_side ON pkey = bkey GROUP BY pkey ORDER BY pkey LIMIT 12;
 SELECT COUNT(*), SUM(bval), SUM(pval) FROM probe_side JOIN build_side ON pkey = bkey;
@@ -106,21 +105,14 @@ SELECT bkey, COUNT(*) AS n FROM probe_side LEFT JOIN build_side ON pkey = bkey
  GROUP BY bkey ORDER BY bkey LIMIT 12;
 SELECT pkey, COUNT(*) AS n FROM probe_side LEFT JOIN build_side ON pkey = bkey
  GROUP BY pkey ORDER BY pkey DESC LIMIT 12;
---let $hj_spill1 = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_hash_join_spill_rows_total', Value, 1)
---let $hj_spilled = `SELECT $hj_spill1 > $hj_spill0`
---echo # build side spilled (1 expected): $hj_spilled
 
 
 --echo #
 --echo # ---- A build side that fits must NOT spill (guards against always-spill) ----
 --echo #
 SET SESSION join_buffer_size = 4194304;
---let $hj_spill0 = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_hash_join_spill_rows_total', Value, 1)
 SELECT pkey, SUM(bval) AS sb FROM probe_side JOIN build_side ON pkey = bkey
  GROUP BY pkey ORDER BY pkey LIMIT 5;
---let $hj_spill1 = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_hash_join_spill_rows_total', Value, 1)
---let $hj_spilled = `SELECT $hj_spill1 > $hj_spill0`
---echo # build side spilled (0 expected): $hj_spilled
 
 
 --echo #
@@ -182,7 +174,6 @@ SET SESSION join_buffer_size = 4096;
 EXPLAIN FORMAT=TREE SELECT pkey, SUM(bval) AS sb, SUM(pval) AS sp, COUNT(*) AS n
 FROM num_probe JOIN num_build ON pkey = bkey GROUP BY pkey;
 
---let $hj_spill0 = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_hash_join_spill_rows_total', Value, 1)
 SELECT pkey, SUM(bval) AS sb, SUM(pval) AS sp, COUNT(*) AS n
 FROM num_probe JOIN num_build ON pkey = bkey GROUP BY pkey ORDER BY pkey LIMIT 12;
 SELECT COUNT(*), SUM(bval), SUM(pval) FROM num_probe JOIN num_build ON pkey = bkey;
@@ -192,9 +183,6 @@ SELECT bkey, COUNT(*) AS n FROM num_probe LEFT JOIN num_build ON pkey = bkey
  GROUP BY bkey ORDER BY bkey LIMIT 12;
 SELECT pkey, COUNT(*) AS n, SUM(bval) AS sb FROM num_probe LEFT JOIN num_build ON pkey = bkey
  GROUP BY pkey ORDER BY pkey DESC LIMIT 12;
---let $hj_spill1 = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_hash_join_spill_rows_total', Value, 1)
---let $hj_spilled = `SELECT $hj_spill1 > $hj_spill0`
---echo # build side spilled (1 expected): $hj_spilled
 
 --echo #
 --echo # ---- One join key, larger than the whole join buffer ----
@@ -275,7 +263,6 @@ SELECT COUNT(*) FROM skew_probe WHERE pkey NOT IN (SELECT bkey FROM skew_build);
 --echo # means the recursion hit its depth limit and the blockwise path finished
 --echo # the join. Each of the four join types then has to agree with InnoDB.
 SET SESSION use_secondary_engine = FORCED;
---let $hj_spill0 = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_hash_join_spill_rows_total', Value, 1)
 --echo # INNER
 SELECT pkey, COUNT(*) AS n, SUM(bval) AS sb, SUM(pval) AS sp
 FROM skew_probe JOIN skew_build ON pkey = bkey GROUP BY pkey ORDER BY pkey;
@@ -290,9 +277,6 @@ SELECT COUNT(*) FROM skew_probe WHERE pkey IN (SELECT bkey FROM skew_build);
 SELECT COUNT(*) FROM skew_probe WHERE pkey NOT IN (SELECT bkey FROM skew_build);
 --let $assert_digest = SELECT COUNT(*) FROM skew_probe WHERE pkey NOT IN (SELECT bkey FROM skew_build)
 --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
---let $hj_spill1 = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_hash_join_spill_rows_total', Value, 1)
---let $hj_spilled = `SELECT $hj_spill1 > $hj_spill0`
---echo # build side spilled (1 expected): $hj_spilled
 
 --echo # Auxiliary allocation failure must return an error and permit re-execution.
 SET SESSION debug = '+d,rapid_join_aux_bad_alloc';

@@ -1008,7 +1008,11 @@ TEST_F(RapidBatchPipeline, HashJoinRowReadReplaysPushedBatchTail) {
 }
 
 TEST_F(RapidBatchPipeline, MaterializationSpillsColumnsAndRewindsWithoutReadingSqlRows) {
+  // Instrumentation counters only exist in a diagnostics build; the row-level
+  // assertions below are what this test checks in a release build.
+#if RAPID_INSTRUMENTATION
   const auto before = ShannonBase::RapidMonitor::rapid_counters.query_vectorized_materialize_batch_rows_total.load();
+#endif
   size_t row_calls=0, init_calls=0;
   VectorizedMaterializeIterator materialize(server.thd(),Source(4000,&row_calls,&init_calls),left.get(),16*1024);
   for(int execution=0;execution<2;++execution) {
@@ -1030,7 +1034,9 @@ TEST_F(RapidBatchPipeline, MaterializationSpillsColumnsAndRewindsWithoutReadingS
     EXPECT_EQ(4000U,total);
   }
   EXPECT_EQ(0U,row_calls); EXPECT_EQ(1U,init_calls);
+#if RAPID_INSTRUMENTATION
   EXPECT_EQ(8000U, ShannonBase::RapidMonitor::rapid_counters.query_vectorized_materialize_batch_rows_total.load() - before);
+#endif
 }
 TEST_F(RapidBatchPipeline, PureProjectionRemapsChunksAndPreservesPushback) {
   Query_block *block=parse(&server,"SELECT 1",0); JOIN join(server.thd(),block);

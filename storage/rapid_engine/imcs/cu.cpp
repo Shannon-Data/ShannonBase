@@ -628,7 +628,7 @@ uint8_t CU::pack(size_t row_count) {
     return 0;
   }
   m_packed_rows = row_count;
-  RapidMonitor::rapid_counters.cu_bitpacked_columns_total.fetch_add(1, std::memory_order_relaxed);
+  RAPID_COUNT(cu_bitpacked_columns_total, 1);
   return bits;
 }
 
