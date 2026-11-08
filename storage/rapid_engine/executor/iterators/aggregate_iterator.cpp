@@ -279,10 +279,8 @@ VectorizedAggregateIterator::HashStatsReportGuard::~HashStatsReportGuard() {
   RapidMonitor::rapid_counter_vectorized_aggregate_hash_stats(
       stats->hash_batch_input_rows, stats->hash_row_materializations, stats->dict_code_cache_hits,
       stats->dict_code_cache_misses, stats->hash_memory_peak_bytes);
-  RapidMonitor::rapid_counters.query_vectorized_aggregate_scaled_values_total.fetch_add(stats->hash_scaled_values,
-                                                                                        std::memory_order_relaxed);
-  RapidMonitor::rapid_counters.query_vectorized_aggregate_scalar_decimal_values_total.fetch_add(
-      stats->hash_scalar_decimal_values, std::memory_order_relaxed);
+  RAPID_COUNT(query_vectorized_aggregate_scaled_values_total, stats->hash_scaled_values);
+  RAPID_COUNT(query_vectorized_aggregate_scalar_decimal_values_total, stats->hash_scalar_decimal_values);
 }
 
 VectorizedAggregateIterator::~VectorizedAggregateIterator() { ResMgmt::unregister_evictable(this); }
@@ -637,8 +635,7 @@ int VectorizedAggregateIterator::ReadImpl() {
           std::count_if(m_vectorizer.aggregate_infos.begin(), m_vectorizer.aggregate_infos.end(),
                         [](const auto &info) { return info.value_expr != nullptr; });
       m_stats.expression_scalar_rows += expression_count;
-      RapidMonitor::rapid_counters.query_scalar_expression_rows_total.fetch_add(expression_count,
-                                                                                std::memory_order_relaxed);
+      RAPID_COUNT(query_scalar_expression_rows_total, expression_count);
 
       int result = ProcessCurrentGroupTraditional();
       if (result != 0) return result;
@@ -2278,8 +2275,7 @@ int VectorizedAggregateIterator::UpdateHashGroupFromBatch(HashGroupState *group,
           if (dict_code >= ranks.size() || ranks[dict_code] == UINT32_MAX) dict_code = UINT32_MAX;
           if (dict_code != UINT32_MAX && state.has_value && state.extremum_code < ranks.size() &&
               ranks[state.extremum_code] != UINT32_MAX) {
-            RapidMonitor::rapid_counters.query_vectorized_dictionary_minmax_rows_total.fetch_add(
-                1, std::memory_order_relaxed);
+            RAPID_COUNT(query_vectorized_dictionary_minmax_rows_total, 1);
             const bool better = info.type == Item_sum::MIN_FUNC ? ranks[dict_code] < ranks[state.extremum_code]
                                                                 : ranks[dict_code] > ranks[state.extremum_code];
             if (!better) continue;
@@ -2479,8 +2475,7 @@ int VectorizedAggregateIterator::ProcessGroupVectorized() {
         if (err != 0 && !m_streaming_batch_eof) return kFatalError;
         // This status counts batch ingestion for both hash and streaming
         // aggregation. Count only newly read rows, not buffered group tails.
-        RapidMonitor::rapid_counters.query_vectorized_aggregate_batch_rows_total.fetch_add(m_streaming_batch_rows,
-                                                                                           std::memory_order_relaxed);
+        RAPID_COUNT(query_vectorized_aggregate_batch_rows_total, m_streaming_batch_rows);
       }
       rows_read = m_streaming_batch_rows - m_streaming_batch_pos;
       is_eof = m_streaming_batch_eof;
@@ -2835,8 +2830,7 @@ int VectorizedAggregateIterator::ProcessVectorizedAggregates(const std::pmr::vec
           if (ranked && best != SIZE_MAX) {
             if (RestoreFieldFromChunk(info.source_field, chunk, best) || info.item->aggregator_add())
               return kFatalError;
-            RapidMonitor::rapid_counters.query_vectorized_dictionary_minmax_rows_total.fetch_add(
-                non_null, std::memory_order_relaxed);
+            RAPID_COUNT(query_vectorized_dictionary_minmax_rows_total, non_null);
           } else {
             for (size_t row = 0; row < row_count; ++row) {
               if (chunk.nullable_fast(row)) continue;
@@ -3438,8 +3432,7 @@ int VectorizedAggregateIterator::AddReducedBatch(const PackedReduction &reductio
     default:
       return kFatalError;
   }
-  RapidMonitor::rapid_counters.query_bitpacked_aggregate_rows_total.fetch_add(reduction.rows,
-                                                                              std::memory_order_relaxed);
+  RAPID_COUNT(query_bitpacked_aggregate_rows_total, reduction.rows);
   return kSuccess;
 }
 
@@ -3917,7 +3910,7 @@ bool VectorizedAggregateIterator::BuildExpressionChunksFromBatch(size_t rows) {
 
     if (info.expression.Evaluate(m_batch_col_chunks, rows) && info.expression.Store(&target, rows)) {
       m_stats.expression_batch_rows += rows;
-      RapidMonitor::rapid_counters.query_vectorized_expression_rows_total.fetch_add(rows, std::memory_order_relaxed);
+      RAPID_COUNT(query_vectorized_expression_rows_total, rows);
       continue;
     }
     // A failed speculative evaluation must not leave partial output behind.
@@ -3927,7 +3920,7 @@ bool VectorizedAggregateIterator::BuildExpressionChunksFromBatch(size_t rows) {
       return true;
     });
     m_stats.expression_scalar_rows += rows;
-    RapidMonitor::rapid_counters.query_scalar_expression_rows_total.fetch_add(rows, std::memory_order_relaxed);
+    RAPID_COUNT(query_scalar_expression_rows_total, rows);
 
     Field *out = info.source_field;
     Item *expr = info.value_expr;
@@ -3977,7 +3970,7 @@ bool VectorizedAggregateIterator::EvaluateExpressionFields() {
     if (info.value_expr == nullptr || info.source_field == nullptr) continue;
 
     ++m_stats.expression_scalar_rows;
-    RapidMonitor::rapid_counters.query_scalar_expression_rows_total.fetch_add(1, std::memory_order_relaxed);
+    RAPID_COUNT(query_scalar_expression_rows_total, 1);
 
     Item *expr = info.value_expr;
     if (expr->result_type() == DECIMAL_RESULT) {
@@ -4289,7 +4282,7 @@ int VectorizedAggregateIterator::TryBuildParallelGroups() {
   const auto allocation_error = [&]() -> int {
     if (!m_parallel_output && !thd()->is_error() &&
         m_aux_memory.last_failure() == ResMgmt::AllocationFailure::kBudgetExhausted) {
-      RapidMonitor::rapid_counters.query_parallel_fallbacks_total.fetch_add(1, std::memory_order_relaxed);
+      RAPID_COUNT(query_parallel_fallbacks_total, 1);
       return -1;
     }
     return AllocationError("Rapid parallel pipeline allocation failed");
@@ -4377,8 +4370,7 @@ int VectorizedAggregateIterator::TryBuildParallelGroups() {
   if (!Morsel::EnoughWorkForWorkers(
           workers, static_cast<double>(source->tasks()) * static_cast<double>(Morsel::ParallelQueue::kClaimRows)))
     return -1;
-  auto &counters = RapidMonitor::rapid_counters;
-  counters.query_parallel_tasks_total.fetch_add(source->tasks(), std::memory_order_relaxed);
+  RAPID_COUNT(query_parallel_tasks_total, source->tasks());
   bool inject_failure = false, tiny_budget = false, inject_retry = false;
   DBUG_EXECUTE_IF("rapid_parallel_worker_failure", { inject_failure = true; });
   DBUG_EXECUTE_IF("rapid_parallel_tiny_budget", { tiny_budget = true; });
@@ -4562,7 +4554,7 @@ int VectorizedAggregateIterator::TryBuildParallelGroups() {
       });
   if (run == Morsel::ParallelRunResult::ERROR) return 1;
   if (run == Morsel::ParallelRunResult::RETRY || retry.load() || input_rows.load() == 0) {
-    counters.query_parallel_fallbacks_total.fetch_add(1, std::memory_order_relaxed);
+    RAPID_COUNT(query_parallel_fallbacks_total, 1);
     return -1;
   }
   m_parallel_output = true;
@@ -4570,8 +4562,8 @@ int VectorizedAggregateIterator::TryBuildParallelGroups() {
     m_hash_memory_limit = std::min<size_t>(m_hash_memory_limit, 64 * 1024);
     m_hash_arena->memory.set_limit_bytes(m_hash_memory_limit);
   }
-  counters.query_parallel_rows_total.fetch_add(input_rows.load(), std::memory_order_relaxed);
-  counters.query_parallel_spills_total.fetch_add(local_spills.load(), std::memory_order_relaxed);
+  RAPID_COUNT(query_parallel_rows_total, input_rows.load());
+  RAPID_COUNT(query_parallel_spills_total, local_spills.load());
   // All worker arenas have been destroyed before the coordinator reuses their
   // grant. Convert one partial at a time into the existing canonical spill form.
   const size_t packed_capacity = ComputeRowSizeUpperBound(m_tables);

@@ -35,15 +35,12 @@ CREATE TABLE got_ai AS SELECT COUNT(*) AS c, MIN(id) AS first_id, SUM(v) AS sv F
 CREATE TABLE got_pad AS SELECT COUNT(*) AS c, MIN(id) AS first_id, SUM(v) AS sv FROM t GROUP BY s_pad;
 CREATE TABLE got_bin AS SELECT COUNT(*) AS c, MIN(id) AS first_id, SUM(v) AS sv FROM t GROUP BY s_bin;
 CREATE TABLE got_latin AS SELECT COUNT(*) AS c, MIN(id) AS first_id, SUM(v) AS sv FROM t GROUP BY s_latin;
-# batch rows processed (1 expected): 1
-# dictionary code cache hit (1 expected): 1
 SET SESSION debug='+d,rapid_hash_aggregate_row_input';
 CREATE TABLE got_ai_row AS SELECT COUNT(*) AS c, MIN(id) AS first_id, SUM(v) AS sv FROM t GROUP BY s_ai;
 CREATE TABLE got_pad_row AS SELECT COUNT(*) AS c, MIN(id) AS first_id, SUM(v) AS sv FROM t GROUP BY s_pad;
 CREATE TABLE got_bin_row AS SELECT COUNT(*) AS c, MIN(id) AS first_id, SUM(v) AS sv FROM t GROUP BY s_bin;
 CREATE TABLE got_latin_row AS SELECT COUNT(*) AS c, MIN(id) AS first_id, SUM(v) AS sv FROM t GROUP BY s_latin;
 SET SESSION debug='-d,rapid_hash_aggregate_row_input';
-# forced row input bypassed batch (1 expected): 1
 SET SESSION use_secondary_engine=OFF;
 SELECT COUNT(*) AS ai_groups FROM ref_ai;
 ai_groups

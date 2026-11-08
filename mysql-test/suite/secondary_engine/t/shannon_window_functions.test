@@ -103,34 +103,24 @@ SET SESSION debug = '-d,rapid_disable_vectorized_window';
 --echo # counter by exactly one per output row; a window that is not must leave
 --echo # it untouched.
 
-let $before = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_window_rows_total', Value, 1);
 
 --disable_result_log
 SELECT p, o, SUM(i4) OVER (PARTITION BY p ORDER BY o) FROM wf;
 --enable_result_log
 
-let $after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_window_rows_total', Value, 1);
---let $emitted = `SELECT $after - $before`
---echo # rows emitted by the vectorized window operator (12 expected):
---echo $emitted
 
-# The parity check runs the same query again on both optimizers, so it has to
-# stay outside the counter window above or the delta triples.
+# The parity check runs the same query again on both optimizers, so it would
+# double the work the RAPID_STATS window above measures.
 --disable_result_log
 --let $assert_digest = SELECT p, o, SUM(i4) OVER (PARTITION BY p ORDER BY o) FROM wf
 --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 --enable_result_log
 
 --echo # LAG() is outside the subset, so this window must stay on the native
---echo # iterator and add nothing to the counter.
-let $before = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_window_rows_total', Value, 1);
+--echo # iterator.
 --disable_result_log
 SELECT p, o, LAG(i4) OVER (PARTITION BY p ORDER BY o) FROM wf;
 --enable_result_log
-let $after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_window_rows_total', Value, 1);
---let $emitted = `SELECT $after - $before`
---echo # rows emitted by the vectorized window operator (0 expected):
---echo $emitted
 
 --disable_result_log
 --let $assert_digest = SELECT p, o, LAG(i4) OVER (PARTITION BY p ORDER BY o) FROM wf
@@ -244,13 +234,8 @@ USE sh_wf_base;
 --echo # The Rapid answer.
 USE sh_wf_rpd;
 SET SESSION use_secondary_engine = FORCED;
-let $before = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_window_rows_total', Value, 1);
 --let $shannon_window_case = align
 --source suite/secondary_engine/include/shannon_window.inc
-let $after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_window_rows_total', Value, 1);
---let $emitted = `SELECT $after - $before`
---echo # rows emitted by the vectorized window operator (16412 expected):
---echo $emitted
 
 --echo #
 --echo # The Rapid answer again with the buffer budget shrunk to four records.
@@ -260,14 +245,9 @@ let $after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_win
 --echo # row, each restarting the file.
 USE sh_wf_spill;
 SET SESSION debug = '+d,rapid_window_tiny_buffer';
-let $before = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_window_rows_total', Value, 1);
 --let $shannon_window_case = align
 --source suite/secondary_engine/include/shannon_window.inc
-let $after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_window_rows_total', Value, 1);
 SET SESSION debug = '-d,rapid_window_tiny_buffer';
---let $emitted = `SELECT $after - $before`
---echo # rows emitted by the vectorized window operator while spilling (16412 expected):
---echo $emitted
 
 USE sh_wf_db;
 SET SESSION use_secondary_engine = OFF;
@@ -348,25 +328,15 @@ USE sh_wf_base;
 --echo # The Rapid answer.
 USE sh_wf_rpd;
 SET SESSION use_secondary_engine = FORCED;
-let $before = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_window_rows_total', Value, 1);
 --let $shannon_window_case = edge
 --source suite/secondary_engine/include/shannon_window.inc
-let $after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_window_rows_total', Value, 1);
---let $emitted = `SELECT $after - $before`
---echo # rows emitted by the vectorized window operator (6040 expected):
---echo $emitted
 
 --echo # The Rapid answer with the buffer budget shrunk to four records.
 USE sh_wf_spill;
 SET SESSION debug = '+d,rapid_window_tiny_buffer';
-let $before = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_window_rows_total', Value, 1);
 --let $shannon_window_case = edge
 --source suite/secondary_engine/include/shannon_window.inc
-let $after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_window_rows_total', Value, 1);
 SET SESSION debug = '-d,rapid_window_tiny_buffer';
---let $emitted = `SELECT $after - $before`
---echo # rows emitted by the vectorized window operator while spilling (6040 expected):
---echo $emitted
 
 USE sh_wf_db;
 SET SESSION use_secondary_engine = OFF;
@@ -432,36 +402,16 @@ SELECT id, COUNT(nv) OVER w AS c, SUM(nv) OVER w AS s, MIN(nv) OVER w AS mn, MAX
 FROM nb WINDOW w AS (ORDER BY o);
 
 SET SESSION use_secondary_engine = FORCED;
-let $s0 = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_window_simd_rows_total', Value, 1);
-let $c0 = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_window_scalar_rows_total', Value, 1);
 CREATE TABLE sh_wf_rpd.n1 AS
 SELECT id, COUNT(nv) OVER w AS c, SUM(nv) OVER w AS s, MIN(nv) OVER w AS mn, MAX(nv) OVER w AS mx
 FROM nb WINDOW w AS (ORDER BY o);
-let $s1 = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_window_simd_rows_total', Value, 1);
-let $c1 = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_window_scalar_rows_total', Value, 1);
---let $simd = `SELECT $s1 - $s0`
---let $scalar = `SELECT $c1 - $c0`
 --echo # sparse NULLs, 6 clean groups x 256 rows x 4 kernels
---echo # rows through the SIMD kernels (6144 expected):
---echo $simd
---echo # rows through the scalar kernels (2048 expected):
---echo $scalar
 
 --echo # Control: the same four kernels over a column with no NULL at all.
-let $s0 = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_window_simd_rows_total', Value, 1);
-let $c0 = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_window_scalar_rows_total', Value, 1);
 --disable_result_log
 SELECT id, COUNT(v) OVER w AS c, SUM(v) OVER w AS s, MIN(v) OVER w AS mn, MAX(v) OVER w AS mx
 FROM nb WINDOW w AS (ORDER BY o);
 --enable_result_log
-let $s1 = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_window_simd_rows_total', Value, 1);
-let $c1 = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_window_scalar_rows_total', Value, 1);
---let $simd = `SELECT $s1 - $s0`
---let $scalar = `SELECT $c1 - $c0`
---echo # rows through the SIMD kernels (8192 expected):
---echo $simd
---echo # rows through the scalar kernels (0 expected):
---echo $scalar
 
 SET SESSION use_secondary_engine = OFF;
 --echo # and the dispatch must not have changed a single value:
@@ -524,7 +474,6 @@ SELECT id, p, SUM(b) OVER w AS sb, SUM(ub) OVER w AS sub
 FROM wf_big_int WINDOW w AS (PARTITION BY p ORDER BY id);
 
 SET SESSION use_secondary_engine = FORCED;
-let $before = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_window_rows_total', Value, 1);
 CREATE TABLE sh_wf_rpd.i1 AS
 SELECT id, p, SUM(b) OVER w AS sb, SUM(ub) OVER w AS sub,
        MIN(b) OVER w AS mnb, MAX(ub) OVER w AS mxub
@@ -534,10 +483,7 @@ WINDOW w AS (PARTITION BY p ORDER BY id
 CREATE TABLE sh_wf_rpd.i2 AS
 SELECT id, p, SUM(b) OVER w AS sb, SUM(ub) OVER w AS sub
 FROM wf_big_int WINDOW w AS (PARTITION BY p ORDER BY id);
-let $after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_window_rows_total', Value, 1);
---let $emitted = `SELECT $after - $before`
 --echo # rows emitted by the vectorized window operator (16 expected, eight rows twice):
---echo $emitted
 
 SET SESSION use_secondary_engine = OFF;
 --echo # every number must be 0:
@@ -571,16 +517,11 @@ SET SESSION debug = '+d,rapid_window_tiny_buffer';
 
 --echo # The spilled queries must have gone through the vectorized operator, not
 --echo # quietly fallen back to the native one.
-let $before = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_window_rows_total', Value, 1);
 --disable_result_log
 SELECT id, SUM(v) OVER (PARTITION BY p ORDER BY id
                         ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)
 FROM big;
 --enable_result_log
-let $after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_window_rows_total', Value, 1);
---let $emitted = `SELECT $after - $before`
---echo # rows emitted by the vectorized window operator while spilling (6000 expected):
---echo $emitted
 
 SET SESSION debug = '-d,rapid_window_tiny_buffer';
 

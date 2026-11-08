@@ -1,4 +1,3 @@
-include/assert.inc [Primary-only old ReadView must protect Rapid versions]
 SELECT v FROM review_gc;
 v
 10

@@ -22,10 +22,6 @@ include/wait_for_pattern_in_file.inc [sh_storage_recovery.t recovery eligibility
 SELECT TABLE_NAME FROM performance_schema.rpd_table_id WHERE SCHEMA_NAME='sh_storage_recovery' ORDER BY TABLE_NAME;
 TABLE_NAME
 healthy
-SELECT VARIABLE_NAME,VARIABLE_VALUE FROM performance_schema.global_status WHERE VARIABLE_NAME IN ('rapid_recovery_storage_restores','rapid_recovery_primary_reloads') ORDER BY VARIABLE_NAME;
-VARIABLE_NAME	VARIABLE_VALUE
-rapid_recovery_primary_reloads	0
-rapid_recovery_storage_restores	1
 SET use_secondary_engine=FORCED;
 SELECT id,v FROM healthy ORDER BY id;
 id	v

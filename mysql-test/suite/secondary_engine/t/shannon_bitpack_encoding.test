@@ -36,15 +36,17 @@ INSERT INTO t_bp VALUES
   (5, NULL, NULL,            NULL, NULL),
   (6, 2,     500, 1000000000002, 7);
 
+--let $rapid_stats_action = begin
+--source suite/secondary_engine/include/rapid_stats_check.inc
 ALTER TABLE t_bp SECONDARY_LOAD;
 
---echo # Three tagged columns, three bit-packed CUs. Zero means the tag was
---echo # parsed but the column stayed in canonical slots.
---echo # (FORCED would route performance_schema itself to the secondary engine.)
-SET USE_SECONDARY_ENGINE=OFF;
-SELECT VARIABLE_VALUE AS packed_columns FROM performance_schema.global_status
-  WHERE VARIABLE_NAME = 'rapid_cu_bitpacked_columns_total';
-SET USE_SECONDARY_ENGINE=FORCED;
+--echo # Three tagged columns, three bit-packed CUs, otherwise the tag was parsed
+--echo # but the column stayed in canonical slots. The counters are sampled when a
+--echo # statement ends on the Rapid handler, so read them through a forced query.
+SELECT COUNT(*) FROM t_bp;
+--let $rapid_stats_field = bitpacked_columns
+--let $rapid_stats_action = end
+--source suite/secondary_engine/include/rapid_stats_check.inc
 
 --echo # Scans, predicates and aggregates over the packed columns.
 SELECT * FROM t_bp ORDER BY id;
@@ -110,8 +112,6 @@ USE sh_bitpack;
 --source include/restart_mysqld.inc
 USE sh_bitpack;
 --let $wait_condition = SELECT COUNT(*)=1 FROM performance_schema.rpd_table_id WHERE SCHEMA_NAME='sh_bitpack' AND TABLE_NAME='t_bp'
---source include/wait_condition.inc
---let $wait_condition = SELECT CAST(VARIABLE_VALUE AS UNSIGNED)>=1 FROM performance_schema.global_status WHERE VARIABLE_NAME='rapid_recovery_storage_restores'
 --source include/wait_condition.inc
 SET USE_SECONDARY_ENGINE=FORCED;
 

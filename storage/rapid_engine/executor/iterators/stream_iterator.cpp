@@ -177,8 +177,7 @@ int VectorizedStreamIterator::Read() { return m_native.Read(); }
 int VectorizedStreamIterator::ReadBatch(std::pmr::vector<ColumnChunk> &chunks, size_t capacity, size_t &rows) {
   rows = 0;
   auto report_batches = create_scope_guard([&] {
-    if (rows != 0)
-      RapidMonitor::rapid_counters.query_vectorized_stream_batch_rows_total.fetch_add(rows, std::memory_order_relaxed);
+    if (rows != 0) RAPID_COUNT(query_vectorized_stream_batch_rows_total, rows);
   });
   if (m_batch == nullptr) return Error();
   // ReadBatch mutates JOIN ref-slice state shared by every iterator of the

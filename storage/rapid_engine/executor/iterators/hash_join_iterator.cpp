@@ -308,18 +308,12 @@ void VectorizedHashJoinIterator::MaybeGrowBuildBudget() {
 }
 
 void VectorizedHashJoinIterator::PublishBloomStats() {
-  RapidMonitor::rapid_counters.query_hash_join_bloom_builds_total.fetch_add(m_stats.bloom_bytes != 0,
-                                                                            std::memory_order_relaxed);
-  RapidMonitor::rapid_counters.query_hash_join_bloom_bytes_total.fetch_add(m_stats.bloom_bytes,
-                                                                           std::memory_order_relaxed);
-  RapidMonitor::rapid_counters.query_hash_join_bloom_checks_total.fetch_add(m_stats.bloom_checks,
-                                                                            std::memory_order_relaxed);
-  RapidMonitor::rapid_counters.query_hash_join_bloom_rejects_total.fetch_add(m_stats.bloom_rejects,
-                                                                             std::memory_order_relaxed);
-  RapidMonitor::rapid_counters.query_hash_join_bloom_disabled_total.fetch_add(m_stats.bloom_adaptively_disabled,
-                                                                              std::memory_order_relaxed);
-  RapidMonitor::rapid_counters.query_hash_join_bloom_scan_rejects_total.fetch_add(m_stats.bloom_scan_rejects,
-                                                                                  std::memory_order_relaxed);
+  RAPID_COUNT(query_hash_join_bloom_builds_total, m_stats.bloom_bytes != 0);
+  RAPID_COUNT(query_hash_join_bloom_bytes_total, m_stats.bloom_bytes);
+  RAPID_COUNT(query_hash_join_bloom_checks_total, m_stats.bloom_checks);
+  RAPID_COUNT(query_hash_join_bloom_rejects_total, m_stats.bloom_rejects);
+  RAPID_COUNT(query_hash_join_bloom_disabled_total, m_stats.bloom_adaptively_disabled);
+  RAPID_COUNT(query_hash_join_bloom_scan_rejects_total, m_stats.bloom_scan_rejects);
   m_stats.bloom_scan_rejects = 0;
   m_stats.bloom_bytes = m_stats.bloom_checks = m_stats.bloom_rejects = 0;
   m_stats.bloom_adaptively_disabled = false;
@@ -1280,7 +1274,7 @@ int VectorizedHashJoinIterator::TryBuildParallelHashTable() {
   const auto allocation_failure = [&]() -> int {
     if (!m_parallel_build && (m_build_memory.last_failure() == ResMgmt::AllocationFailure::kBudgetExhausted ||
                               m_aux_memory.last_failure() == ResMgmt::AllocationFailure::kBudgetExhausted)) {
-      RapidMonitor::rapid_counters.query_parallel_join_build_fallbacks_total.fetch_add(1, std::memory_order_relaxed);
+      RAPID_COUNT(query_parallel_join_build_fallbacks_total, 1);
       return -1;
     }
     return AllocationError("Rapid parallel join build allocation failed");
@@ -1388,9 +1382,8 @@ int VectorizedHashJoinIterator::TryBuildParallelHashTable() {
           workers, static_cast<double>(source->tasks()) * static_cast<double>(Morsel::ParallelQueue::kClaimRows)))
     return -1;
 
-  auto &counters = RapidMonitor::rapid_counters;
   const auto fallback = [&]() {
-    counters.query_parallel_join_build_fallbacks_total.fetch_add(1, std::memory_order_relaxed);
+    RAPID_COUNT(query_parallel_join_build_fallbacks_total, 1);
     return -1;
   };
   // Keep the same slots through build, coordinator combine and finalize. A
@@ -1418,7 +1411,7 @@ int VectorizedHashJoinIterator::TryBuildParallelHashTable() {
   DEBUG_SYNC(thd(), "rapid_before_parallel_join_build");
   const auto built = Morsel::RunParallelWorkers(
       thd(), admission, [&](size_t index, THD *worker, const std::atomic<bool> &cancelled) -> const char * {
-        counters.query_parallel_join_build_workers_total.fetch_add(1, std::memory_order_relaxed);
+        RAPID_COUNT(query_parallel_join_build_workers_total, 1);
 
         if (fail_build && index == 0) return "Rapid injected parallel join build failure";
 
@@ -1587,7 +1580,7 @@ int VectorizedHashJoinIterator::TryBuildParallelHashTable() {
   DEBUG_SYNC(thd(), "rapid_before_parallel_join_finalize");
   const auto finalized = Morsel::RunParallelWorkers(
       thd(), admission, [&](size_t index, THD *, const std::atomic<bool> &cancelled) -> const char * {
-        counters.query_parallel_join_finalize_workers_total.fetch_add(1, std::memory_order_relaxed);
+        RAPID_COUNT(query_parallel_join_finalize_workers_total, 1);
         if (fail_finalize && index == 0) return "Rapid injected parallel join finalize failure";
         for (;;) {
           if (cancelled.load(std::memory_order_acquire)) return nullptr;
@@ -1654,8 +1647,8 @@ int VectorizedHashJoinIterator::TryBuildParallelHashTable() {
 
   if (m_hash_table_gen) m_last_hash_table_gen = *m_hash_table_gen;
 
-  counters.query_parallel_join_build_rows_total.fetch_add(input_rows, std::memory_order_relaxed);
-  counters.query_parallel_join_finalize_partitions_total.fetch_add(partitions, std::memory_order_relaxed);
+  RAPID_COUNT(query_parallel_join_build_rows_total, input_rows);
+  RAPID_COUNT(query_parallel_join_finalize_partitions_total, partitions);
 
   source->CommitStats();
   BuildRuntimeFilter();

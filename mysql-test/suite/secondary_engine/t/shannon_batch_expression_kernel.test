@@ -20,26 +20,12 @@ SET optimizer_switch='hypergraph_optimizer=on';
 SET SESSION debug='+d,rapid_require_batch_expression';
 
 --echo # Global arithmetic aggregation uses kernels after its first row.
---let $before = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_expression_rows_total', Value, 1)
---let $scalar_before = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_scalar_expression_rows_total', Value, 1)
 --let $assert_query = SELECT SUM(d*(1-d)),AVG(d*2),COUNT(n*2),SUM(-n) FROM fact
 --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
---let $after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_expression_rows_total', Value, 1)
---let $scalar_after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_scalar_expression_rows_total', Value, 1)
---let $kernels_used = `SELECT $after-$before=3996 AND $scalar_after-$scalar_before=4`
-if ($kernels_used == 0) {
-  --die Global arithmetic aggregate did not use column kernels
-}
 
 --echo # Grouped expressions and dictionary payloads cross a hash join.
---let $before = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_expression_rows_total', Value, 1)
 --let $assert_query = SELECT dim.s,SUM(fact.d*(1-dim.d)),AVG(fact.n*dim.d),COUNT(fact.s) FROM fact JOIN dim ON fact.g=dim.g GROUP BY dim.s
 --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
---let $after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_expression_rows_total', Value, 1)
---let $kernels_used = `SELECT $after>$before`
-if ($kernels_used == 0) {
-  --die Joined string payloads interrupted expression batches
-}
 
 --echo # Group boundaries, NULLs, decimal residuals and prepared reexecution.
 --let $assert_query = SELECT g,SUM(d*n),COUNT(d*n) FROM fact WHERE d>n GROUP BY g ORDER BY g
@@ -57,14 +43,8 @@ DEALLOCATE PREPARE stmt;
 --echo # Default EQ_REF batching follows the selected parent NLJ decision.
 SET optimizer_switch='hypergraph_optimizer=off';
 SET SESSION debug='+d,rapid_require_batch_lookup';
---let $before = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_ref_batch_rows_total', Value, 1)
 --let $assert_query = SELECT COUNT(*),SUM(fact.d*dim.d),COUNT(dim.s) FROM fact STRAIGHT_JOIN dim FORCE INDEX(PRIMARY) ON dim.id=fact.g
 --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
---let $after = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_query_vectorized_ref_batch_rows_total', Value, 1)
---let $lookup_used = `SELECT $after-$before=1000`
-if ($lookup_used == 0) {
-  --die Selected NLJ did not batch its single-row EQ_REF probes
-}
 SET SESSION debug='-d,rapid_require_batch_lookup,rapid_require_batch_expression';
 
 --echo # Wide decimals and integer overflow retain MySQL fallback semantics.

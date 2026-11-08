@@ -594,8 +594,7 @@ TruthValue Imcu::evaluate_predicate_truth_at_row(Rapid_scan_context *context, co
     if (dict && (cu->real_type() == MYSQL_TYPE_ENUM || cu->real_type() == MYSQL_TYPE_SET)) dict = nullptr;
 
     if (dict) {
-      if (simple->has_mysql_like())
-        RapidMonitor::rapid_counters.query_like_scalar_rows_total.fetch_add(1, std::memory_order_relaxed);
+      if (simple->has_mysql_like()) RAPID_COUNT(query_like_scalar_rows_total, 1);
       uint32 str_id = 0;
       std::memcpy(&str_id, cell.slot, sizeof(str_id));
       std::string_view str_val = dict->get_view(str_id);
@@ -715,8 +714,7 @@ void Imcu::evaluate_simple_predicate_vectorized(Rapid_scan_context *context, con
               Utils::Util::bit_array_reset(&result, i);
           }
         }
-        RapidMonitor::rapid_counters.query_bitpacked_predicate_rows_total.fetch_add(num_rows,
-                                                                                    std::memory_order_relaxed);
+        RAPID_COUNT(query_bitpacked_predicate_rows_total, num_rows);
         return;
       }
     }
@@ -792,12 +790,11 @@ void Imcu::evaluate_simple_predicate_vectorized(Rapid_scan_context *context, con
       (tv == TruthValue::TRUE_VALUE) ? Utils::Util::bit_array_set(&result, i)
                                      : Utils::Util::bit_array_reset(&result, i);
     }
-    auto &counters = RapidMonitor::rapid_counters;
     if (pred->has_mysql_like()) {
-      counters.query_like_mask_rows_total.fetch_add(masked_rows, std::memory_order_relaxed);
-      counters.query_like_scalar_rows_total.fetch_add(scalar_rows, std::memory_order_relaxed);
+      RAPID_COUNT(query_like_mask_rows_total, masked_rows);
+      RAPID_COUNT(query_like_scalar_rows_total, scalar_rows);
     } else {
-      counters.query_dictionary_predicate_rows_total.fetch_add(masked_rows, std::memory_order_relaxed);
+      RAPID_COUNT(query_dictionary_predicate_rows_total, masked_rows);
     }
     return;
   }

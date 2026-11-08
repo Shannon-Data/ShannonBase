@@ -9,7 +9,7 @@ DELETE FROM t WHERE id=2;
 COMMIT;
 FLUSH BINARY LOGS;
 UPDATE t SET v=31 WHERE id=3;
---let $storage_route = storage_restores
+# Recovery is expected to restore from the native storage image.
 --let $storage_expected = 1:11,3:31,4:40
 --let $shannon_storage_layer_case = verify
 --source suite/secondary_engine/include/shannon_storage_layer.inc

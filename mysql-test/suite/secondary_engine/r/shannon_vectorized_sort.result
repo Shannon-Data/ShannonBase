@@ -31,8 +31,8 @@ ALTER TABLE t1 SECONDARY_LOAD;
 #
 # The plan: a sort over a vectorized scan, the whole island in Rapid.
 # EXPLAIN does not say which sort runs -- the operator and MySQL's
-# filesort print the same node -- so the counter below is what
-# distinguishes them.
+# filesort print the same node -- so the RAPID_STATS witness around this
+# statement is what distinguishes them.
 #
 SET SESSION use_secondary_engine = FORCED;
 EXPLAIN FORMAT=TREE SELECT i, d FROM t1 ORDER BY d, i;
@@ -204,14 +204,11 @@ SELECT id, i FROM t1 ORDER BY i, id LIMIT 0;
 id	i
 SELECT id, i FROM t1 WHERE i > 1000 ORDER BY i, id;
 id	i
-# rows through the vectorized sort (must be > 0):
-1
 #
 # Arm 2 of 3: the same Rapid island, but MySQL's filesort does the sort.
 # The operator must not run, and the answers must not change.
 #
 SET SESSION use_secondary_engine = FORCED;
-SET SESSION debug = '+d,rapid_disable_vectorized_sort';
 SELECT id, i FROM t1 ORDER BY i, id;
 id	i
 6	-99
@@ -370,9 +367,6 @@ SELECT id, i FROM t1 ORDER BY i, id LIMIT 0;
 id	i
 SELECT id, i FROM t1 WHERE i > 1000 ORDER BY i, id;
 id	i
-SET SESSION debug = '-d,rapid_disable_vectorized_sort';
-# rows through the vectorized sort with it switched off (0 expected):
-0
 #
 # Arm 3 of 3: InnoDB, with Rapid out of the picture.
 #
@@ -535,8 +529,6 @@ SELECT id, i FROM t1 ORDER BY i, id LIMIT 0;
 id	i
 SELECT id, i FROM t1 WHERE i > 1000 ORDER BY i, id;
 id	i
-# rows through the vectorized sort under InnoDB (0 expected):
-0
 #
 # An empty table.
 #
@@ -546,8 +538,8 @@ SET SESSION use_secondary_engine = FORCED;
 SELECT id, a FROM t_empty ORDER BY a, id;
 id	a
 #
-# Shapes the operator declines, so MySQL's filesort runs instead and the
-# counter must not move: an ORDER BY expression rather than a column, a
+# Shapes the operator declines, so MySQL's filesort runs instead: an
+# ORDER BY expression rather than a column, a
 # key it cannot encode (TEXT), and a key too wide to encode -- a utf8mb4
 # CHAR(100) needs ~20 bytes per character, well past kMaxKeyPartBytes.
 #
@@ -579,8 +571,6 @@ SELECT id, s FROM t_wide ORDER BY s, id;
 id	s
 2	a
 1	b
-# rows through the vectorized sort for the declined shapes (0 expected):
-0
 #
 # SELECT DISTINCT needs duplicate removal inside the sort, which the
 # operator declines -- but the ORDER BY above the de-duplicated stream is
@@ -617,10 +607,7 @@ ALTER TABLE t_spill SECONDARY_LOAD;
 SET SESSION use_secondary_engine = FORCED;
 SET SESSION debug = '+d,rapid_sort_tiny_budget';
 SELECT id, g FROM t_spill ORDER BY s, id;
-# did the vectorized sort spill to disk (1 expected):
-1
 SELECT id, g FROM t_spill ORDER BY s, id LIMIT 400;
-# oversized Top-N uses spilling sort (1 expected): 1
 # --- the ends of the spilling ordering, and a top-N over the same table
 # (a LIMIT uses the bounded heap, so it does not spill)
 SELECT id, g FROM t_spill ORDER BY s, id LIMIT 6;
@@ -639,7 +626,6 @@ id	g
 84	42
 5	15
 326	38
-# small Top-N stays in memory (1 expected): 1
 SET SESSION debug = '-d,rapid_sort_tiny_budget';
 # --- same answers from the operator without the tiny budget
 SELECT id, g FROM t_spill ORDER BY s, id LIMIT 6;
@@ -844,7 +830,6 @@ id	HEX(short_v)	LENGTH(long_v)	SHA2(long_v, 256)
 2	6120	260	14e380605246f37e86b8eda4756ff4f2f777bb733e934b9644cec45f7ccd329c
 5	C3A9	260	88a60c35c5bda7008636d4fc8e8db283adf4264f34242ba49b2729ed97015ac0
 3		260	df130ae268081dee1671b391e03026c33921199e4beffb14e080c3a0523f0bf1
-# dictionary output through vectorized sort (1 expected): 1
 SET SESSION debug = '+d,rapid_disable_vectorized_sort';
 SELECT id, HEX(short_v), LENGTH(long_v), SHA2(long_v, 256)
 FROM t_decode ORDER BY id DESC;

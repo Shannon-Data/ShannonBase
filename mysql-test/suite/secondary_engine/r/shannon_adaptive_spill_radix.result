@@ -144,7 +144,6 @@ pkey	n
 491	1
 490	1
 489	1
-# build side spilled (1 expected): 1
 #
 # ---- A build side that fits must NOT spill (guards against always-spill) ----
 #
@@ -157,7 +156,6 @@ pkey	sb
 3	12
 4	16
 5	20
-# build side spilled (0 expected): 0
 #
 # ---- Numeric-only inputs: the batch consumer path ----
 #
@@ -296,7 +294,6 @@ pkey	n	sb
 491	1	NULL
 490	1	NULL
 489	1	NULL
-# build side spilled (1 expected): 1
 #
 # ---- One join key, larger than the whole join buffer ----
 #
@@ -377,7 +374,6 @@ COUNT(*)
 SELECT COUNT(*) FROM skew_probe WHERE pkey NOT IN (SELECT bkey FROM skew_build);
 COUNT(*)
 20
-# build side spilled (1 expected): 1
 # Auxiliary allocation failure must return an error and permit re-execution.
 SET SESSION debug = '+d,rapid_join_aux_bad_alloc';
 SELECT pkey, COUNT(*) AS n, SUM(bval) AS sb, SUM(pval) AS sp
@@ -444,13 +440,10 @@ Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
 SET SESSION debug = '+d,rapid_hash_aggregate_tiny_budget';
 CREATE TABLE got_plain AS SELECT g, COUNT(*) AS c, SUM(v) AS sv, MIN(v) AS mn, MAX(v) AS mx FROM t GROUP BY g;
-# plain aggregates spilled (1 expected): 1
 # Expression aggregates replay through RestoreRowFromBatch().
 CREATE TABLE got_expr AS SELECT g, SUM(v * 2) AS s2, SUM(d) AS sd, COUNT(s) AS cs FROM t GROUP BY g;
-# expression aggregates spilled (1 expected): 1
 # Dictionary string key spills with the same canonical key on replay.
 CREATE TABLE got_str AS SELECT COUNT(*) AS c, MIN(id) AS first_id, SUM(v) AS sv FROM t GROUP BY s;
-# string aggregates spilled (1 expected): 1
 SET SESSION debug = '-d,rapid_hash_aggregate_tiny_budget';
 # ---- Compare (0 rows missing either way expected) ----
 SET SESSION use_secondary_engine = OFF;

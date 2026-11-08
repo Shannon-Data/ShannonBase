@@ -16,9 +16,12 @@ Warning	1287	The hypergraph optimizer is highly experimental and is meant for te
 SET SESSION secondary_engine_cost_threshold=0;
 SET SESSION use_secondary_engine=FORCED;
 SET SESSION debug='-d,rapid_bloom_disabled';
+SET SESSION debug='+d,rapid_stats';
 SELECT COUNT(*),SUM(p.v) FROM p JOIN b ON p.k=b.k;
 COUNT(*)	SUM(p.v)
 236	15086
+SET SESSION debug='-d,rapid_stats';
+include/wait_for_pattern_in_file.inc [RAPID_STATS .*bloom_rejects=[1-9]]
 SET SESSION debug='+d,rapid_bloom_pushdown_disabled';
 SET SESSION debug='-d,rapid_bloom_pushdown_disabled';
 SET SESSION debug='+d,rapid_bloom_disabled';
@@ -36,11 +39,14 @@ SELECT COUNT(*),SUM(p.v) FROM p JOIN b ON p.k=b.k;
 COUNT(*)	SUM(p.v)
 236	15086
 SET SESSION debug='-d,rapid_bloom_resource_pressure';
+SET SESSION debug='+d,rapid_stats';
 SET SESSION debug='+d,rapid_bloom_probe_pressure';
 SELECT COUNT(*),SUM(p.v) FROM p JOIN b ON p.k=b.k;
 COUNT(*)	SUM(p.v)
 236	15086
 SET SESSION debug='-d,rapid_bloom_probe_pressure';
+SET SESSION debug='-d,rapid_stats';
+include/wait_for_pattern_in_file.inc [RAPID_STATS .*bloom_disabled=[1-9]]
 SELECT COUNT(*),SUM(p.v) FROM p JOIN b ON p.k%128=b.k;
 COUNT(*)	SUM(p.v)
 15064	61699566

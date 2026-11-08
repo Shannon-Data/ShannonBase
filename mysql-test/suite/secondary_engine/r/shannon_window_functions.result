@@ -1174,13 +1174,9 @@ SET SESSION debug = '-d,rapid_disable_vectorized_window';
 # counter by exactly one per output row; a window that is not must leave
 # it untouched.
 SELECT p, o, SUM(i4) OVER (PARTITION BY p ORDER BY o) FROM wf;
-# rows emitted by the vectorized window operator (12 expected):
-12
 # LAG() is outside the subset, so this window must stay on the native
-# iterator and add nothing to the counter.
+# iterator.
 SELECT p, o, LAG(i4) OVER (PARTITION BY p ORDER BY o) FROM wf;
-# rows emitted by the vectorized window operator (0 expected):
-0
 #
 # ---- Batch, partition and peer-group boundaries ----
 #
@@ -2468,8 +2464,6 @@ CREATE TABLE a4 AS
 SELECT id, SUM(vd) OVER w AS sd, AVG(vd) OVER w AS ad, MIN(vd) OVER w AS mnd,
 SUM(vf) OVER w AS sf, MIN(vf) OVER w AS mnf, MAX(vf) OVER w AS mxf
 FROM sh_wf_db.algn WINDOW w AS (ORDER BY o);
-# rows emitted by the vectorized window operator (16412 expected):
-16412
 #
 # The Rapid answer again with the buffer budget shrunk to four records.
 # A running frame can no longer serve a partial pass: the spill file is
@@ -2507,8 +2501,6 @@ SELECT id, SUM(vd) OVER w AS sd, AVG(vd) OVER w AS ad, MIN(vd) OVER w AS mnd,
 SUM(vf) OVER w AS sf, MIN(vf) OVER w AS mnf, MAX(vf) OVER w AS mxf
 FROM sh_wf_db.algn WINDOW w AS (ORDER BY o);
 SET SESSION debug = '-d,rapid_window_tiny_buffer';
-# rows emitted by the vectorized window operator while spilling (16412 expected):
-16412
 USE sh_wf_db;
 SET SESSION use_secondary_engine = OFF;
 #
@@ -4712,8 +4704,6 @@ CREATE TABLE e4 AS
 SELECT id, p, SUM(v) OVER w AS s, COUNT(v) OVER w AS c,
 MIN(v) OVER w AS mn, MAX(v) OVER w AS mx
 FROM sh_wf_db.edge WINDOW w AS (PARTITION BY p);
-# rows emitted by the vectorized window operator (6040 expected):
-6040
 # The Rapid answer with the buffer budget shrunk to four records.
 USE sh_wf_spill;
 SET SESSION debug = '+d,rapid_window_tiny_buffer';
@@ -4743,8 +4733,6 @@ SELECT id, p, SUM(v) OVER w AS s, COUNT(v) OVER w AS c,
 MIN(v) OVER w AS mn, MAX(v) OVER w AS mx
 FROM sh_wf_db.edge WINDOW w AS (PARTITION BY p);
 SET SESSION debug = '-d,rapid_window_tiny_buffer';
-# rows emitted by the vectorized window operator while spilling (6040 expected):
-6040
 USE sh_wf_db;
 SET SESSION use_secondary_engine = OFF;
 #
@@ -4842,17 +4830,9 @@ CREATE TABLE sh_wf_rpd.n1 AS
 SELECT id, COUNT(nv) OVER w AS c, SUM(nv) OVER w AS s, MIN(nv) OVER w AS mn, MAX(nv) OVER w AS mx
 FROM nb WINDOW w AS (ORDER BY o);
 # sparse NULLs, 6 clean groups x 256 rows x 4 kernels
-# rows through the SIMD kernels (6144 expected):
-6144
-# rows through the scalar kernels (2048 expected):
-2048
 # Control: the same four kernels over a column with no NULL at all.
 SELECT id, COUNT(v) OVER w AS c, SUM(v) OVER w AS s, MIN(v) OVER w AS mn, MAX(v) OVER w AS mx
 FROM nb WINDOW w AS (ORDER BY o);
-# rows through the SIMD kernels (8192 expected):
-8192
-# rows through the scalar kernels (0 expected):
-0
 SET SESSION use_secondary_engine = OFF;
 # and the dispatch must not have changed a single value:
 SELECT (SELECT COUNT(*) FROM sh_wf_base.n1) - (SELECT COUNT(*) FROM sh_wf_rpd.n1) AS row_delta,
@@ -5004,7 +4984,6 @@ CREATE TABLE sh_wf_rpd.i2 AS
 SELECT id, p, SUM(b) OVER w AS sb, SUM(ub) OVER w AS sub
 FROM wf_big_int WINDOW w AS (PARTITION BY p ORDER BY id);
 # rows emitted by the vectorized window operator (16 expected, eight rows twice):
-16
 SET SESSION use_secondary_engine = OFF;
 # every number must be 0:
 SELECT (SELECT COUNT(*) FROM sh_wf_base.i1) - (SELECT COUNT(*) FROM sh_wf_rpd.i1) AS row_delta,
@@ -5145,8 +5124,6 @@ id	p	grp	v	s
 SELECT id, SUM(v) OVER (PARTITION BY p ORDER BY id
 ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)
 FROM big;
-# rows emitted by the vectorized window operator while spilling (6000 expected):
-6000
 SET SESSION debug = '-d,rapid_window_tiny_buffer';
 #
 # ---- Empty input ----

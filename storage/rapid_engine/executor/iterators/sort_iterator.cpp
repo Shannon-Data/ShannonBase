@@ -1086,8 +1086,7 @@ int VectorizedSortIterator::ReadBatch(std::pmr::vector<ColumnChunk> &chunks, siz
 int VectorizedSortIterator::ReadBatchImpl(std::pmr::vector<ColumnChunk> &chunks, size_t capacity, size_t &rows) {
   rows = 0;
   auto report_batches = create_scope_guard([&] {
-    if (rows != 0)
-      RapidMonitor::rapid_counters.query_vectorized_sort_batch_rows_total.fetch_add(rows, std::memory_order_relaxed);
+    if (rows != 0) RAPID_COUNT(query_vectorized_sort_batch_rows_total, rows);
   });
   if (!SupportsBatchRead()) {
     my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid sort cannot expose packed SQL rows as column chunks");

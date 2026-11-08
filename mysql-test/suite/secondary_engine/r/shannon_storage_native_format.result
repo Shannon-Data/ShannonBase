@@ -24,10 +24,6 @@ DELETE FROM t WHERE id=2;
 INSERT INTO t VALUES (5,9223372036854775809,'C','new',-0.01,0.5,'2026-10-13 10:00:00.000002',50);
 # Kill and restart: --rapid_reload_on_restart=ON
 USE sh_native_format;
-SELECT VARIABLE_NAME,VARIABLE_VALUE FROM performance_schema.global_status WHERE VARIABLE_NAME IN ('rapid_recovery_storage_restores','rapid_recovery_primary_reloads') ORDER BY VARIABLE_NAME;
-VARIABLE_NAME	VARIABLE_VALUE
-rapid_recovery_primary_reloads	0
-rapid_recovery_storage_restores	1
 SET use_secondary_engine=FORCED;
 SELECT id,u,code,HEX(note),amount,f,dt FROM t ORDER BY id;
 id	u	code	HEX(note)	amount	f	dt

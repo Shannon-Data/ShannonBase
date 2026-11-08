@@ -136,6 +136,9 @@ class ha_rapid : public handler {
 
   int close() override;
 
+  /** Statement end: the only place the internal counters are sampled. */
+  int reset() override;
+
   int index_init(uint keynr, bool sorted) override;
 
   int index_end() override;

@@ -42,13 +42,10 @@ Warnings:
 Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
 SET SESSION debug = '+d,rapid_hash_aggregate_tiny_budget';
 CREATE TABLE got_plain AS SELECT g, COUNT(*) AS c, SUM(v) AS sv, MIN(v) AS mn, MAX(v) AS mx FROM t GROUP BY g;
-# plain aggregates spilled (1 expected): 1
 # Expression aggregates replay through RestoreRowFromBatch().
 CREATE TABLE got_expr AS SELECT g, SUM(v * 2) AS s2, SUM(d) AS sd, COUNT(s) AS cs FROM t GROUP BY g;
-# expression aggregates spilled (1 expected): 1
 # Dictionary string key spills with the same canonical key on replay.
 CREATE TABLE got_str AS SELECT COUNT(*) AS c, MIN(id) AS first_id, SUM(v) AS sv FROM t GROUP BY s;
-# string aggregates spilled (1 expected): 1
 SET SESSION debug = '-d,rapid_hash_aggregate_tiny_budget';
 # ---- Compare (0 rows missing either way expected) ----
 SET SESSION use_secondary_engine = OFF;

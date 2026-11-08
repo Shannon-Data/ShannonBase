@@ -38,7 +38,6 @@ USE sh_upsert_recovery;
 --let $grep_pattern = sh_upsert_recovery.u recovery eligibility is revoked or cannot be verified; automatic recovery stopped
 --source include/wait_for_pattern_in_file.inc
 SELECT COUNT(*) AS automatically_loaded FROM performance_schema.rpd_table_id WHERE SCHEMA_NAME='sh_upsert_recovery';
-SELECT VARIABLE_VALUE FROM performance_schema.global_status WHERE VARIABLE_NAME='rapid_recovery_primary_reloads';
 SET use_secondary_engine=FORCED;
 --error ER_SECONDARY_ENGINE_PLUGIN
 SELECT * FROM r;

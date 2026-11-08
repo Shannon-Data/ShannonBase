@@ -840,8 +840,7 @@ int RapidCursor::complete_projection(std::pmr::vector<Executor::ColumnChunk> &ch
     if (failed || received != end) return HA_ERR_GENERIC;
     start = end;
   }
-  RapidMonitor::rapid_counters.query_late_projection_cells_total.fetch_add(selection.size() * projection.size(),
-                                                                           std::memory_order_relaxed);
+  RAPID_COUNT(query_late_projection_cells_total, selection.size() * projection.size());
   return 0;
 }
 

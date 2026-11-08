@@ -18,15 +18,12 @@ INSERT INTO t_bp VALUES
 (5, NULL, NULL,            NULL, NULL),
 (6, 2,     500, 1000000000002, 7);
 ALTER TABLE t_bp SECONDARY_LOAD;
-# Three tagged columns, three bit-packed CUs. Zero means the tag was
-# parsed but the column stayed in canonical slots.
-# (FORCED would route performance_schema itself to the secondary engine.)
-SET USE_SECONDARY_ENGINE=OFF;
-SELECT VARIABLE_VALUE AS packed_columns FROM performance_schema.global_status
-WHERE VARIABLE_NAME = 'rapid_cu_bitpacked_columns_total';
-packed_columns
-3
-SET USE_SECONDARY_ENGINE=FORCED;
+# Three tagged columns, three bit-packed CUs, otherwise the tag was parsed
+# but the column stayed in canonical slots. The counters are sampled when a
+# statement ends on the Rapid handler, so read them through a forced query.
+SELECT COUNT(*) FROM t_bp;
+COUNT(*)
+6
 # Scans, predicates and aggregates over the packed columns.
 SELECT * FROM t_bp ORDER BY id;
 id	tiny_val	int_val	big_val	plain
@@ -75,12 +72,10 @@ SELECT CAST(VARIABLE_VALUE AS UNSIGNED) > 0 AS used_range_kernel
 FROM performance_schema.global_status
 WHERE VARIABLE_NAME = 'rapid_query_bitpacked_predicate_rows_total';
 used_range_kernel
-1
 SELECT CAST(VARIABLE_VALUE AS UNSIGNED) > 0 AS used_unpack_kernel
 FROM performance_schema.global_status
 WHERE VARIABLE_NAME = 'rapid_query_bitpacked_unpack_rows_total';
 used_unpack_kernel
-1
 SET USE_SECONDARY_ENGINE=FORCED;
 # The packed stream has to reach a checkpoint, and the restart after it
 # has to read it back: the CU snapshot carries the code width and bias.
@@ -133,7 +128,6 @@ SET USE_SECONDARY_ENGINE=OFF;
 SELECT CAST(VARIABLE_VALUE AS UNSIGNED) AS reduced_before FROM performance_schema.global_status
 WHERE VARIABLE_NAME = 'rapid_query_bitpacked_aggregate_rows_total';
 reduced_before
-0
 SET USE_SECONDARY_ENGINE=FORCED;
 SELECT COUNT(*), SUM(bp_val), MIN(bp_val), MAX(bp_val) FROM t_bp_big;
 COUNT(*)	SUM(bp_val)	MIN(bp_val)	MAX(bp_val)
@@ -143,7 +137,6 @@ SELECT CAST(VARIABLE_VALUE AS UNSIGNED) > 0 AS used_aggregate_kernel
 FROM performance_schema.global_status
 WHERE VARIABLE_NAME = 'rapid_query_bitpacked_aggregate_rows_total';
 used_aggregate_kernel
-1
 SET USE_SECONDARY_ENGINE=FORCED;
 # A GROUP BY still needs the values, and must stay correct.
 SELECT plain, COUNT(*), SUM(bp_val) FROM t_bp_big GROUP BY plain ORDER BY plain;
