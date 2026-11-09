@@ -39,6 +39,8 @@
 
 #include "storage/innobase/include/ut0dbg.h"
 
+#include "storage/rapid_engine/utils/utils.h"
+
 namespace ShannonBase {
 namespace Imcs {
 void ColumnStatistics::EquiHeightHistogram::build(const std::vector<double> &values) {
@@ -595,17 +597,8 @@ static bool read_string(std::istream &in, std::string &s) {
   return in.good();
 }
 
-template <typename T>
-static bool write_pod(std::ostream &out, const T &v) {
-  out.write(reinterpret_cast<const char *>(&v), sizeof(v));
-  return out.good();
-}
-
-template <typename T>
-static bool read_pod(std::istream &in, T &v) {
-  in.read(reinterpret_cast<char *>(&v), sizeof(v));
-  return in.good();
-}
+using Utils::read_pod;
+using Utils::write_pod;
 
 bool ColumnStatistics::serialize(std::ostream &out) const {
   // Header

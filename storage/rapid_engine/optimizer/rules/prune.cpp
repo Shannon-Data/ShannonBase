@@ -37,6 +37,7 @@
 #include "storage/rapid_engine/imcs/table.h"           //RpdTable
 #include "storage/rapid_engine/optimizer/optimizer.h"  //Optimizer::convert_item_to_predicate
 #include "storage/rapid_engine/optimizer/query_plan.h"
+#include "storage/rapid_engine/utils/utils.h"  //Utils::Util
 
 namespace ShannonBase {
 namespace Optimizer {
@@ -392,6 +393,8 @@ bool StorageIndexPrune::is_column_suitable_for_index(Imcs::RpdTable *rpd_table, 
 
   auto &col_meta = rpd_table->meta().fields[col_idx];
   // 1. Check data type - some types work better
+  // BLOBs have no meaningful min/max, so a Storage Index never helps.
+  if (ShannonBase::Utils::Util::is_blob(col_meta.type)) return false;
   switch (col_meta.type) {
     case MYSQL_TYPE_TINY:
     case MYSQL_TYPE_SHORT:
@@ -413,12 +416,6 @@ bool StorageIndexPrune::is_column_suitable_for_index(Imcs::RpdTable *rpd_table, 
       if (func_type == Item_func::EQ_FUNC || func_type == Item_func::IN_FUNC) break;  // OK for equality
       // For range predicates on strings, benefit is lower
       return true;  // Still allow, but with lower benefit estimation
-    case MYSQL_TYPE_BLOB:
-    case MYSQL_TYPE_TINY_BLOB:
-    case MYSQL_TYPE_MEDIUM_BLOB:
-    case MYSQL_TYPE_LONG_BLOB:
-      // BLOBs - not good for Storage Index (no meaningful min/max)
-      return false;
     default:
       return false;
   }

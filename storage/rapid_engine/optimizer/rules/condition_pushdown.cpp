@@ -167,26 +167,113 @@ Plan PredicatePushDown::push_down_recursive(Plan &node, std::vector<Item *> &pen
   }
 }
 
+namespace {
+enum class JoinPushKind { kNone, kOuterOnly, kOuterAndInner };
+
+// What a WHERE conjunct above this join may be pushed into, and which input an
+// OUTER join keeps when the other side has no match.
+JoinPushKind classify_join_push(const PlanNode *join, bool *preserved_is_left) {
+  *preserved_is_left = true;
+  if (join == nullptr ||
+      (join->type() != PlanNode::Type::HASH_JOIN && join->type() != PlanNode::Type::NESTED_LOOP_JOIN))
+    return JoinPushKind::kNone;
+  const AccessPath *path = join->type() == PlanNode::Type::HASH_JOIN
+                               ? static_cast<const HashJoin *>(join)->original_path
+                               : static_cast<const NestLoopJoin *>(join)->original_path;
+  if (path == nullptr) return JoinPushKind::kNone;
+  const JoinPredicate *predicate = nullptr;
+  if (path->type == AccessPath::HASH_JOIN)
+    predicate = path->hash_join().join_predicate;
+  else if (path->type == AccessPath::NESTED_LOOP_JOIN)
+    predicate = path->nested_loop_join().join_predicate;
+  if (predicate == nullptr || predicate->expr == nullptr) return JoinPushKind::kNone;
+
+  switch (predicate->expr->type) {
+    case RelationalExpression::LEFT_JOIN:
+      *preserved_is_left = true;
+      return JoinPushKind::kOuterOnly;
+    case RelationalExpression::SEMIJOIN:
+      // The inner side is filtered before the existence test, which is exactly
+      // what the predicate already means.
+      return JoinPushKind::kOuterAndInner;
+    case RelationalExpression::ANTIJOIN:
+      // The inner side must stay intact: dropping inner rows would turn a
+      // non-matching outer row into a matching one.
+      return JoinPushKind::kOuterOnly;
+    default:
+      return JoinPushKind::kNone;
+  }
+}
+}  // namespace
+
 Plan PredicatePushDown::push_below_join(Plan &join, std::vector<Item *> &pending_filters) {
   // Pushing a WHERE predicate below OUTER/SEMI/ANTI would change NULL-complementation or match
   // semantics; only a provably INNER join is safe to push through.
   const bool can_push_through_join = Utils::is_provably_inner_join(join.get());
 
   if (!can_push_through_join) {
-    {
+    // An OUTER/SEMI/ANTI join still lets a conjunct that references a single
+    // input move into that input, provided the move cannot change
+    // NULL-complementation or match semantics:
+    //   * the preserved side of an OUTER JOIN is filtered exactly as written;
+    //   * a SEMI join filters its inner side before the existence test;
+    //   * an ANTI join keeps its inner side untouched;
+    //   * the null-supplying side of an OUTER JOIN needs null-rejection
+    //     analysis, which this rule does not attempt.
+    bool preserved_is_left{true};
+    const JoinPushKind kind = classify_join_push(join.get(), &preserved_is_left);
+    if (kind == JoinPushKind::kNone) {
       Opt_trace_object trace(&current_thd->opt_trace);
       trace.add_alnum("decision", "rapid_predicate_pushdown");
       trace.add_alnum("cause", "non_inner_join").add("retained_predicates", pending_filters.size());
+      std::vector<Item *> left_pending;
+      std::vector<Item *> right_pending;
+      join->children[0] = push_down_recursive(join->children[0], left_pending);
+      join->children[0] = wrap_if_pending(std::move(join->children[0]), left_pending);
+      join->children[1] = push_down_recursive(join->children[1], right_pending);
+      join->children[1] = wrap_if_pending(std::move(join->children[1]), right_pending);
+      return wrap_if_pending(std::move(join), pending_filters);
     }
-    // Filters above outer/semi/anti joins cannot in general be pushed into
-    // either input without changing NULL-complementation or match semantics.
-    std::vector<Item *> left_pending;
-    std::vector<Item *> right_pending;
-    join->children[0] = push_down_recursive(join->children[0], left_pending);
-    join->children[0] = wrap_if_pending(std::move(join->children[0]), left_pending);
-    join->children[1] = push_down_recursive(join->children[1], right_pending);
-    join->children[1] = wrap_if_pending(std::move(join->children[1]), right_pending);
-    return wrap_if_pending(std::move(join), pending_filters);
+
+    auto left_tables = get_available_tables(join->children[0]);
+    auto right_tables = get_available_tables(join->children[1]);
+    const bool inner_side_pushable = kind == JoinPushKind::kOuterAndInner;
+    std::vector<Item *> left_filters, right_filters, retained;
+    for (const auto &filter : pending_filters) {
+      const auto referenced = get_referenced_tables(filter);
+      if (referenced.empty()) {
+        retained.push_back(filter);  // constant or correlated expression
+        continue;
+      }
+      bool all_in_left{true}, all_in_right{true}, external{false};
+      for (TABLE *table : referenced) {
+        if (left_tables.count(table) == 0) all_in_left = false;
+        if (right_tables.count(table) == 0) all_in_right = false;
+        if (left_tables.count(table) == 0 && right_tables.count(table) == 0) external = true;
+      }
+      if (external) {
+        retained.push_back(filter);
+        continue;
+      }
+      const bool preserved = preserved_is_left ? all_in_left : all_in_right;
+      if (preserved || inner_side_pushable)
+        (all_in_left ? left_filters : right_filters).push_back(filter);
+      else
+        retained.push_back(filter);
+    }
+    {
+      Opt_trace_object trace(&current_thd->opt_trace);
+      trace.add_alnum("decision", "rapid_predicate_pushdown");
+      trace.add_alnum("cause", "outer_or_semi_join_single_input")
+          .add("pushed_predicates", static_cast<ulonglong>(left_filters.size() + right_filters.size()))
+          .add("retained_predicates", static_cast<ulonglong>(retained.size()));
+    }
+    join->children[0] = push_down_recursive(join->children[0], left_filters);
+    join->children[0] = wrap_if_pending(std::move(join->children[0]), left_filters);
+    join->children[1] = push_down_recursive(join->children[1], right_filters);
+    join->children[1] = wrap_if_pending(std::move(join->children[1]), right_filters);
+    pending_filters = retained;
+    return std::move(join);
   }
 
   // Get references to children (don't move them yet)

@@ -105,7 +105,7 @@ template <class Allocate>
 bool AllocateJoinAux(Allocate allocate) {
   bool injected_failure{false};
   DBUG_EXECUTE_IF("rapid_join_aux_bad_alloc", { injected_failure = true; });
-  if (!injected_failure && TryAllocation(allocate)) return false;
+  if (!injected_failure && ShannonBase::Utils::TryAllocation(allocate)) return false;
   my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid hash join auxiliary memory exhausted");
   return true;
 }
@@ -269,7 +269,7 @@ bool VectorizedHashJoinIterator::TryGrowBuildBudget() {
   size_t granted = current;
   // The governor may allocate STL metadata while collecting eviction victims.
   // Preserve any partial grant obtained before that metadata allocation failed.
-  if (!TryAllocation([&] {
+  if (!ShannonBase::Utils::TryAllocation([&] {
         granted = ResMgmt::grow_query_memory(m_memory_reservation, ResMgmt::QueryMemoryOperator::kHashJoin, want, this);
       })) {
     granted = m_memory_reservation.bytes();
@@ -587,7 +587,7 @@ bool VectorizedHashJoinIterator::InitializeColumnChunks(const pack_rows::TableCo
   if (input_layout && tables.tables().size() == 1) {
     const pack_rows::Table &packed_table = tables.tables()[0];
     TABLE *table = packed_table.table;
-    if (!Reserve(chunks, table->s->fields))
+    if (!ShannonBase::Utils::Reserve(chunks, table->s->fields))
       return AllocationError("Rapid hash join input descriptors allocation failed");
 
     for (uint field_idx = 0; field_idx < table->s->fields; ++field_idx) {
@@ -609,7 +609,8 @@ bool VectorizedHashJoinIterator::InitializeColumnChunks(const pack_rows::TableCo
   size_t column_count{0};
   for (const auto &table : tables.tables()) column_count += table.columns.size();
 
-  if (!Reserve(chunks, column_count)) return AllocationError("Rapid hash join column descriptors allocation failed");
+  if (!ShannonBase::Utils::Reserve(chunks, column_count))
+    return AllocationError("Rapid hash join column descriptors allocation failed");
 
   for (const pack_rows::Table &table : tables.tables()) {
     for (const pack_rows::Column &column : table.columns) {
@@ -740,7 +741,7 @@ std::unique_ptr<VectorizedHashJoinIterator::SpillFile> VectorizedHashJoinIterato
   // ordered runs, even though the actual buffers still fit the grant.
   constexpr size_t bytes = sizeof(SpillFile) + sizeof(std::FILE) + kAllocatorOverheadAllowance;
   ResMgmt::MemoryBudget::Reservation memory;
-  if (!TryAllocation([&] { memory = m_spill_memory.reserve(nullptr, bytes, bytes); })) {
+  if (!ShannonBase::Utils::TryAllocation([&] { memory = m_spill_memory.reserve(nullptr, bytes, bytes); })) {
     AllocationError("Rapid hash join spill reservation metadata allocation failed");
     return nullptr;
   }
@@ -954,7 +955,8 @@ bool VectorizedHashJoinIterator::EnsureHashCapacity(size_t required_slots, size_
   // valid: spill now instead of failing the statement. The budget accounting
   // and the resource's own counter can disagree slightly (allocation rounding),
   // and a statement must not die for that.
-  if (!Reserve(m_hash_slots, new_slots) || !Reserve(m_hash_key_arena, new_keys)) {
+  if (!ShannonBase::Utils::Reserve(m_hash_slots, new_slots) ||
+      !ShannonBase::Utils::Reserve(m_hash_key_arena, new_keys)) {
     if (m_build_memory.last_failure() == ResMgmt::AllocationFailure::kPoolExhausted) {
       m_build_error = true;
       return AllocationError("Rapid hash join memory pool exhausted");
@@ -977,7 +979,7 @@ bool VectorizedHashJoinIterator::SupportsDirectBatchInput(const pack_rows::Table
   for (const pack_rows::Table &table : tables.tables()) {
     for (const pack_rows::Column &column : table.columns) {
       const Field *field = column.field;
-      if (Utils::IsOffPageField(field)) return false;
+      if (Utils::Util::is_off_page(field)) return false;
       if (Utils::Util::is_string(field->type()) && field->real_type() != MYSQL_TYPE_ENUM &&
           field->real_type() != MYSQL_TYPE_SET) {
         if (!source->Dictionary(field)) return false;
@@ -1000,7 +1002,7 @@ std::shared_ptr<Compress::Dictionary> VectorizedHashJoinIterator::Dictionary(con
 bool VectorizedHashJoinIterator::RestoreColumn(const ColumnChunk &chunk, size_t row, bool row_image) {
   Field *field = chunk.source_field();
   if (auto dictionary = row_image ? nullptr : Dictionary(field)) {
-    if (chunk.width() != sizeof(uint32_t) || !Reserve(m_dictionary_decode, field->pack_length()))
+    if (chunk.width() != sizeof(uint32_t) || !ShannonBase::Utils::Reserve(m_dictionary_decode, field->pack_length()))
       return AllocationError("Rapid hash join dictionary decode allocation failed");
     m_dictionary_decode.resize(field->pack_length());
     uint32_t code;
@@ -1151,7 +1153,8 @@ bool VectorizedHashJoinIterator::ResetHashTable(double expected_rows) {
   if (m_hash_table_size > std::numeric_limits<size_t>::max() / (kBucketConstructionArrays * sizeof(size_t)))
     return true;
   // Reserve first: a refused reserve leaves the table untouched.
-  if (!Reserve(m_hash_buckets, m_hash_table_size) || !Reserve(m_hash_bucket_tails, m_hash_table_size)) {
+  if (!ShannonBase::Utils::Reserve(m_hash_buckets, m_hash_table_size) ||
+      !ShannonBase::Utils::Reserve(m_hash_bucket_tails, m_hash_table_size)) {
     my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), "Rapid vectorized hash join could not allocate hash buckets");
     return true;
   }
@@ -1190,7 +1193,7 @@ void VectorizedHashJoinIterator::GrowHashTableIfNeeded() {
   // unreachable, so the join silently returned too few rows.
   std::pmr::vector<size_t> new_buckets(&m_build_memory);
   std::pmr::vector<size_t> new_tails(&m_build_memory);
-  if (!Reserve(new_buckets, new_size) || !Reserve(new_tails, new_size)) return;
+  if (!ShannonBase::Utils::Reserve(new_buckets, new_size) || !ShannonBase::Utils::Reserve(new_tails, new_size)) return;
   new_buckets.assign(new_size, kInvalidHashSlot);
   new_tails.assign(new_size, kInvalidHashSlot);
   m_hash_buckets.swap(new_buckets);
@@ -1284,7 +1287,8 @@ int VectorizedHashJoinIterator::TryBuildParallelHashTable() {
   // normalized bytes; it never evaluates Item or stores into TABLE::record.
   std::pmr::vector<Field *> fields(&m_aux_memory);
   std::pmr::vector<size_t> key_columns(&m_aux_memory);
-  if (!Reserve(fields, m_build_columns.size()) || !Reserve(key_columns, m_join_conditions.size()))
+  if (!ShannonBase::Utils::Reserve(fields, m_build_columns.size()) ||
+      !ShannonBase::Utils::Reserve(key_columns, m_join_conditions.size()))
     return allocation_failure();
 
   size_t row_bytes = 0;
@@ -1397,7 +1401,7 @@ int VectorizedHashJoinIterator::TryBuildParallelHashTable() {
   // One entry per admitted worker: the count is a property of this machine and
   // this admission, not a compile-time ceiling.
   std::pmr::vector<std::optional<LocalBuild>> locals(&m_aux_memory);
-  if (!Reserve(locals, workers)) return fallback();
+  if (!ShannonBase::Utils::Reserve(locals, workers)) return fallback();
   for (size_t i = 0; i < workers; ++i) locals.emplace_back(std::in_place, local_budget / workers);
 
   bool fail_build{false}, fail_finalize{false}, refuse_build{false}, refuse_finalize{false};
@@ -1425,7 +1429,7 @@ int VectorizedHashJoinIterator::TryBuildParallelHashTable() {
         if (refuse_build) withhold.emplace(&local.memory, local.memory.limit() - local.memory.used());
 
         std::pmr::string key(&scratch);
-        if (!Reserve(key, key_bytes)) {
+        if (!ShannonBase::Utils::Reserve(key, key_bytes)) {
           retry.store(true, std::memory_order_relaxed);
           return nullptr;
         }
@@ -1439,7 +1443,7 @@ int VectorizedHashJoinIterator::TryBuildParallelHashTable() {
               local.input_rows += count;
               // One checked allocation per transport batch: the node, the row
               // index and the byte buffer all grow here, never inside the loop.
-              if (!TryAllocation([&] {
+              if (!ShannonBase::Utils::TryAllocation([&] {
                     local.batches.emplace_back(&local.memory);
                     auto &fresh = local.batches.back();
                     fresh.rows.reserve(count);
@@ -1530,10 +1534,10 @@ int VectorizedHashJoinIterator::TryBuildParallelHashTable() {
   size_t partitions = 1;
   while (partitions < target_partitions && partitions < kMaxHashBuckets) partitions <<= 1;
 
-  const bool partitions_ready = Reserve(candidate->partitions, partitions) && TryAllocation([&] {
-                                  for (size_t i = 0; i < partitions; ++i)
-                                    candidate->partitions.emplace_back(&m_build_memory);
-                                });
+  const bool partitions_ready =
+      ShannonBase::Utils::Reserve(candidate->partitions, partitions) && ShannonBase::Utils::TryAllocation([&] {
+        for (size_t i = 0; i < partitions; ++i) candidate->partitions.emplace_back(&m_build_memory);
+      });
   if (!partitions_ready) return allocation_failure();
 
   for (size_t i = 0; i < workers; ++i) {
@@ -1543,7 +1547,9 @@ int VectorizedHashJoinIterator::TryBuildParallelHashTable() {
   }
   size_t begin{0};
   std::pmr::vector<size_t> next(&m_build_memory);
-  if (!Reserve(next, partitions) || !TryAllocation([&] { next.assign(partitions, 0); })) return allocation_failure();
+  if (!ShannonBase::Utils::Reserve(next, partitions) ||
+      !ShannonBase::Utils::TryAllocation([&] { next.assign(partitions, 0); }))
+    return allocation_failure();
   for (size_t p = 0; p < partitions; ++p) {
     auto &part = candidate->partitions[p];
     part.begin = next[p] = begin;
@@ -1551,14 +1557,14 @@ int VectorizedHashJoinIterator::TryBuildParallelHashTable() {
     if (!part.count) continue;
     // The worker appends into these columns; their capacity is fixed here so a
     // worker never grows a buffer on its own thread.
-    if (!Reserve(part.columns, fields.size()) || !TryAllocation([&] {
+    if (!ShannonBase::Utils::Reserve(part.columns, fields.size()) || !ShannonBase::Utils::TryAllocation([&] {
           for (Field *field : fields) part.columns.emplace_back(field, part.count, &m_build_memory);
         }) ||
         part.columns.back().failed())
       return allocation_failure();
   }
   std::pmr::vector<RowRef> refs(&m_build_memory);
-  if (!TryAllocation([&] { refs.resize(rows); })) return allocation_failure();
+  if (!ShannonBase::Utils::TryAllocation([&] { refs.resize(rows); })) return allocation_failure();
   for (size_t i = 0; i < workers; ++i) {
     for (const auto &batch : locals[i]->batches) {
       for (const auto &row : batch.rows) refs[next[row.hash & (partitions - 1)]++] = {&row, &batch};
@@ -1569,7 +1575,7 @@ int VectorizedHashJoinIterator::TryBuildParallelHashTable() {
   std::pmr::vector<size_t> buckets(&m_build_memory), tails(&m_build_memory);
   std::pmr::vector<HashSlot> slots(&m_build_memory);
   std::pmr::vector<uchar> keys(&m_build_memory);
-  const bool finalize_ready = TryAllocation([&] {
+  const bool finalize_ready = ShannonBase::Utils::TryAllocation([&] {
     buckets.assign(bucket_count, kInvalidHashSlot);
     tails.assign(bucket_count, kInvalidHashSlot);
     slots.resize(rows);

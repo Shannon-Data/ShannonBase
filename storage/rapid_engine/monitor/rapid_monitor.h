@@ -208,6 +208,9 @@ struct Metrics {
   uint64_t query_vectorized_dictionary_minmax_rows_total{0};
   uint64_t query_late_predicate_rows_total{0};
   uint64_t query_late_projection_cells_total{0};
+  // IMCUs the Storage Index proved unsatisfiable, so the scan never touched
+  // them. Without this the zone-map pruning is invisible in a release build.
+  uint64_t query_storage_index_skipped_imcus_total{0};
   uint64_t query_scalar_expression_rows_total{0};
   uint64_t query_vectorized_stream_batch_rows_total{0};
   uint64_t query_vectorized_materialize_batch_rows_total{0};
@@ -302,6 +305,7 @@ struct RapidCounters {
   std::atomic<uint64_t> query_vectorized_dictionary_minmax_rows_total{0};
   std::atomic<uint64_t> query_late_predicate_rows_total{0};
   std::atomic<uint64_t> query_late_projection_cells_total{0};
+  std::atomic<uint64_t> query_storage_index_skipped_imcus_total{0};
   std::atomic<uint64_t> query_scalar_expression_rows_total{0};
   std::atomic<uint64_t> query_vectorized_stream_batch_rows_total{0};
   std::atomic<uint64_t> query_vectorized_materialize_batch_rows_total{0};

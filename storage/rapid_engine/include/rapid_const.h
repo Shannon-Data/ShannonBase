@@ -40,6 +40,8 @@ using int128_t = __int128;
 using uint128_t = unsigned __int128;
 /** Handler name for rapid */
 constexpr auto SHANNON_SUCCESS = 0;
+static_assert(EOF == -1, "EOF must be -1 for the rapid engine");
+constexpr auto SHANNON_EOF = EOF;
 
 static constexpr char handler_name[] = "Rapid";
 static constexpr char rapid_hton_name[] = "Rapid";

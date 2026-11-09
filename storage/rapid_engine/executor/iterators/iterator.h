@@ -89,48 +89,6 @@ inline size_t SelectBatchRows(size_t row_bytes, size_t available_bytes, size_t l
   return rows;
 }
 
-// The single STL allocation boundary. std::pmr containers must receive a
-// throwing allocator (returning nullptr is undefined behavior). Keep exception
-// conversion at individual container/object allocations, never around an
-// operator body: callers name the failed buffer and choose spill or hard error.
-// Bounded resources retain the reason independently of this STL adapter.
-template <typename Allocate>
-inline bool TryAllocation(Allocate &&allocate) noexcept {
-  try {
-    allocate();
-    return true;
-  } catch (const std::bad_alloc &) {
-    return false;
-  }
-}
-
-template <typename Buffer>
-inline bool Reserve(Buffer &buffer, size_t capacity) noexcept {
-  if (capacity <= buffer.capacity()) return true;
-  if (capacity > buffer.max_size()) return false;
-  return TryAllocation([&] { buffer.reserve(capacity); });
-}
-
-// Retained append-only state needs geometric growth, rather than reserve(size+1)
-// on every row. Charge both old and new buffers through the original allocator.
-template <typename Buffer>
-inline bool Grow(Buffer &buffer, size_t required) noexcept {
-  if (required <= buffer.capacity()) return true;
-  const size_t old = buffer.capacity();
-  const size_t grown = old > buffer.max_size() / 2 ? buffer.max_size() : std::max<size_t>(1, old * 2);
-  return Reserve(buffer, std::max(required, grown));
-}
-
-template <typename Container, typename... Args>
-inline bool TryEmplace(Container &container, Args &&...args) noexcept {
-  return TryAllocation([&] { container.emplace(std::forward<Args>(args)...); });
-}
-
-template <typename Container, typename... Args>
-inline bool TryEmplaceAt(Container &container, typename Container::iterator *result, Args &&...args) noexcept {
-  return TryAllocation([&] { *result = container.emplace(std::forward<Args>(args)...); });
-}
-
 inline bool AllocationError(const char *buffer) {
   my_error(ER_SECONDARY_ENGINE_PLUGIN, MYF(0), buffer);
   return true;
@@ -204,10 +162,17 @@ class CardinalityObservation {
   void Reset() {
     m_finished = false;
     m_invalid = false;
+    m_deferred_recorded = false;
   }
   void Invalidate() { m_invalid = true; }
   // The optimizer's estimate for this operator's output, -1 when unknown.
   double estimate() const { return m_estimate; }
+  // The two-phase read outcome, carried next to the cardinality observation so
+  // that a plan can be audited after the fact without re-running it.
+  // deferred_bytes_per_row is what the first pass actually skipped: a
+  // dictionary-encoded column travels as a 4-byte code, not as its value.
+  void RecordDeferredRead(size_t deferred_bytes_per_row, size_t input_rows, size_t kept_rows, bool decided,
+                          bool enabled, size_t dictionary_columns);
   // A single observation per Init, only after the operator reaches EOF.
   void Finish(THD *thd, const char *operator_name, size_t rows);
 
@@ -215,13 +180,20 @@ class CardinalityObservation {
   double m_estimate;
   bool m_finished{false};
   bool m_invalid{false};
+  bool m_deferred_recorded{false};
+  size_t m_deferred_bytes_per_row{0};
+  size_t m_deferred_input_rows{0};
+  size_t m_deferred_kept_rows{0};
+  size_t m_deferred_dictionary_columns{0};
+  bool m_deferred_decided{false};
+  bool m_deferred_enabled{false};
 };
 
 using filter_func_t = std::function<bool(const uchar *)>;
 
 inline bool PrepareBudgetedString(String *value, std::pmr::vector<char> *buffer, size_t bytes) {
   if (bytes > UINT32_MAX - 16) return false;
-  if (!Reserve(*buffer, bytes + 16)) return false;
+  if (!Utils::Reserve(*buffer, bytes + 16)) return false;
   buffer->resize(bytes + 16);
   value->set(buffer->data(), buffer->size(), &my_charset_bin);
   value->length(0);
@@ -842,6 +814,28 @@ class BatchReadable {
    * Fill col_chunks with up to `capacity` rows directly from columnar storage.
    * Caller must clear each chunk before calling.
    *
+   * Dense input is the exception, not the rule: prefer ReadSelectedBatch() and
+   * index physical rows through the selection it returns. Four consumers cannot
+   * do that, because each one works on contiguous batch positions rather than on
+   * a set of row indexes:
+   *   - VectorizedLimitIterator (limit_iterator.cpp) counts and skips a prefix
+   *     for OFFSET, and takes a prefix for LIMIT;
+   *   - VectorizedRecordIterator (record_iterator.cpp) replays the batch into
+   *     MySQL Field buffers, which is the SQL row boundary;
+   *   - the aggregate's STREAMING/global reduction and its HASH path with
+   *     synthetic expression slots (aggregate_iterator.cpp): reduction kernels
+   *     consume contiguous ranges, and the expression slots are appended to the
+   *     batch as dense chunks after the child's own columns;
+   *   - VectorizedNestedLoopIterator's parallel inner-block ingestion
+   *     (nested_loop_iterator.cpp), which sizes one block per capacity.
+   * Everything else reads through ReadSelectedBatch(): hash join build and
+   * probe, sort, stream, materialize, nested loop, and the HASH aggregate
+   * without expression slots.
+   *
+   * Adding a consumer to this list means copying every column of every row that
+   * a filter already rejected. Check whether the operator can consume the
+   * selection first.
+   *
    * @param col_chunks  Pre-allocated column chunks (caller owns).
    * @param capacity    Maximum rows to fill.
    * @param rows_read   [out] Rows actually written.
@@ -851,10 +845,22 @@ class BatchReadable {
    */
   virtual int ReadBatch(std::pmr::vector<ColumnChunk> &col_chunks, size_t capacity, size_t &rows_read) = 0;
 
-  // Selection indexes physical rows in caller-owned chunks. An empty selection
-  // means the first rows_read rows are dense. Valid until the next read into
-  // these chunks; callers must retain both chunks and selection for lookahead.
-  // Dense-only consumers keep using ReadBatch(), which materializes explicitly.
+  /**
+   * Selection indexes physical rows in caller-owned chunks. An empty selection
+   * means the first rows_read rows are dense. Valid until the next read into
+   * these chunks; callers must retain both chunks and selection for lookahead.
+   *
+   * The default below is dense: it is what an operator that has no sparse
+   * representation to offer answers with, and it is what every caller gets when
+   * its child is not a filter. VectorizedFilterIterator is currently the only
+   * override that returns a non-empty selection -- a filter chain composes one
+   * selection into the next, so the sparseness survives a chain but not across
+   * an operator in between.
+   *
+   * Sparse chunks still carry the full row extent: a rejected position holds a
+   * NULL placeholder, so a consumer must obey the selection and must not infer
+   * row count from chunk size.
+   */
   virtual int ReadSelectedBatch(std::pmr::vector<ColumnChunk> &chunks, size_t capacity, size_t &rows_read,
                                 std::pmr::vector<uint32_t> &selection) {
     selection.clear();
@@ -967,6 +973,17 @@ class VectorizedFilterIterator final : public RowIterator, public BatchReadable 
   bool EvaluateSimplePredicateBatch(const std::pmr::vector<ColumnChunk> &chunks, size_t rows);
   bool BuildConditionChunkMap(const std::pmr::vector<ColumnChunk> &chunks);
   bool MaterializeConditionRow(const std::pmr::vector<ColumnChunk> &chunks, size_t row);
+  // True when at least one projected column can be deferred to the second pass.
+  // The column width is deliberately not a gate: a narrow column under a highly
+  // selective predicate still wins (W=7 breaks even at a 30% survival rate), so
+  // width only enters the break-even that ReadSelectedBatchImpl() measures --
+  // see DeferredBytesPerRow().
+  bool HasDeferredColumn(const std::pmr::vector<ColumnChunk> &chunks) const;
+  // Bytes per row that the first pass actually skips, measured from the chunks
+  // as the scan fills them. A dictionary-encoded column contributes its 4-byte
+  // code, so the break-even depends on the encoding and not only on the
+  // declared column type. Also refreshes m_late_dictionary_columns.
+  size_t DeferredBytesPerRow(const std::pmr::vector<ColumnChunk> &chunks);
   int ReadSelectedBatchImpl(std::pmr::vector<ColumnChunk> &chunks, size_t capacity, size_t &rows_read,
                             std::pmr::vector<uint32_t> &selection);
   int ReadBatchViaRows(std::pmr::vector<ColumnChunk> &col_chunks, size_t capacity, size_t &rows_read);
@@ -1024,6 +1041,20 @@ class VectorizedFilterIterator final : public RowIterator, public BatchReadable 
   size_t m_lookahead_start{0};
   size_t m_lookahead_count{0}, m_batch_capacity{0};
   bool m_replayed_row{false};
+
+  // Two-phase read bookkeeping. The filter's dense boundary copies every
+  // surviving row's every column, so deferred projection only pays when the
+  // predicate rejects most of the batch. Measured on the first full batch and
+  // then held for the rest of the statement.
+  size_t m_late_input_rows{0};
+  size_t m_late_kept_rows{0};
+  // Measured size of the columns the first pass skips. The break-even survival
+  // rate is width / (width + second-pass cost), so a wide projection tolerates a
+  // survival rate that a narrow one cannot.
+  size_t m_late_width{0};
+  size_t m_late_dictionary_columns{0};
+  bool m_late_decided{false};
+  bool m_late_disabled{false};
 
   VectorizedOperatorStats m_stats;
   CardinalityObservation m_cardinality;

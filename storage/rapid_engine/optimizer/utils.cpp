@@ -307,7 +307,7 @@ bool is_storage_index_predicate_safe(const Imcs::Predicate *predicate) {
 
   if (simple->op == Imcs::PredicateOperator::LIKE || simple->op == Imcs::PredicateOperator::NOT_LIKE)
     return simple->has_mysql_like() && field != nullptr && ShannonBase::Utils::Util::is_string(type) &&
-           !ShannonBase::Utils::IsOffPageField(field);
+           !ShannonBase::Utils::Util::is_off_page(field);
 
   if (!is_pushable_comparison(simple->op)) return false;
 

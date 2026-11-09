@@ -296,7 +296,7 @@ class VectorizedTableScanIterator final : public TableRowIterator, public BatchR
    */
   /** @return false when the value could not be produced; the scan must fail. */
   inline bool ProcessFieldData(Field *field, const ShannonBase::Executor::ColumnChunk &col_chunk, size_t rowid) {
-    if (Utils::Util::is_string(field->type()) || Utils::IsOffPageField(field)) {
+    if (Utils::Util::is_string(field->type()) || Utils::Util::is_off_page(field)) {
       return ProcessStringField(field, col_chunk, rowid);
     }
     ProcessNumericField(field, col_chunk, rowid);

@@ -217,7 +217,7 @@ bool VectorizedExpression::CompileNode(Item *expression, size_t *index, unsigned
     return false;
   }
 
-  if (!Grow(m_nodes, m_nodes.size() + 1)) return false;
+  if (!ShannonBase::Utils::Grow(m_nodes, m_nodes.size() + 1)) return false;
 
   *index = m_nodes.size();
   m_nodes.push_back(node);
@@ -235,7 +235,7 @@ bool VectorizedExpression::Evaluate(const std::pmr::vector<ColumnChunk> &chunks,
   if (rows == 0) return true;
 
   const size_t size = rows * m_nodes.size();
-  if (!Reserve(m_numbers, size) || !Reserve(m_nulls, size)) return false;
+  if (!ShannonBase::Utils::Reserve(m_numbers, size) || !ShannonBase::Utils::Reserve(m_nulls, size)) return false;
 
   // Every slot read below is written first in this call, so existing slots need
   // no re-initialisation: only grow.
@@ -444,7 +444,7 @@ bool VectorizedExpression::Matches(size_t row) const {
 }
 
 bool VectorizedExpression::CopyProgram(const VectorizedExpression &source) {
-  if (!Reserve(m_nodes, source.m_nodes.size())) return false;
+  if (!ShannonBase::Utils::Reserve(m_nodes, source.m_nodes.size())) return false;
   m_nodes.assign(source.m_nodes.begin(), source.m_nodes.end());
   return !m_nodes.empty();
 }

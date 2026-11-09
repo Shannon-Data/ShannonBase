@@ -261,7 +261,7 @@ bool PreImageOffPageDataIsComplete(const ShannonBase::Imcs::RpdTable *rpd_table,
     Field *field = meta.fields[idx].source_fld;
     // A NOT_SECONDARY column is never captured, so it is never missing.
     if (field == nullptr || !meta.fields[idx].is_secondary_field) continue;
-    if (!ShannonBase::Utils::IsOffPageField(field)) continue;
+    if (!ShannonBase::Utils::Util::is_off_page(field)) continue;
 
     // A NULL column has no out-of-line bytes to capture.
     if (field->is_nullable() && (rowdata[meta.null_byte_offsets[idx]] & meta.null_bitmasks[idx]) != 0) continue;
@@ -377,7 +377,7 @@ int CopyInfoParser::parse_and_apply_update(Rapid_load_context *context, table_id
     if (!null_changed && field != nullptr) {
       // An out-of-line type stores only a pointer to blob-heap data in the
       // row image, so the images cannot be compared byte by byte.
-      if (!ShannonBase::Utils::IsOffPageField(field)) {
+      if (!ShannonBase::Utils::Util::is_off_page(field)) {
         identical =
             field->cmp_binary(const_cast<uchar *>(old_start + offset), const_cast<uchar *>(new_start + offset)) == 0;
       }

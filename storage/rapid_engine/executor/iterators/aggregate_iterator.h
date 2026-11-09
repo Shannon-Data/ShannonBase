@@ -115,48 +115,80 @@ bool VectorizableStringExtremum(Item_sum *item);
 bool IsHashGroupKeyFieldType(enum_field_types type);
 
 /**
-  Handles aggregation (typically used for GROUP BY) for the case where the rows
-  are already properly grouped coming in, ie., all rows that are supposed to be
-  part of the same group are adjacent in the input stream. (This could be
-  because they were sorted earlier, because we are scanning an index that
-  already gives us the rows in a group-compatible order, or because there is no
-  grouping.)
-
-  AggregateIterator needs to be able to save and restore rows; it doesn't know
-  when a group ends until it's seen the first row that is part of the _next_
-  group. When that happens, it needs to tuck away that next row, and then
-  restore the previous row so that the output row gets the correct grouped
-  values. A simple example, doing SELECT a, SUM(b) FROM t1 GROUP BY a:
-
-    t1.a  t1.b                                       SUM(b)
-     1     1     <-- first row, save it                1
-     1     2                                           3
-     1     3                                           6
-     2     1     <-- group changed, save row
-    [1     1]    <-- restore first row, output         6
-                     reset aggregate              -->  0
-    [2     1]    <-- restore new row, process it       1
-     2    10                                          11
-                 <-- EOF, output                      11
-
-  To save and restore rows like this, it uses the infrastructure from
-  pack_rows.h to pack and unpack all relevant rows into record[0] of every input
-  table. (Currently, there can only be one input table, but this may very well
-  change in the future.) It would be nice to have a more abstract concept of
-  sending a row around and taking copies of it if needed, as opposed to it
-  implicitly staying in the table's buffer. (This would also solve some
-  issues in EQRefIterator and when synthesizing NULL rows for outer joins.)
-  However, that's a large refactoring.
- */
-/**
- * Vectorized version of AggregateIterator that maintains full compatibility
- * with the original while adding performance optimizations for simple aggregates.
+ * Vectorized counterpart of AggregateIterator. It keeps the SQL layer's
+ * grouping semantics -- the same state machine, the same rollup handling and the
+ * same pack_rows save/restore -- and adds two execution strategies plus a batch
+ * ingestion mode on top of them.
  *
- * Key design principles:
- * 1. Preserve original state machine and semantics exactly
- * 2. Use vectorization only for simple aggregates within groups
- * 3. Fall back to traditional processing for complex cases
- * 4. Maintain all rollup and group change detection logic
+ * Streaming (input already grouped)
+ *   The classic problem is unchanged: the end of a group is only known once the
+ *   first row of the _next_ group arrives, so that row has to be packed away and
+ *   the previous one restored before the group can be emitted.
+ *
+ *     t1.a  t1.b                                       SUM(b)
+ *      1     1     <-- first row, save it                1
+ *      1     2                                           3
+ *      2     1     <-- group changed, save row
+ *     [1     1]    <-- restore first row, output         6
+ *                      reset aggregate              -->  0
+ *     [2     1]    <-- restore new row, process it       1
+ *
+ *   m_first_row_this_grp / m_first_row_next_grp hold those two images. Rows
+ *   arrive either one at a time or as a batch (`m_batch_source`), which is what
+ *   lets a group span batches: the unused tail of a batch is retained in
+ *   m_streaming_group_chunks instead of being handed back to the child, because
+ *   a small group would otherwise force the same bytes to be read and copied
+ *   again for every group.
+ *
+ * Hash (unordered GROUP BY)
+ *   The group key is serialised once per row into m_hash_key_scratch (int32,
+ *   int64, raw bytes, dictionary code or a generic Field image, decided ahead of
+ *   time in m_group_key_fields), and every group's aggregates live in a
+ *   HashArena: a hash index over the 64-bit hash plus the canonical key stored
+ *   once in HashGroupState. The arena is allocated through HashMemoryResource, so
+ *   the operator's memory budget is a hard boundary rather than a target: an
+ *   allocation that would cross it throws std::bad_alloc before the upstream
+ *   allocator runs, which the caller turns into either eviction or a spill,
+ *   never into an OOM.
+ *
+ *   When the budget cannot be reclaimed, groups are spilled to
+ *   m_hash_spill_partitions (kHashSpillFanout partitions, kHashSpillDepth deep)
+ *   and re-aggregated one partition at a time. ORDER BY is preserved by carrying
+ *   HashGroupOrderValue with each group and merge-sorting the runs on the way
+ *   back in, so a spilled hash aggregate still emits rows in the order the plan
+ *   asked for.
+ *
+ * Vectorization
+ *   Only aggregates whose exact result scale equals the scale they are stored at
+ *   take the vectorized route (IsSimpleAggregate(); the gate is shared with the
+ *   optimizer through VectorizableAggregateValueExpr()). Those update the
+ *   Item_sum directly instead of re-driving aggregator_add(), which would
+ *   re-read args[0] from whichever row happens to be current. Everything else
+ *   falls through to the row path, group by group, so a plan can never be
+ *   rejected at run time for a shape the optimizer accepted.
+ *
+ * Members, by role:
+ *   memory         m_memory_reservation (outlives every retained buffer, hence
+ *                  declared first), m_aux_memory, m_hash_arena / m_hash_memory_
+ *                  limit, HashMemoryResource, HashSpillFile (each spill file
+ *                  carries its own Reservation)
+ *   input          m_source, m_batch_source, m_source_supports_batch,
+ *                  m_hash_input_mode (ROW or BATCH for the same algorithm)
+ *   grouping       m_group_key_fields, m_group_key_fields_resolved,
+ *                  m_hash_key_scratch, m_dictionary_decode_scratch
+ *   batches        m_batch_col_chunks, m_expression_chunk_scratch,
+ *                  m_hash_batch_selection, m_streaming_group_chunks
+ *   spill          m_hash_spilled, m_hash_spill_partitions, m_hash_spill_output,
+ *                  m_initial_spill_fanout
+ *   output         m_hash_output_order, HashGroupOrderValue,
+ *                  m_hash_group_output_idx, m_parallel_output
+ *   telemetry      m_stats (VectorizationStats) via GetStats()
+ *
+ * Lifecycle: Init() -> InitImpl() -> Read() -> ReadImpl(). InitImpl() decides the
+ * strategy and sizes the first arenas; ReadImpl() dispatches to
+ * ReadHashAggregate() or to the streaming state machine. Error codes are
+ * kFatalError and kHashNeedSpill, the latter meaning "no group was modified, so
+ * the current input row can be replayed from spill".
  */
 class VectorizedAggregateIterator final : public RowIterator, public ResMgmt::Evictable {
   // Declared first so the reservation outlives all retained buffers.
@@ -164,15 +196,15 @@ class VectorizedAggregateIterator final : public RowIterator, public ResMgmt::Ev
   ResMgmt::BoundedMemoryResource m_aux_memory;
 
  public:
-  static constexpr int kSuccess = 0;
-  static constexpr int kEOF = -1;
   static constexpr int kFatalError = 1;
   static constexpr int kHashNeedSpill = 2;
+
   static constexpr size_t kHashSpillFanout = 16;
   static constexpr size_t kHashMaxSpillDepth = 8;
   // Link plus bucket share retained per unordered-index node.
   static constexpr size_t kHashIndexNodePointers = 3;
-  static constexpr size_t kDefaultHashMemoryLimit = 64ULL * 1024ULL * 1024ULL;
+
+  static constexpr size_t kDefaultHashMemoryLimit = 64ULL * SHANNON_MB;
 
   VectorizedAggregateIterator(THD *thd, unique_ptr_destroy_only<RowIterator> source, JOIN *join,
                               pack_rows::TableCollection tables, bool rollup, AggregateStrategy strategy,
@@ -274,16 +306,21 @@ class VectorizedAggregateIterator final : public RowIterator, public ResMgmt::Ev
     DONE_OUTPUTTING_ROWS
   } m_state;
 
-  bool m_seen_eof;
-  table_map m_save_nullinfo;
+  bool m_seen_eof{false};
+  // Tables whose fields the last output row cleared; restore_fields() consumes
+  // it and resets it to 0, so 0 doubles as "nothing to restore".
+  table_map m_save_nullinfo{0};
 
-  int m_last_unchanged_grp_item_idx;
-  int m_current_rollup_pos;
+  // Rollup bookkeeping. -1 means "not outputting rollup rows": that is the
+  // level OUTPUTTING_ROLLUP_ROWS counts down from, see SetRollupLevel(). 0 for
+  // the index means "the first group item changed", the rollup restart point.
+  int m_last_unchanged_grp_item_idx{0};
+  int m_current_rollup_pos{-1};
   std::pmr::vector<char> m_first_row_this_storage{&m_aux_memory};
   std::pmr::vector<char> m_first_row_next_storage{&m_aux_memory};
   String m_first_row_this_grp;
   String m_first_row_next_grp;
-  int m_output_slice;
+  int m_output_slice{-1};
 
   // Vectorization infrastructure
   struct VectorizedGroupProcessor {
@@ -362,6 +399,7 @@ class VectorizedAggregateIterator final : public RowIterator, public ResMgmt::Ev
   };
 
   VectorizedGroupProcessor m_vectorizer{&m_aux_memory};
+  // Per-execution counters; reset in InitImpl(). Read them through GetStats().
   VectorizationStats m_stats;
 
   /*
@@ -540,9 +578,13 @@ class VectorizedAggregateIterator final : public RowIterator, public ResMgmt::Ev
     size_t bytes_written{0};
   };
 
+  // Hash groups are built once, then served in order; nothing may add to the
+  // arena after m_hash_groups_built is set, because the output index and the
+  // sort order both assume the group list is final.
   bool m_hash_groups_built{false};
   size_t m_hash_group_output_idx{0};
   size_t m_hash_memory_limit{kDefaultHashMemoryLimit};
+  // Null until InitImpl() sizes it; replaced when the grant grows or shrinks.
   std::unique_ptr<HashArena> m_hash_arena;
   bool m_dict_code_cache_disabled{false};
   std::optional<HashStatsReportGuard> m_hash_stats_guard;
@@ -563,6 +605,9 @@ class VectorizedAggregateIterator final : public RowIterator, public ResMgmt::Ev
   bool m_batch_chunks_initialized{false};
   // Retain a streaming batch across group boundaries. Returning its entire
   // unused tail to the child for every small group repeatedly copies it.
+  // Retained tail of the last streaming batch: the rows after the group that
+  // just ended. They belong to the next group, so returning them to the child
+  // would mean reading and copying the same bytes once per group.
   size_t m_streaming_batch_pos{0};
   size_t m_streaming_batch_rows{0};
   bool m_streaming_batch_eof{false};
@@ -611,16 +656,42 @@ class VectorizedAggregateIterator final : public RowIterator, public ResMgmt::Ev
   int ProcessGroupScalar();
   bool ValidateHashAggregatePlan() const;
   int ReadHashAggregate();
+  /*
+   * Return-value convention for the hash build helpers below:
+   *
+   *   0                 SHANNON_SUCCESS; the input row was consumed.
+   *   1 / kFatalError    the statement must fail. The message is already raised
+   *                     (my_error via AllocationError, or ReportHashSpillError).
+   *   2 / kHashNeedSpill the arena could not grow, but no group was left
+   *                     partially updated, so the current input row can be
+   *                     replayed from spill. This is a resource signal, not an
+   *                     error: HashMemoryLimitExceeded() returns it for a budget
+   *                     boundary and only raises an error for a real pool
+   *                     exhaustion.
+   *
+   * Only ConsumeHashRow(), ConsumeHashBatchRow() and HashMemoryLimitExceeded()
+   * hand kHashNeedSpill to their caller (UpdateHashGroup() propagates it). The
+   * BuildHashGroups*() pair absorbs it by starting a spill and carrying on, so
+   * they return just 0 or kFatalError, and BeginHashSpill() reports through
+   * ReportHashSpillError() and never returns kHashNeedSpill either.
+   */
   int BuildHashGroups();
   // -1: ineligible/replay serial; 0: built; 1: statement error.
   int TryBuildParallelGroups();
+  // A parallel group build is attempted at most once per execution; failure
+  // leaves m_parallel_output false and the build restarts serially, so the
+  // attempt never has to be unrolled.
   bool m_parallel_output{false};
   bool m_parallel_attempted{false};
   int BuildHashGroupsBatch();
   int BuildHashGroupsRow();
+  // 0: consumed, kFatalError: fail, kHashNeedSpill: replay this row after spill.
   int ConsumeHashRow(size_t packed_row_capacity);
   int ConsumeHashBatchRow(size_t row_idx, size_t packed_row_capacity);
+  // Classifies a failed arena allocation: pool exhaustion is fatal, a budget
+  // boundary is kHashNeedSpill.
   int HashMemoryLimitExceeded();
+  // 0 or kFatalError only; already-spilled calls forward to SpillCurrentInputRow().
   int BeginHashSpill(size_t packed_row_capacity, bool spill_current_row = true);
   // Grow the grant (doubling) between input rows before reaching the arena
   // boundary, so growth never has to unwind a partially applied update.

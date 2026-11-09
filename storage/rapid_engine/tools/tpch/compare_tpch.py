@@ -8,7 +8,26 @@ from pathlib import Path
 import statistics
 import shutil
 import subprocess
+import sys
 import time
+
+
+# Per-operator counters are not part of the published status surface any more:
+# they are debug-only instrumentation whose values only appear in the RAPID_STATS
+# line mysqld writes when a statement ends on the Rapid handler. A release build
+# compiles the counters out, so a run that cannot read them must say so -- an
+# empty delta is not evidence of a zero-cost change.
+KERNEL_PROBE_COUNTERS = (
+    'rapid_query_late_predicate_rows_total',
+    'rapid_query_late_projection_cells_total',
+    'rapid_query_like_mask_rows_total',
+    'rapid_query_like_scalar_rows_total',
+    'rapid_query_dictionary_predicate_rows_total',
+    'rapid_query_vectorized_aggregate_batch_rows_total',
+    'rapid_query_vectorized_aggregate_dict_cache_hits_total',
+)
+
+STATS_LOG_MARKER = 'RAPID_STATS ['
 
 
 def sha256(path):
@@ -17,6 +36,42 @@ def sha256(path):
         for block in iter(lambda: source.read(1024 * 1024), b''):
             digest.update(block)
     return digest.hexdigest()
+
+
+def parse_stats_line(line):
+    """Parse 'RAPID_STATS [stmt_end] scan_rows=4 late_rows=120' into a dict."""
+    _, _, rest = line.partition(']')
+    counters = {}
+    for token in rest.split():
+        name, _, value = token.partition('=')
+        if value.isdigit():
+            counters[name] = counters.get(name, 0) + int(value)
+    return counters
+
+
+def read_stats_log(path, offsets, side):
+    """Return the counter deltas mysqld appended to its error log since the last read.
+
+    Values for the per-operator counters exist nowhere else: the telemetry meter
+    only lists their names in performance_schema.setup_metrics, and an exporter
+    pulls the values through a callback. The RAPID_STATS line is a per-statement
+    delta, so summing the lines a query produced gives that query's counters.
+    """
+    try:
+        with open(path, 'r', errors='replace') as handle:
+            handle.seek(offsets.get(side, 0))
+            tail = handle.read()
+            offsets[side] = handle.tell()
+    except FileNotFoundError:
+        return {}
+    counters = {}
+    for line in tail.splitlines():
+        index = line.find(STATS_LOG_MARKER)
+        if index < 0:
+            continue
+        for name, value in parse_stats_line(line[index:]).items():
+            counters[name] = counters.get(name, 0) + value
+    return counters
 
 
 def main():
@@ -50,6 +105,7 @@ def main():
     output.mkdir(parents=True, exist_ok=True)
     worker_limits = dict(main=args.main_workers, candidate=args.candidate_workers)
     worker_preambles = {}
+    log_offsets, stats_log_enabled = {}, {}
     socket = args.data.parent / 'benchmark.sock'
     records = []
     sql_queries = {q: (args.queries / f'q{q}.sql').read_text() for q in args.query_numbers}
@@ -80,7 +136,7 @@ def main():
                     binaries={side: dict(path=str(binary.resolve()), sha256=sha256(binary))
                               for side, binary in variants},
                     clock='client perf_counter; server NOW(6) timestamps around query', preflight=args.preflight,
-                    data=str(args.data.resolve()), cpu=os.cpu_count())
+                    data=str(args.data.resolve()), cpu=os.cpu_count(), counter_support={})
     (output / 'metadata.json').write_text(json.dumps(metadata, indent=2))
     for side, binary in variants:
         shutil.copyfile(binary.resolve().parent.parent / 'CMakeCache.txt', output / f'{side}.CMakeCache.txt')
@@ -105,6 +161,9 @@ def main():
                     f"SET SESSION optimizer_switch='hypergraph_optimizer={'off' if innodb else 'on'}'; "
                     f"SET SESSION use_secondary_engine={'OFF' if innodb else 'FORCED'};\n")
         preamble += worker_preambles[side]
+        if stats_log_enabled.get(side):
+            # The only surface that carries per-operator counter values.
+            preamble += "SET SESSION debug='+d,rapid_stats';\n"
         status = ("SHOW SESSION STATUS LIKE 'Handler_read%';\n"
                   "SHOW GLOBAL STATUS LIKE 'rapid_query%';\n")
         sql = (preamble + "SELECT 'BENCH_BEFORE';\n" + status +
@@ -144,6 +203,10 @@ def main():
                               if not name.endswith('_max')}
         record['global_maxima'] = {name: dict(before=before.get(name), after=value)
                                   for name, value in after.items() if name.endswith('_max')}
+        if stats_log_enabled.get(side):
+            # Per-statement deltas, not totals: RAPID_STATS prints what this
+            # statement contributed, so no before/after subtraction is needed.
+            record['stats_log'] = read_stats_log(output / f'{side}.server.log', log_offsets, side)
         if q >= 100 and 'server_seconds' in record:
             record['scan_query_ns_per_input_row'] = record['server_seconds'] * 1e9 / part_rows
         record['rows'] = len(result_rows)
@@ -187,6 +250,23 @@ def main():
             else: raise RuntimeError(f'{side} server startup timeout')
             meta = client('SELECT VERSION(); SHOW VARIABLES;', database=False)
             (output / f'{side}.variables.tsv').write_text(meta.stdout)
+            stats_log_enabled[side] = 'debug' in meta.stdout.splitlines()[0].lower()
+            published = sorted(line.split('\t', 1)[0] for line in
+                               client("SHOW GLOBAL STATUS LIKE 'rapid_query%';", database=False).stdout.splitlines() if line)
+            missing = [name for name in KERNEL_PROBE_COUNTERS if name not in published]
+            # setup_metrics lists the telemetry meter's metrics; it carries names and
+            # types only, so this records that the build exports them, not values.
+            meter = client("SELECT COUNT(*) FROM performance_schema.setup_metrics WHERE METER='rapid';",
+                           database=False)
+            metadata['counter_support'][side] = dict(
+                published=published, probe_counters_missing=missing, rapid_stats_log=stats_log_enabled[side],
+                telemetry_meter_metrics=int(meter.stdout.strip()) if meter.returncode == 0 and meter.stdout.strip() else 0)
+            (output / 'metadata.json').write_text(json.dumps(metadata, indent=2))
+            if missing and args.kernel_probes and not stats_log_enabled[side]:
+                print(f'{side}: only {len(published)} rapid_query* counters are published and this binary is not a '
+                      f'debug build, so {len(missing)} counter deltas the probes need ({missing[0]}…) will be empty. '
+                      'That is missing evidence, not evidence that the change altered cost.',
+                      file=sys.stderr, flush=True)
             workers_variable = client("SHOW VARIABLES LIKE 'rapid_parallel_workers';", database=False)
             if workers_variable.returncode:
                 raise RuntimeError(f'{side} worker configuration lookup failed')

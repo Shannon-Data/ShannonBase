@@ -128,7 +128,7 @@ static bool read_off_page_data(TABLE *table, const uchar *record,
     // whose data is off-page just like a BLOB's, but they report their own
     // field type, so a BLOB-only filter left them uncaptured. The reader then
     // found a non-empty map without an entry for that column and asserted.
-    if (!ShannonBase::Utils::IsOffPageField(fld)) continue;
+    if (!ShannonBase::Utils::Util::is_off_page(fld)) continue;
     if (fld->is_null()) continue;
 
     auto bfld = down_cast<Field_blob *>(fld);

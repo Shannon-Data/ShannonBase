@@ -29,6 +29,7 @@
 
 #include "storage/rapid_engine/executor/iterators/iterator.h"
 #include "storage/rapid_engine/monitor/rapid_monitor.h"
+#include "storage/rapid_engine/utils/utils.h"
 
 #include <algorithm>
 #include <cmath>
@@ -49,8 +50,28 @@
 #include "storage/rapid_engine/optimizer/optimizer.h"
 #include "storage/rapid_engine/utils/decimal64.h"
 
+namespace {
+// Per-row cost of the second pass, expressed in bytes so that it shares a unit
+// with the deferred column width: the surviving row is addressed again and its
+// deferred columns are copied out of the gather buffer. The break-even survival
+// rate of a two-phase read is width / (width + cost), so this number is what
+// makes a narrow projection give up long before a wide one does.
+constexpr size_t kLateSecondPassCost = 16;
+}  // namespace
+
 namespace ShannonBase {
 namespace Executor {
+void CardinalityObservation::RecordDeferredRead(size_t deferred_bytes_per_row, size_t input_rows, size_t kept_rows,
+                                                bool decided, bool enabled, size_t dictionary_columns) {
+  m_deferred_recorded = true;
+  m_deferred_bytes_per_row = deferred_bytes_per_row;
+  m_deferred_input_rows = input_rows;
+  m_deferred_kept_rows = kept_rows;
+  m_deferred_dictionary_columns = dictionary_columns;
+  m_deferred_decided = decided;
+  m_deferred_enabled = enabled;
+}
+
 void CardinalityObservation::Finish(THD *thd, const char *operator_name, size_t rows) {
   if (m_finished || m_invalid) return;
   m_finished = true;
@@ -66,6 +87,27 @@ void CardinalityObservation::Finish(THD *thd, const char *operator_name, size_t 
     const double actual = std::max(1.0, static_cast<double>(rows));
     const double estimated = std::max(1.0, m_estimate);
     observation.add("q_error", std::max(actual, estimated) / std::min(actual, estimated));
+  }
+  // The two-phase read decision travels with the cardinality observation: it is
+  // the other half of "what did this operator actually do".
+  if (m_deferred_recorded) {
+    Opt_trace_object deferred(&thd->opt_trace, "rapid_late_materialization");
+    const double observed = m_deferred_input_rows == 0 ? 0.0
+                                                       : static_cast<double>(m_deferred_kept_rows) /
+                                                             static_cast<double>(m_deferred_input_rows);
+    const double break_even =
+        m_deferred_bytes_per_row == 0
+            ? 0.5
+            : static_cast<double>(m_deferred_bytes_per_row) /
+                  (static_cast<double>(m_deferred_bytes_per_row) + static_cast<double>(kLateSecondPassCost));
+    deferred.add("enabled", m_deferred_enabled)
+        .add("decided", m_deferred_decided)
+        .add("deferred_bytes_per_row", static_cast<ulonglong>(m_deferred_bytes_per_row))
+        .add("dictionary_columns", static_cast<ulonglong>(m_deferred_dictionary_columns))
+        .add("input_rows", static_cast<ulonglong>(m_deferred_input_rows))
+        .add("kept_rows", static_cast<ulonglong>(m_deferred_kept_rows))
+        .add("observed_selectivity", observed)
+        .add("break_even_selectivity", break_even);
   }
 }
 
@@ -1016,7 +1058,7 @@ bool VectorizedFilterIterator::CollectConditionFields() {
     Field *field = down_cast<Item_field *>(item)->field;
     if (field != nullptr &&
         std::find(m_condition_fields.begin(), m_condition_fields.end(), field) == m_condition_fields.end()) {
-      if (!Grow(m_condition_fields, m_condition_fields.size() + 1)) {
+      if (!ShannonBase::Utils::Grow(m_condition_fields, m_condition_fields.size() + 1)) {
         failed = true;
         return true;
       }
@@ -1086,7 +1128,7 @@ bool VectorizedFilterIterator::EvaluateDictionaryPredicateBatch(const std::pmr::
   auto *predicate = static_cast<Imcs::Simple_Predicate *>(m_dictionary_predicate.get());
   const auto mask = predicate->dictionary_mask(dictionary);
   m_selection.clear();
-  if (!Reserve(m_selection, rows)) {
+  if (!ShannonBase::Utils::Reserve(m_selection, rows)) {
     AllocationError("Rapid dictionary predicate selection allocation failed");
     return false;
   }
@@ -1238,7 +1280,7 @@ bool VectorizedFilterIterator::EvaluateSimplePredicateBatch(const std::pmr::vect
   if (!chunk.valid() || rows > chunk.size()) return false;
 
   m_selection.clear();
-  if (!Reserve(m_selection, rows) || !Reserve(m_simd_selection, rows)) {
+  if (!ShannonBase::Utils::Reserve(m_selection, rows) || !ShannonBase::Utils::Reserve(m_simd_selection, rows)) {
     AllocationError("Rapid filter selection allocation failed");
     return false;
   }
@@ -1293,14 +1335,14 @@ bool VectorizedFilterIterator::EvaluateSimplePredicateBatch(const std::pmr::vect
     const auto *data = reinterpret_cast<const int32_t *>(chunk.data_fast(0));
     Kernels::FilterCompareInt32(data, chunk.get_null_mask()->data, rows,
                                 static_cast<int32_t>(m_simple_predicate.integer_constant), op, m_simd_selection);
-    if (!Reserve(m_selection, m_simd_selection.size())) return false;
+    if (!ShannonBase::Utils::Reserve(m_selection, m_simd_selection.size())) return false;
     for (size_t row : m_simd_selection) m_selection.push_back(static_cast<uint32_t>(row));
   } else if (m_simple_predicate.field->type() == MYSQL_TYPE_LONGLONG && chunk.width() == sizeof(int64_t)) {
     m_simd_selection.clear();
     const auto *data = reinterpret_cast<const int64_t *>(chunk.data_fast(0));
     Kernels::FilterCompareInt64(data, chunk.get_null_mask()->data, rows,
                                 static_cast<int64_t>(m_simple_predicate.integer_constant), op, m_simd_selection);
-    if (!Reserve(m_selection, m_simd_selection.size())) return false;
+    if (!ShannonBase::Utils::Reserve(m_selection, m_simd_selection.size())) return false;
     for (size_t row : m_simd_selection) m_selection.push_back(static_cast<uint32_t>(row));
   } else {
     return false;
@@ -1398,6 +1440,14 @@ bool VectorizedFilterIterator::Init() {
   m_lookahead_nulls.clear();
   m_simd_selection.clear();
   m_stats = VectorizedOperatorStats{};
+  // A re-Init starts a new execution; the two-phase decision must not leak in
+  // from the previous one.
+  m_late_input_rows = 0;
+  m_late_kept_rows = 0;
+  m_late_width = 0;
+  m_late_dictionary_columns = 0;
+  m_late_decided = false;
+  m_late_disabled = false;
 
   if (m_source->Init()) return true;
   m_batch_source = dynamic_cast<BatchReadable *>(m_source.get());
@@ -1438,7 +1488,7 @@ int VectorizedFilterIterator::Read() {
       field->set_notnull();
       auto dictionary = Dictionary(field);
       if (dictionary) {
-        if (!Reserve(m_condition_decode, field->pack_length()))
+        if (!ShannonBase::Utils::Reserve(m_condition_decode, field->pack_length()))
           return AllocationError("Rapid filter replay decode allocation failed");
         m_condition_decode.resize(field->pack_length());
         uint32_t code;
@@ -1487,7 +1537,7 @@ void VectorizedFilterIterator::UnlockRow() {
 
 bool VectorizedFilterIterator::BuildConditionChunkMap(const std::pmr::vector<ColumnChunk> &chunks) {
   m_condition_chunk_map.clear();
-  if (!Reserve(m_condition_chunk_map, m_condition_fields.size())) {
+  if (!ShannonBase::Utils::Reserve(m_condition_chunk_map, m_condition_fields.size())) {
     AllocationError("Rapid filter condition map allocation failed");
     return false;
   }
@@ -1509,9 +1559,9 @@ bool VectorizedFilterIterator::BuildConditionChunkMap(const std::pmr::vector<Col
       m_condition_chunk_map.push_back(found);
       continue;
     }
-    if (Utils::IsOffPageField(field)) return false;
+    if (Utils::Util::is_off_page(field)) return false;
     if (Utils::Util::is_string(field->type()) && Dictionary(field)) {
-      if (!Reserve(m_condition_decode, field->pack_length())) {
+      if (!ShannonBase::Utils::Reserve(m_condition_decode, field->pack_length())) {
         AllocationError("Rapid filter dictionary decode allocation failed");
         return false;
       }
@@ -1563,7 +1613,8 @@ bool VectorizedFilterIterator::DrainLookahead(std::pmr::vector<ColumnChunk> &col
                                               size_t *rows_read) {
   if (rows_read == nullptr || m_lookahead_count == 0) return false;
   const size_t count = std::min(capacity, m_lookahead_count);
-  if (col_chunks.size() != m_lookahead_chunks.size() || !Reserve(m_batch_nulls, count)) return false;
+  if (col_chunks.size() != m_lookahead_chunks.size() || !ShannonBase::Utils::Reserve(m_batch_nulls, count))
+    return false;
   for (size_t col = 0; col < col_chunks.size(); ++col) {
     if (!col_chunks[col].valid()) continue;
     const ColumnChunk &source = m_lookahead_chunks[col];
@@ -1573,7 +1624,7 @@ bool VectorizedFilterIterator::DrainLookahead(std::pmr::vector<ColumnChunk> &col
       if (!source.nullable_fast(m_lookahead_start + row)) m_stats.bytes_copied += source.width();
     }
   }
-  if (!Reserve(m_batch_nulls, count)) return false;
+  if (!ShannonBase::Utils::Reserve(m_batch_nulls, count)) return false;
   m_batch_nulls.assign(m_lookahead_nulls.begin() + m_lookahead_start,
                        m_lookahead_nulls.begin() + m_lookahead_start + count);
   m_lookahead_start += count;
@@ -1625,7 +1676,7 @@ int VectorizedFilterIterator::ReadBatch(std::pmr::vector<ColumnChunk> &chunks, s
   const int result = ReadSelectedBatch(chunks, capacity, rows, selection);
   if (result != 0 && result != HA_ERR_END_OF_FILE) return result;
   if (!selection.empty()) {
-    if (!Reserve(m_selection, selection.size())) return 1;
+    if (!ShannonBase::Utils::Reserve(m_selection, selection.size())) return 1;
     m_selection.assign(selection.begin(), selection.end());
     for (auto &chunk : chunks) {
       if (!chunk.valid()) continue;
@@ -1643,6 +1694,41 @@ int VectorizedFilterIterator::ReadSelectedBatch(std::pmr::vector<ColumnChunk> &c
   if (result != 0 && result != HA_ERR_END_OF_FILE && !thd()->is_error() && !thd()->killed)
     AllocationError("Rapid filter could not preserve its batch input or predicate");
   return result;
+}
+
+namespace {
+// Rows to observe before deciding whether the two-phase read pays off at all.
+// The size of the columns the first pass skips is measured over this sample and
+// turned into a break-even survival rate in ReadSelectedBatchImpl().
+constexpr size_t kLateDecisionRows = 8192;
+}  // namespace
+
+bool VectorizedFilterIterator::HasDeferredColumn(const std::pmr::vector<ColumnChunk> &chunks) const {
+  for (const auto &chunk : chunks) {
+    Field *field = chunk.source_field();
+    if (field == nullptr) continue;
+    if (std::find(m_condition_fields.begin(), m_condition_fields.end(), field) != m_condition_fields.end()) continue;
+    return true;
+  }
+  return false;
+}
+
+size_t VectorizedFilterIterator::DeferredBytesPerRow(const std::pmr::vector<ColumnChunk> &chunks) {
+  size_t bytes = 0;
+  m_late_dictionary_columns = 0;
+  for (const auto &chunk : chunks) {
+    if (!chunk.valid()) continue;
+    Field *field = chunk.source_field();
+    if (field == nullptr) continue;
+    if (std::find(m_condition_fields.begin(), m_condition_fields.end(), field) != m_condition_fields.end()) continue;
+    // Walk what the scan actually moves, not what the column declares. A
+    // dictionary-encoded column arrives as a 4-byte code, so deferring it saves
+    // the code instead of the value.
+    bytes += chunk.width();
+    if (chunk.width() == sizeof(uint32_t) && m_batch_source != nullptr && m_batch_source->Dictionary(field) != nullptr)
+      ++m_late_dictionary_columns;
+  }
+  return bytes;
 }
 
 int VectorizedFilterIterator::ReadSelectedBatchImpl(std::pmr::vector<ColumnChunk> &col_chunks, size_t capacity,
@@ -1665,7 +1751,9 @@ int VectorizedFilterIterator::ReadSelectedBatchImpl(std::pmr::vector<ColumnChunk
   m_batch_nulls.clear();
   m_null_tables.clear();
 
-  if (!Reserve(m_null_tables, std::min<size_t>(64, col_chunks.size())) || !Reserve(m_batch_nulls, capacity)) return 1;
+  if (!ShannonBase::Utils::Reserve(m_null_tables, std::min<size_t>(64, col_chunks.size())) ||
+      !ShannonBase::Utils::Reserve(m_batch_nulls, capacity))
+    return 1;
 
   for (const auto &chunk : col_chunks) {
     if (!chunk.valid()) continue;
@@ -1694,11 +1782,10 @@ int VectorizedFilterIterator::ReadSelectedBatchImpl(std::pmr::vector<ColumnChunk
     for (ColumnChunk &chunk : col_chunks) chunk.clear();
     size_t input_rows = 0;
     auto *scan = dynamic_cast<VectorizedTableScanIterator *>(m_batch_source);
-    bool late = scan && scan->SupportsLateMaterialization() &&
-                std::any_of(col_chunks.begin(), col_chunks.end(), [&](const auto &chunk) {
-                  return chunk.valid() && std::find(m_condition_fields.begin(), m_condition_fields.end(),
-                                                    chunk.source_field()) == m_condition_fields.end();
-                });
+    // Two-phase only pays when the predicate rejects most rows and the deferred
+    // columns are wide enough to pay for a second pass. The scan cannot see
+    // either, so the filter decides here rather than in SupportsLateMaterialization().
+    bool late = scan && !m_late_disabled && scan->SupportsLateMaterialization() && HasDeferredColumn(col_chunks);
     m_input_selection.clear();
     int result = late ? scan->ReadPredicateBatch(col_chunks, capacity, input_rows, m_condition_fields)
                       : m_batch_source->ReadSelectedBatch(col_chunks, capacity, input_rows, m_input_selection);
@@ -1731,7 +1818,7 @@ int VectorizedFilterIterator::ReadSelectedBatchImpl(std::pmr::vector<ColumnChunk
     if (!used_vector_predicate) used_vector_predicate = EvaluateSimplePredicateBatch(col_chunks, input_rows);
     if (!used_vector_predicate && m_expression.Evaluate(col_chunks, input_rows, &m_input_selection)) {
       m_selection.clear();
-      if (!Reserve(m_selection, input_rows)) return 1;
+      if (!ShannonBase::Utils::Reserve(m_selection, input_rows)) return 1;
       for (size_t row = 0; row < input_rows; ++row)
         if (m_expression.Matches(row)) m_selection.push_back(m_input_selection.empty() ? row : m_input_selection[row]);
       used_vector_predicate = true;
@@ -1743,7 +1830,7 @@ int VectorizedFilterIterator::ReadSelectedBatchImpl(std::pmr::vector<ColumnChunk
       RAPID_COUNT(query_scalar_expression_rows_total, input_rows);
       m_stats.scalar_fallback_rows += input_rows;
       m_selection.clear();
-      if (!Reserve(m_selection, input_rows)) return 1;
+      if (!ShannonBase::Utils::Reserve(m_selection, input_rows)) return 1;
       for (size_t logical = 0; logical < input_rows; ++logical) {
         const size_t row = m_input_selection.empty() ? logical : m_input_selection[logical];
         if (MaterializeConditionRow(col_chunks, row)) return 1;
@@ -1753,9 +1840,37 @@ int VectorizedFilterIterator::ReadSelectedBatchImpl(std::pmr::vector<ColumnChunk
       }
     }
 
+    if (late) {
+      // The dense boundary below copies every surviving row's every column, so
+      // a high survival rate makes the second pass a net loss. Deferring W bytes
+      // per row saves W*(input-kept) and costs (W + cost) per kept row, so the
+      // break-even survival rate is W / (W + cost): a 400-byte VARCHAR tolerates
+      // a rate a 16-byte column cannot.
+      // Decide once the sample is wide enough, then hold it: a skewed tail must
+      // not flip the plan back and forth for the rest of the statement.
+      if (m_late_width == 0) m_late_width = DeferredBytesPerRow(col_chunks);
+      m_late_input_rows += input_rows;
+      m_late_kept_rows += m_selection.size();
+      if (!m_late_decided && m_late_input_rows >= kLateDecisionRows) {
+        m_late_decided = true;
+        if (m_late_width == 0) {
+          // Nothing measurable was deferred (every projected column was a
+          // dictionary code). Keep the conservative rule rather than decide on
+          // a width of zero.
+          m_late_disabled = m_late_kept_rows * 2 >= m_late_input_rows;
+        } else {
+          const uint64_t saved = static_cast<uint64_t>(m_late_width) * (m_late_input_rows - m_late_kept_rows);
+          const uint64_t extra = static_cast<uint64_t>(m_late_width + kLateSecondPassCost) * m_late_kept_rows;
+          m_late_disabled = extra >= saved;
+        }
+      }
+      m_cardinality.RecordDeferredRead(m_late_width, m_late_input_rows, m_late_kept_rows, m_late_decided,
+                                       !m_late_disabled, m_late_dictionary_columns);
+    }
+
     if (!m_selection.empty()) {
       if (late && scan->CompleteProjection(col_chunks, m_selection)) return 1;
-      if (!Reserve(selection, m_selection.size())) return 1;
+      if (!ShannonBase::Utils::Reserve(selection, m_selection.size())) return 1;
       selection.assign(m_selection.begin(), m_selection.end());
       for (uint32_t physical : m_selection) {
         const size_t logical = m_input_selection.empty()
@@ -1793,7 +1908,8 @@ bool PushbackBatchTailShared(const std::pmr::vector<ColumnChunk> &chunks, size_t
     const size_t pending = *lookahead_count;
     if (tail > std::numeric_limits<size_t>::max() - pending || lookahead_chunks->size() != chunks.size()) return true;
     std::pmr::vector<ColumnChunk> merged(lookahead_chunks->get_allocator());
-    if (!Reserve(merged, chunks.size())) return AllocationError("Rapid lookahead merged descriptors allocation failed");
+    if (!ShannonBase::Utils::Reserve(merged, chunks.size()))
+      return AllocationError("Rapid lookahead merged descriptors allocation failed");
     size_t copied = 0;
     for (size_t col = 0; col < chunks.size(); ++col) {
       const ColumnChunk &source = chunks[col];
@@ -1835,7 +1951,7 @@ bool PushbackBatchTailShared(const std::pmr::vector<ColumnChunk> &chunks, size_t
 
   if (rebuild) {
     lookahead_chunks->clear();
-    if (!Reserve(*lookahead_chunks, chunks.size()))
+    if (!ShannonBase::Utils::Reserve(*lookahead_chunks, chunks.size()))
       return AllocationError("Rapid lookahead descriptors allocation failed");
     // Mirror the source width, not Util::normalized_length(): a chunk may hold
     // full MySQL record images (see ColumnChunk's explicit-width constructor),
@@ -1870,7 +1986,7 @@ bool VectorizedFilterIterator::PushbackBatchTail(const std::pmr::vector<ColumnCh
   if (from_row >= total_rows) return false;
   if (total_rows > m_batch_nulls.size()) return true;
   std::pmr::vector<uint64_t> flags(&m_memory);
-  if (!Reserve(flags, total_rows - from_row + m_lookahead_count))
+  if (!ShannonBase::Utils::Reserve(flags, total_rows - from_row + m_lookahead_count))
     return AllocationError("Rapid filter lookahead flags allocation failed");
   flags.insert(flags.end(), m_batch_nulls.begin() + from_row, m_batch_nulls.begin() + total_rows);
   flags.insert(flags.end(), m_lookahead_nulls.begin() + m_lookahead_start,

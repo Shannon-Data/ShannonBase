@@ -243,7 +243,7 @@ static bool HasVarlenReadColumn(const Prealloced_array<TABLE *, 4> &tables) {
     for (uint i = 0; i < table->s->fields; ++i) {
       Field *field = table->field[i];
       if (field == nullptr || field->is_flag_set(NOT_SECONDARY_FLAG)) continue;
-      if (bitmap_is_set(table->read_set, i) && ShannonBase::Utils::IsOffPageField(field)) return true;
+      if (bitmap_is_set(table->read_set, i) && ShannonBase::Utils::Util::is_off_page(field)) return true;
     }
   }
   return false;

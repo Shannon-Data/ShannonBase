@@ -2909,7 +2909,8 @@ std::unique_ptr<Imcs::Predicate> Optimizer::convert_like_to_predicate(const THD 
   if (!field_item->field) return nullptr;
 
   Field *field = field_item->field;
-  if (!field->table || !ShannonBase::Utils::Util::is_string(field->type()) || ShannonBase::Utils::IsOffPageField(field))
+  if (!field->table || !ShannonBase::Utils::Util::is_string(field->type()) ||
+      ShannonBase::Utils::Util::is_off_page(field))
     return nullptr;
   if (field->real_type() == MYSQL_TYPE_ENUM || field->real_type() == MYSQL_TYPE_SET) return nullptr;
   const CHARSET_INFO *charset = like_func->compare_collation();
@@ -3045,7 +3046,7 @@ bool Optimizer::decode_key_value(const uchar *key_ptr, const Field *field, Imcs:
     return true;
   }
 
-  if (ShannonBase::Utils::IsOffPageField(field)) {
+  if (ShannonBase::Utils::Util::is_off_page(field)) {
     // Same handler key-image layout as VARCHAR below -- 2 length bytes then
     // the (prefix-truncated) payload -- but a Field_blob must never be pointed
     // at it: val_str() reads a length prefix *and then a pointer* out of the

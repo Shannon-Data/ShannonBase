@@ -1842,7 +1842,7 @@ double ProjectedJoinWidth(AccessPath *input, bool *numeric = nullptr) {
           if (!bitmap_is_set(table->read_set, i)) continue;
           const Field *field = table->field[i];
           if (numeric &&
-              (ShannonBase::Utils::Util::is_string(field->type()) || ShannonBase::Utils::IsOffPageField(field)))
+              (ShannonBase::Utils::Util::is_string(field->type()) || ShannonBase::Utils::Util::is_off_page(field)))
             *numeric = false;
           width += std::max(field->pack_length(), ShannonBase::Utils::Util::normalized_length(field));
           width += 0.125;  // ColumnChunk null bitmap, including NOT NULL fields.
