@@ -63,19 +63,10 @@ namespace Imcs {
 namespace fs = std::filesystem;
 
 namespace {
-template <typename T>
-void append_pod(std::string &out, const T &v) {
-  out.append(reinterpret_cast<const char *>(&v), sizeof(T));
-}
+using Utils::append_pod;
+using Utils::read_pod;
+using Utils::write_pod;
 
-template <typename T>
-void write_pod(std::ostream &out, const T &v) {
-  out.write(reinterpret_cast<const char *>(&v), sizeof(v));
-}
-template <typename T>
-bool read_pod(std::istream &in, T &v) {
-  return static_cast<bool>(in.read(reinterpret_cast<char *>(&v), sizeof(v)));
-}
 void append_str(std::string &out, const std::string &s) {
   append_pod<uint32_t>(out, static_cast<uint32_t>(s.size()));
   out.append(s.data(), s.size());

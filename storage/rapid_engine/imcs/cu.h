@@ -443,7 +443,7 @@ class CU : public MemoryObject {
 
   /** True for types that benefit from VarlenDataPool overflow. */
   inline bool needs_varlen_pool() const {
-    if (ShannonBase::Utils::IsOffPageType(m_header.field_desc.type)) return true;
+    if (ShannonBase::Utils::Util::is_off_page(m_header.field_desc.type)) return true;
     // BIT(N) with N > 64 does not fit an inline slot, but only take the pool
     // when the slot can hold a complete VarlenReference.
     return m_header.field_desc.type == MYSQL_TYPE_BIT &&
@@ -451,7 +451,7 @@ class CU : public MemoryObject {
   }
 
   /** Types that must NEVER go through dictionary encoding (blob-like, unique values). */
-  inline bool is_blob_like() const { return ShannonBase::Utils::IsOffPageType(m_header.field_desc.type); }
+  inline bool is_blob_like() const { return ShannonBase::Utils::Util::is_off_page(m_header.field_desc.type); }
 
   /**
    * Publish one fully-formed slot image into the live CU slot in a single
@@ -520,15 +520,6 @@ class CU : public MemoryObject {
    * Default: LZ4 (best latency; ZSTD as fallback for high-compression mode).
    */
   Compress::CompressAlgorithm *select_compressor(CU_CompressAlgo *algo_out = nullptr) const;
-
-  template <typename T>
-  static void write_pod(std::ostream &out, const T &v) {
-    out.write(reinterpret_cast<const char *>(&v), sizeof(T));
-  }
-  template <typename T>
-  static bool read_pod(std::istream &in, T &v) {
-    return static_cast<bool>(in.read(reinterpret_cast<char *>(&v), sizeof(T)));
-  }
 
   const char *m_magic = "SHANNON_CU";
   CU_header m_header;

@@ -32,6 +32,7 @@
 #include "storage/rapid_engine/include/rapid_const.h"
 #include "storage/rapid_engine/monitor/rapid_monitor.h"
 #include "storage/rapid_engine/resource_management/io_scheduler.h"
+#include "storage/rapid_engine/utils/utils.h"
 
 namespace ShannonBase {
 namespace Executor {
@@ -59,7 +60,7 @@ bool VectorizedMaterializeIterator::CanVectorize(const AccessPath *path) {
     const Field *field = table->field[i];
     // Temp-table strings have no immutable IMCS dictionary. Preserve the SQL
     // path until their encoding has an explicitly budgeted lifetime.
-    if (Utils::IsOffPageField(field) || Utils::Util::is_string(field->type()) ||
+    if (Utils::Util::is_off_page(field) || Utils::Util::is_string(field->type()) ||
         Utils::Util::normalized_length(field) != field->pack_length())
       return false;
   }
@@ -98,7 +99,7 @@ bool VectorizedMaterializeIterator::WriteBlock() {
     };
 
     std::shared_ptr<Owner> owner;
-    if (!TryAllocation(
+    if (!ShannonBase::Utils::TryAllocation(
             [&] { owner = std::allocate_shared<Owner>(std::pmr::polymorphic_allocator<Owner>(&m_memory), &m_memory); }))
       return Error("Rapid materialization spool descriptor allocation failed");
 
@@ -191,11 +192,11 @@ bool VectorizedMaterializeIterator::InitImpl() {
   // Spool IO reuses this buffer, so replay never has to allocate.
   const auto ensure_encoded = [&](size_t rows) {
     const size_t bytes = rows * max_width;
-    if (!Reserve(m_encoded, bytes)) return false;
+    if (!ShannonBase::Utils::Reserve(m_encoded, bytes)) return false;
     return true;
   };
   if (!ensure_encoded(capacity)) return Error("Rapid materialization spool buffer allocation failed");
-  if (!Reserve(m_columns, m_table->s->fields))
+  if (!ShannonBase::Utils::Reserve(m_columns, m_table->s->fields))
     return Error("Rapid materialization column descriptors allocation failed");
 
   for (uint i = 0; i < m_table->s->fields; ++i) {
@@ -207,7 +208,7 @@ bool VectorizedMaterializeIterator::InitImpl() {
   auto *batch = dynamic_cast<BatchReadable *>(m_source->real_iterator());
   if (batch != nullptr && !batch->SupportsBatchRead()) batch = nullptr;
   if (batch != nullptr) {
-    if (!Reserve(m_input, m_table->s->fields))
+    if (!ShannonBase::Utils::Reserve(m_input, m_table->s->fields))
       return Error("Rapid materialization input descriptors allocation failed");
 
     for (uint i = 0; i < m_table->s->fields; ++i) {
@@ -404,5 +405,45 @@ std::unique_ptr<Morsel::ParallelSource> VectorizedMaterializeIterator::CreatePar
   if (m_rows != m_total) return {};
   return std::make_unique<Morsel::MaterializedSource>(memory, m_columns, m_total, fields);
 }
+namespace Morsel {
+bool MaterializedSource::ExecuteImpl(THD *, ResMgmt::BoundedMemoryResource *memory, const std::atomic<bool> &cancelled,
+                                     const Consumer &consume) {
+  constexpr size_t capacity = kBatchRows;
+  // A chunk per requested field, bound to the resident column holding it. A
+  // field with no resident column means the caller wants something this block
+  // does not own; refuse rather than emit a partial row.
+  std::pmr::vector<ColumnChunk> chunks(memory);
+  std::pmr::vector<const ColumnChunk *> columns(memory);
+  std::pmr::vector<uint32_t> selection(memory);
+  std::pmr::vector<uint64_t> ordinals(memory);
+  if (!ShannonBase::Utils::Reserve(chunks, m_fields.size()) || !ShannonBase::Utils::Reserve(columns, m_fields.size()) ||
+      !ShannonBase::Utils::Reserve(ordinals, capacity))
+    return true;
+  for (Field *field : m_fields) {
+    const ColumnChunk *column = Find(field);
+    if (column == nullptr) return true;
+    chunks.emplace_back(field, capacity, memory);
+    if (chunks.back().failed() || chunks.back().width() != column->width()) return true;
+    columns.push_back(column);
+  }
+
+  Task parallel;
+  while (!cancelled.load(std::memory_order_acquire) && m_queue.Claim(&parallel)) {
+    for (size_t offset = 0; offset < parallel.count; offset += capacity) {
+      if (cancelled.load(std::memory_order_acquire)) return false;
+      for (auto &chunk : chunks) chunk.clear();
+      ordinals.clear();
+      const size_t begin = parallel.begin + offset;
+      const size_t count = std::min(capacity, parallel.count - offset);
+      for (size_t col = 0; col < chunks.size(); ++col)
+        if (!chunks[col].append_range_from(*columns[col], begin, count)) return true;
+      for (size_t i = 0; i < count; ++i) ordinals.push_back(begin + i);
+      if (consume(chunks, count, selection, ordinals)) return true;
+    }
+  }
+  return false;
+}
+}  // namespace Morsel
+
 }  // namespace Executor
 }  // namespace ShannonBase

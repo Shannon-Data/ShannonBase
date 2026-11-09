@@ -186,11 +186,11 @@ bool VectorizedWindowIterator::ArgColumn::Reserve(size_t n) {
   switch (kind) {
     case ValueKind::kInt:
     case ValueKind::kUint:
-      return Grow(ints, n);
+      return ShannonBase::Utils::Grow(ints, n);
     case ValueKind::kReal:
-      return Grow(reals, n);
+      return ShannonBase::Utils::Grow(reals, n);
     case ValueKind::kDecimal:
-      return Grow(decimals, n);
+      return ShannonBase::Utils::Grow(decimals, n);
     default:
       return true;
   }
@@ -465,7 +465,7 @@ bool VectorizedWindowIterator::SetupPlan() {
     if (func.should_copy(CFT_WF)) ++functions;
   }
 
-  if (!Reserve(m_functions, functions) || !Reserve(m_arg_columns, functions))
+  if (!ShannonBase::Utils::Reserve(m_functions, functions) || !ShannonBase::Utils::Reserve(m_arg_columns, functions))
     return WindowAllocationError("Rapid window plan descriptors allocation failed");
 
   for (const Func_ptr &func : *m_temp_table_param->items_to_copy) {
@@ -597,7 +597,7 @@ bool VectorizedWindowIterator::InitImpl() {
   m_eof = false;
   m_done = false;
   m_carry_valid = false;
-  if (!Reserve(m_carry_record, m_record_length))
+  if (!ShannonBase::Utils::Reserve(m_carry_record, m_record_length))
     return WindowAllocationError("Rapid window carry record allocation failed");
   m_carry_record.assign(m_record_length, 0);
   m_new_peer.reset();
@@ -680,7 +680,7 @@ bool VectorizedWindowIterator::AppendRecord() {
   const bool over_budget = (m_mem_rows + 1) * m_record_length > m_buffer_memory_limit;
   if (m_spill_rows > 0 || (over_budget && m_mem_rows > 0)) return SpillRecord(record);
 
-  if (!Grow(m_records, m_records.size() + m_record_length))
+  if (!ShannonBase::Utils::Grow(m_records, m_records.size() + m_record_length))
     return WindowAllocationError("Rapid window record buffer allocation failed");
   m_records.insert(m_records.end(), record, record + m_record_length);
   ++m_mem_rows;
@@ -1089,10 +1089,11 @@ bool VectorizedWindowIterator::Compute() {
   for (WindowFn &fn : m_functions) {
     if (!fn.framing) continue;
     const size_t required = fn.res_null.size() + results;
-    if (!Grow(fn.res_null, required) ||
-        ((fn.result_kind == ValueKind::kInt || fn.result_kind == ValueKind::kUint) && !Grow(fn.res_int, required)) ||
-        (fn.result_kind == ValueKind::kReal && !Grow(fn.res_real, required)) ||
-        (fn.result_kind == ValueKind::kDecimal && !Grow(fn.res_dec, required)))
+    if (!ShannonBase::Utils::Grow(fn.res_null, required) ||
+        ((fn.result_kind == ValueKind::kInt || fn.result_kind == ValueKind::kUint) &&
+         !ShannonBase::Utils::Grow(fn.res_int, required)) ||
+        (fn.result_kind == ValueKind::kReal && !ShannonBase::Utils::Grow(fn.res_real, required)) ||
+        (fn.result_kind == ValueKind::kDecimal && !ShannonBase::Utils::Grow(fn.res_dec, required)))
       return WindowAllocationError("Rapid window result buffers allocation failed");
   }
 

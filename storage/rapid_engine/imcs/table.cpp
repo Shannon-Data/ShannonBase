@@ -153,8 +153,6 @@ size_t MaterializeFieldKeyImage(Field *field, const uchar *source, uchar *dst, u
   return written;
 }
 
-bool IsOffPageField(const Field *field) { return ShannonBase::Utils::IsOffPageField(field); }
-
 }  // namespace
 
 void Index::RapidKeyCodec::PatchDetachedOffPagePointers(const Rapid_load_context *context, const TableMetadata &meta,
@@ -166,7 +164,7 @@ void Index::RapidKeyCodec::PatchDetachedOffPagePointers(const Rapid_load_context
   for (const auto &[col_idx, payload] : *offpage) {
     if (col_idx >= meta.fields.size()) continue;
     Field *field = meta.fields[col_idx].source_fld;
-    if (field == nullptr || !IsOffPageField(field)) continue;
+    if (field == nullptr || !Utils::Util::is_off_page(field)) continue;
 
     // A NULL column carries no payload and its slot is not read.
     if (field->is_nullable() && (rowdata[meta.null_byte_offsets[col_idx]] & meta.null_bitmasks[col_idx]) != 0) continue;
@@ -720,7 +718,7 @@ RpdTable::RpdTable(const TABLE *&mysql_table, const TableConfig &config)
     fm.compression_level = Compress::COMPRESS_LEVEL::DEFAULT;
     fm.encoding = encoding;
     fm.charset = field->charset();
-    fm.dictionary = (is_string_type(field->type()) && !Utils::IsOffPageField(field) &&
+    fm.dictionary = (is_string_type(field->type()) && !Utils::Util::is_off_page(field) &&
                      field->real_type() != MYSQL_TYPE_ENUM && field->real_type() != MYSQL_TYPE_SET)
                         ? std::make_shared<Compress::Dictionary>(encoding)
                         : nullptr;

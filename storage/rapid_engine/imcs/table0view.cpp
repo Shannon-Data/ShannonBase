@@ -713,7 +713,7 @@ std::unique_ptr<Executor::Morsel::ParallelSource> RapidCursor::create_parallel_s
     ResMgmt::BoundedMemoryResource *memory, const std::pmr::vector<Field *> &fields, bool index_reverse) {
   if (!m_scan_context || m_scan_limit != HA_POS_ERROR || m_scan_offset != 0 || m_data_source->part_info) return {};
   for (Field *field : fields)
-    if (!field || field->table != m_data_source || Utils::IsOffPageField(field) ||
+    if (!field || field->table != m_data_source || Utils::Util::is_off_page(field) ||
         field->is_flag_set(NOT_SECONDARY_FLAG))
       return {};
 
@@ -1413,6 +1413,8 @@ size_t RapidCursor::scan_batch_internal(size_t batch_size, const std::vector<uin
     if (m_use_storage_index && !m_scan_predicates.empty()) {
       std::lock_guard<std::mutex> lock(m_predicate_mutex);
       if (imcu->can_skip_imcu(m_scan_predicates)) {
+        // The zone map proved this IMCU unsatisfiable: no row of it is read.
+        RAPID_COUNT(query_storage_index_skipped_imcus_total, 1);
         st.curr_imcu_idx++;
         st.curr_imcu_offset = 0;
         continue;

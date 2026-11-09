@@ -336,7 +336,7 @@ bool VectorizedTableScanIterator::ProcessStringField(Field *field, const Shannon
   }
 
   auto fld_idx = field->field_index();
-  if (Utils::IsOffPageField(field)) {
+  if (Utils::Util::is_off_page(field)) {
     Imcs::VarlenDataPool::VarlenReference ref{};
     std::memcpy(&ref, col_chunk.data(rowid), std::min(sizeof(ref), col_chunk.width()));
 
@@ -543,7 +543,7 @@ int VectorizedTableScanIterator::ReadNextBatch() {
 
 std::shared_ptr<Compress::Dictionary> VectorizedTableScanIterator::Dictionary(const Field *field) const {
   if (field == nullptr || field->table != table() || m_rpd_table == nullptr || !Utils::Util::is_string(field->type()) ||
-      Utils::IsOffPageField(field))
+      Utils::Util::is_off_page(field))
     return nullptr;
   const uint index = field->field_index();
   const auto &fields = m_rpd_table->meta().fields;

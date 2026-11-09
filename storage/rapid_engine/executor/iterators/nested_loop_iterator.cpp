@@ -25,6 +25,7 @@
 */
 #include "storage/rapid_engine/executor/iterators/nested_loop_iterator.h"
 #include "storage/rapid_engine/executor/iterators/materialize_iterator.h"
+#include "storage/rapid_engine/utils/utils.h"
 
 #include <utility>
 
@@ -61,7 +62,7 @@ bool VectorizedNestedLoopIterator::CanVectorize(AccessPath *path) {
         for (uint i = 0; i < table->s->fields; ++i) {
           if (!bitmap_is_set(table->read_set, i)) continue;
           Field *field = table->field[i];
-          if (!field || Utils::IsOffPageField(field) ||
+          if (!field || Utils::Util::is_off_page(field) ||
               (Utils::Util::normalized_length(field) != field->pack_length() && !RecordDictionary(field)))
             supported = false;
           // A four-byte CHAR/VARCHAR still holds SQL bytes, not a dictionary ID.
@@ -196,8 +197,9 @@ bool BatchNestedLoop::Init() {
   if (m_capacity == 0) return AllocationError("Rapid batch nested loop row exceeds its workspace");
 
   if (!Prepare(m_outer_tables, m_outer_chunks) || !Prepare(m_inner_tables, m_inner_chunks) ||
-      !Reserve(m_outer_nulls, m_capacity) || !Reserve(m_inner_nulls, m_capacity) ||
-      !Reserve(m_output_nulls, m_capacity) || !Reserve(m_decode, decode))
+      !ShannonBase::Utils::Reserve(m_outer_nulls, m_capacity) ||
+      !ShannonBase::Utils::Reserve(m_inner_nulls, m_capacity) ||
+      !ShannonBase::Utils::Reserve(m_output_nulls, m_capacity) || !ShannonBase::Utils::Reserve(m_decode, decode))
     return AllocationError("Rapid batch nested loop buffers allocation failed");
 
   m_decode.resize(decode);
@@ -254,7 +256,7 @@ int BatchNestedLoop::ReadBatchImpl(std::pmr::vector<ColumnChunk> &chunks, size_t
   // Bind by Field identity once per batch, not by scanning both input schemas
   // for every emitted row. Store indices so input-buffer growth is harmless.
   m_output_columns.clear();
-  if (!Reserve(m_output_columns, chunks.size()))
+  if (!ShannonBase::Utils::Reserve(m_output_columns, chunks.size()))
     return AllocationError("Rapid nested loop output mapping allocation failed");
   for (size_t target = 0; target < chunks.size(); ++target) {
     if (!chunks[target].valid()) continue;
@@ -333,7 +335,7 @@ bool BatchNestedLoop::Prepare(const pack_rows::TableCollection &tables, std::pmr
   chunks.clear();
   size_t count = 0;
   for (const auto &entry : tables.tables()) count += entry.table->s->fields;
-  if (!Reserve(chunks, count)) return false;
+  if (!ShannonBase::Utils::Reserve(chunks, count)) return false;
   for (const auto &entry : tables.tables())
     for (uint i = 0; i < entry.table->s->fields; ++i) {
       chunks.emplace_back(bitmap_is_set(entry.table->read_set, i) ? entry.table->field[i] : nullptr, m_capacity,
@@ -380,7 +382,7 @@ bool BatchNestedLoop::MaterializeInnerBlock() {
   m_inner_block.clear();
   m_inner_block_rows = 0;
   m_inner_block_bytes = 0;
-  if (!Reserve(m_inner_block, read.size())) return false;
+  if (!ShannonBase::Utils::Reserve(m_inner_block, read.size())) return false;
   for (const auto &chunk : read) {
     m_inner_block.emplace_back(chunk.valid() ? chunk.source_field() : nullptr, chunk.valid() ? capacity : 0, &m_memory);
     if (m_inner_block.back().failed()) return false;
@@ -584,7 +586,9 @@ class ParallelNestedLoop final : public Morsel::ParallelSource {
     std::pmr::vector<ColumnChunk> output(memory);
     std::pmr::vector<uint32_t> selection(memory);
     std::pmr::vector<uint64_t> ordinals(memory);
-    if (!Reserve(inner_chunks, m_inner_fields.size()) || !Reserve(output, m_output_fields.size())) return true;
+    if (!ShannonBase::Utils::Reserve(inner_chunks, m_inner_fields.size()) ||
+        !ShannonBase::Utils::Reserve(output, m_output_fields.size()))
+      return true;
     for (Field *field : m_inner_fields) {
       inner_chunks.emplace_back(field, capacity, memory);
       if (inner_chunks.back().failed()) return true;
@@ -593,7 +597,7 @@ class ParallelNestedLoop final : public Morsel::ParallelSource {
       output.emplace_back(field, capacity, memory);
       if (output.back().failed()) return true;
     }
-    if (!Reserve(ordinals, capacity)) return true;
+    if (!ShannonBase::Utils::Reserve(ordinals, capacity)) return true;
 
     bool failed = false;
     const auto flush = [&]() -> bool {
@@ -682,7 +686,7 @@ std::unique_ptr<Morsel::ParallelSource> BatchNestedLoop::CreateParallelSource(Re
 
   std::pmr::vector<Field *> outer_fields(memory), inner_fields(memory);
   std::pmr::vector<ParallelNestedLoop::OutputColumn> output_columns(memory);
-  if (!Reserve(output_columns, fields.size())) return {};
+  if (!ShannonBase::Utils::Reserve(output_columns, fields.size())) return {};
   for (Field *field : fields) {
     if (belongs_to(m_outer_tables, field)) {
       output_columns.push_back({output_columns.size(), outer_fields.size(), false});

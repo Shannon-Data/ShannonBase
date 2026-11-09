@@ -268,7 +268,7 @@ static uint64 estimate_table_pool_size(const TABLE *source, size_t rows_per_imcu
     if (!bitmap_is_set(source->read_set, idx) || field->is_flag_set(NOT_SECONDARY_FLAG)) continue;
 
     cu_slot_per_row += Utils::Util::normalized_length(field);
-    if (Utils::IsOffPageField(field))
+    if (Utils::Util::is_off_page(field))
       has_varlen = true;
     else
       innodb_fixed_per_row += field->pack_length();

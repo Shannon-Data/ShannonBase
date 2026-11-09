@@ -36,6 +36,7 @@
 #include "storage/rapid_engine/compress/dictionary/dictionary.h"
 #include "storage/rapid_engine/executor/iterators/record_iterator.h"
 #include "storage/rapid_engine/monitor/rapid_monitor.h"
+#include "storage/rapid_engine/utils/utils.h"
 
 namespace ShannonBase {
 namespace Executor {
@@ -46,7 +47,7 @@ bool SameRepresentation(Field *source, Field *target) {
          source->pack_length() == target->pack_length() && source->decimals() == target->decimals() &&
          source->field_length == target->field_length &&
          source->is_flag_set(UNSIGNED_FLAG) == target->is_flag_set(UNSIGNED_FLAG) &&
-         source->charset() == target->charset() && !Utils::IsOffPageField(source);
+         source->charset() == target->charset() && !Utils::Util::is_off_page(source);
 }
 }  // namespace
 
@@ -140,12 +141,12 @@ bool VectorizedStreamIterator::Init() {
     m_batch = nullptr;
     return false;
   };
-  if (!Reserve(m_input, m_input_fields.size())) return Error();
+  if (!ShannonBase::Utils::Reserve(m_input, m_input_fields.size())) return Error();
   for (Field *field : m_input_fields) {
     m_input.emplace_back(field, field ? 1 : 0, &m_memory);
     if (m_input.back().failed()) return Error();
   }
-  if (!Reserve(m_bindings, m_param->items_to_copy->size())) return Error();
+  if (!ShannonBase::Utils::Reserve(m_bindings, m_param->items_to_copy->size())) return Error();
   for (const Func_ptr &copy : *m_param->items_to_copy) {
     Field *target = copy.result_field();
     if (target == nullptr || !bitmap_is_set(m_table->read_set, target->field_index())) continue;

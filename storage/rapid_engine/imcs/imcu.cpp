@@ -1282,10 +1282,7 @@ constexpr uint16_t kImcuVersion = 1u;
 // its own tighter per-CU limits; this only guards the local allocation here.
 constexpr size_t kMaxImcuCuPayloadSize = 1u << 28;  // 256 MiB
 
-template <typename T>
-void write_pod(std::ostream &out, const T &v) {
-  out.write(reinterpret_cast<const char *>(&v), sizeof(T));
-}
+using Utils::write_pod;
 
 struct MemStreamBuf : std::streambuf {
   MemStreamBuf(const char *data, size_t size) {

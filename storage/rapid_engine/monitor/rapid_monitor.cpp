@@ -226,6 +226,8 @@ void collect_rapid_monitor_metrics(Metrics &metrics) {
       rapid_counters.query_late_predicate_rows_total.load(std::memory_order_relaxed);
   metrics.query_late_projection_cells_total =
       rapid_counters.query_late_projection_cells_total.load(std::memory_order_relaxed);
+  metrics.query_storage_index_skipped_imcus_total =
+      rapid_counters.query_storage_index_skipped_imcus_total.load(std::memory_order_relaxed);
   metrics.query_scalar_expression_rows_total =
       rapid_counters.query_scalar_expression_rows_total.load(std::memory_order_relaxed);
   metrics.query_vectorized_stream_batch_rows_total =
@@ -433,7 +435,9 @@ constexpr CounterRef kStatCounters[] = {
             RAPID_STAT("window_spill", query_vectorized_window_spill_rows_total) RAPID_STAT("bitpack_unpack", query_bitpacked_unpack_rows_total) RAPID_STAT(
                 "bitpack_predicate", query_bitpacked_predicate_rows_total) RAPID_STAT("bitpack_aggregate",
                                                                                       query_bitpacked_aggregate_rows_total)
-                RAPID_STAT("late_rows", query_late_predicate_rows_total) RAPID_STAT("gc_total_runs", gc_total_runs) RAPID_STAT(
+                RAPID_STAT("late_rows", query_late_predicate_rows_total)
+                    RAPID_STAT("si_skipped_imcus", query_storage_index_skipped_imcus_total)
+                        RAPID_STAT("gc_total_runs", gc_total_runs) RAPID_STAT(
                     "gc_total_purged_rows",
                     gc_total_purged_rows) RAPID_STAT("gc_total_purged_versions",
                                                      gc_total_purged_versions) RAPID_STAT("gc_last_run_scn",

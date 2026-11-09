@@ -453,7 +453,7 @@ int RowBuffer::copy_to_mysql_fields(const TABLE *to, const TableMetadata *meta) 
 
     source_fld->set_notnull();
     // Convert based on field type
-    if (Utils::Util::is_string(source_fld->type()) || Utils::IsOffPageField(source_fld)) {
+    if (Utils::Util::is_string(source_fld->type()) || Utils::Util::is_off_page(source_fld)) {
       if (source_fld->real_type() == MYSQL_TYPE_ENUM ||
           source_fld->real_type() == MYSQL_TYPE_SET) {  // Handle ENUM/SET type
         source_fld->pack(const_cast<uchar *>(source_fld->data_ptr()), col_value.data, source_fld->pack_length());

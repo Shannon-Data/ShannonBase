@@ -114,41 +114,7 @@ class MaterializedSource final : public ParallelSource, public ReplayableParalle
   }
 
   bool ExecuteImpl(THD *, ResMgmt::BoundedMemoryResource *memory, const std::atomic<bool> &cancelled,
-                   const Consumer &consume) override {
-    constexpr size_t capacity = kBatchRows;
-    // A chunk per requested field, bound to the resident column holding it. A
-    // field with no resident column means the caller wants something this block
-    // does not own; refuse rather than emit a partial row.
-    std::pmr::vector<ColumnChunk> chunks(memory);
-    std::pmr::vector<const ColumnChunk *> columns(memory);
-    std::pmr::vector<uint32_t> selection(memory);
-    std::pmr::vector<uint64_t> ordinals(memory);
-    if (!Reserve(chunks, m_fields.size()) || !Reserve(columns, m_fields.size()) || !Reserve(ordinals, capacity))
-      return true;
-    for (Field *field : m_fields) {
-      const ColumnChunk *column = Find(field);
-      if (column == nullptr) return true;
-      chunks.emplace_back(field, capacity, memory);
-      if (chunks.back().failed() || chunks.back().width() != column->width()) return true;
-      columns.push_back(column);
-    }
-
-    Task parallel;
-    while (!cancelled.load(std::memory_order_acquire) && m_queue.Claim(&parallel)) {
-      for (size_t offset = 0; offset < parallel.count; offset += capacity) {
-        if (cancelled.load(std::memory_order_acquire)) return false;
-        for (auto &chunk : chunks) chunk.clear();
-        ordinals.clear();
-        const size_t begin = parallel.begin + offset;
-        const size_t count = std::min(capacity, parallel.count - offset);
-        for (size_t col = 0; col < chunks.size(); ++col)
-          if (!chunks[col].append_range_from(*columns[col], begin, count)) return true;
-        for (size_t i = 0; i < count; ++i) ordinals.push_back(begin + i);
-        if (consume(chunks, count, selection, ordinals)) return true;
-      }
-    }
-    return false;
-  }
+                   const Consumer &consume) override;
 
  private:
   const ColumnChunk *Find(const Field *field) const {

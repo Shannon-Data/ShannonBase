@@ -25,6 +25,7 @@
 */
 #include "storage/rapid_engine/executor/iterators/limit_iterator.h"
 #include "sql/iterators/timing_iterator.h"
+#include "storage/rapid_engine/utils/utils.h"
 
 namespace ShannonBase {
 namespace Executor {
@@ -88,7 +89,7 @@ bool VectorizedLimitIterator::Init() {
     size_t columns = 0;
     for (const auto &entry : m_tables.tables()) columns += entry.table->s->fields;
 
-    if (!Reserve(m_discard, columns)) return Error();
+    if (!ShannonBase::Utils::Reserve(m_discard, columns)) return Error();
 
     for (const auto &entry : m_tables.tables()) {
       TABLE *table = entry.table;
@@ -159,7 +160,7 @@ bool VectorizedLimitIterator::CanVectorize(const Prealloced_array<TABLE *, 4> &t
     for (uint i = 0; i < table->s->fields; ++i) {
       if (!bitmap_is_set(table->read_set, i)) continue;
       Field *field = table->field[i];
-      if (Utils::IsOffPageField(field)) return false;
+      if (Utils::Util::is_off_page(field)) return false;
       if (!Utils::Util::is_string(field->type()) && Utils::Util::normalized_length(field) != field->pack_length())
         return false;
     }

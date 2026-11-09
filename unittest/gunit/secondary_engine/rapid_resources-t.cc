@@ -610,9 +610,9 @@ TEST(RapidResourcesTest, ExplicitAllocationDistinguishesBudgetAndUpstreamFailure
   EXPECT_EQ(0u, resource.used());
   EXPECT_EQ(0u, resource.peak());
   std::pmr::vector<char> buffer(&resource);
-  EXPECT_FALSE(Executor::Reserve(buffer, 17));
+  EXPECT_FALSE(Utils::Reserve(buffer, 17));
   EXPECT_EQ(AllocationFailure::kBudgetExhausted, resource.last_failure());
-  EXPECT_FALSE(Executor::Reserve(buffer, 8));
+  EXPECT_FALSE(Utils::Reserve(buffer, 8));
   EXPECT_EQ(AllocationFailure::kPoolExhausted, resource.last_failure());
 }
 
@@ -622,7 +622,7 @@ TEST(RapidResourcesTest, AppendGrowthIsAmortizedAndPreservesValues) {
   size_t reallocations = 0;
   for (size_t i = 0; i < 4096; ++i) {
     const size_t capacity = groups.capacity();
-    ASSERT_TRUE(Executor::Grow(groups, i + 1));
+    ASSERT_TRUE(Utils::Grow(groups, i + 1));
     reallocations += groups.capacity() != capacity;
     groups.push_back(i);
   }

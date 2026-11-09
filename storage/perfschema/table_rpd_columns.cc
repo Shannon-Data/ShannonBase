@@ -143,8 +143,7 @@ int table_rpd_columns::make_row(uint index [[maybe_unused]]) {
     m_row.colum_id = col.column_id;
     m_row.table_id = col.table_id;
     m_row.data_placement_index = col.data_placement_index;
-    memset(m_row.encoding, 0x0, NAME_LEN);
-    strncpy(m_row.encoding, col.encoding, sizeof(m_row.encoding) - 1);
+    snprintf(m_row.encoding, sizeof(m_row.encoding), "%s", col.encoding);
 
     // NDV and the dictionary size only exist once the data is resident in the
     // IMCS and keep moving as changes propagate, so they are read live rather
