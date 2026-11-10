@@ -23,6 +23,9 @@ def	mysql	agent_derive_queue	0	mysql	PRIMARY	1	task_id	A	#CARD#	NULL	NULL		BTREE
 def	mysql	agent_derive_queue	0	mysql	uk_task	1	kind	A	#CARD#	NULL	NULL		BTREE			YES	NULL
 def	mysql	agent_derive_queue	0	mysql	uk_task	2	target_table	A	#CARD#	NULL	NULL		BTREE			YES	NULL
 def	mysql	agent_derive_queue	0	mysql	uk_task	3	target_id	A	#CARD#	NULL	NULL		BTREE			YES	NULL
+def	mysql	agent_execution	1	mysql	idx_principal_created	1	principal_prefix	A	#CARD#	NULL	NULL		BTREE			YES	NULL
+def	mysql	agent_execution	1	mysql	idx_principal_created	2	created_at	A	#CARD#	NULL	NULL		BTREE			YES	NULL
+def	mysql	agent_execution	0	mysql	PRIMARY	1	execution_id	A	#CARD#	NULL	NULL		BTREE			YES	NULL
 def	mysql	agent_memory	1	mysql	ftx_content	1	content	NULL	#CARD#	NULL	NULL		FULLTEXT			YES	NULL
 def	mysql	agent_memory	1	mysql	idx_conv_id	1	conversation_id	A	#CARD#	NULL	NULL		BTREE			YES	NULL
 def	mysql	agent_memory	1	mysql	idx_conv_id	2	id	A	#CARD#	NULL	NULL		BTREE			YES	NULL

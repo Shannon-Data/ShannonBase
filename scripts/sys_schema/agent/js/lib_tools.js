@@ -1,14 +1,12 @@
 //@include lib_router.js
-/* Tool specs own their own registration.  Each specs file pulls in
- * lib_tool_registry.js itself, so the registry text lands in whichever
- * execution root expands first and the include dedup leaves the rest empty --
- * see run_genagentjsfile.cmake. */
+//@include lib_plan_guard.js
+//@include lib_result_guard.js
+// Tool specs own their own registration.
 //@include lib_tool_specs_core.js
 //@include lib_tool_specs_schema.js
 //@include lib_tool_specs_ml.js
 //@include lib_tool_specs_memory.js
-//@include lib_tool_specs_artifact.js
-
+//@include lib_trusted_tools.js
 var TABLE_FALLBACK = {
   'INNODB_LOCKS':       'performance_schema.data_locks',
   'INNODB_LOCK_WAITS':  'performance_schema.data_lock_waits',
@@ -19,15 +17,7 @@ var TABLE_FALLBACK = {
   'GLOBAL_VARIABLES':   'performance_schema.global_variables'
 };
 
-/* Transaction ownership helpers.
- *
- * There are two independent facts:
- *   1) Is the current MySQL connection inside a physical transaction?
- *   2) If yes, who owns its COMMIT/ROLLBACK boundary?
- *
- * mysql.agent_tx_lease answers only (2) for AGENT-owned transactions.
- * It MUST NOT be used as a proxy for (1), because callers may invoke
- * CALL sys.shannon_chat() after START TRANSACTION without an agent lease. */
+// Transaction ownership helpers.
 var TX_OWNER_NONE    = 'none';
 var TX_OWNER_CALLER  = 'caller';
 var TX_OWNER_AGENT   = 'agent';
@@ -53,43 +43,35 @@ function agent_tx_lease_owned(conv_id) {
       "AND session_conn_id = CONNECTION_ID() LIMIT 1"
     );
     return Array.isArray(rows) && rows.length > 0;
-  } catch (e) { return false; }
+  } catch (e) { return null; }
 }
 
-/* Detect the physical transaction on THIS connection.  Performance Schema
- * exposes an ACTIVE transaction immediately after START TRANSACTION/BEGIN,
- * including the important case where no InnoDB row has been touched yet.
- *
- * If the transaction instrument is disabled/unavailable we return
- * known=false.  begin_tx then fails closed rather than risking an implicit
- * commit of a caller-owned transaction. */
+// Detect the physical transaction on THIS connection.
 function get_session_tx_state() {
+  var native_state;
+  try { native_state = sys.transaction_state(); } catch (e) {}
+  if (native_state && native_state.known && !native_state.active && !native_state.multi_statement)
+    return { known: true, active: false, event_id: 0, source: 'kernel' };
   try {
     var inst = query_checked(
-      "SELECT ENABLED FROM performance_schema.setup_instruments " +
-      "WHERE NAME='transaction' LIMIT 1"
-    );
-    if (!Array.isArray(inst) || !inst.length ||
-        String(inst[0].ENABLED || '').toUpperCase() !== 'YES') {
-      return { known: false, active: false, access_mode: '', source: 'pfs_disabled' };
-    }
-
+      "SELECT COUNT(*) AS enabled FROM performance_schema.setup_consumers WHERE NAME IN" +
+      " ('global_instrumentation','thread_instrumentation','events_transactions_current') AND ENABLED='YES'");
+    var instrument = query_checked("SELECT ENABLED FROM performance_schema.setup_instruments WHERE NAME='transaction'");
+    if (!Array.isArray(inst) || !inst.length || Number(inst[0].enabled) !== 3 ||
+        !Array.isArray(instrument) || !instrument.length || instrument[0].ENABLED !== 'YES')
+      throw new Error('transaction_instrumentation_disabled');
     var rows = query_checked(
-      "SELECT et.STATE, et.ACCESS_MODE, et.EVENT_ID, et.AUTOCOMMIT " +
-      "FROM performance_schema.events_transactions_current et " +
-      "JOIN performance_schema.threads th ON th.THREAD_ID=et.THREAD_ID " +
-      "WHERE th.PROCESSLIST_ID=CONNECTION_ID() " +
-      "AND et.STATE='ACTIVE' AND et.AUTOCOMMIT='NO' LIMIT 1"
-    );
-    return {
-      known: true,
-      active: Array.isArray(rows) && rows.length > 0,
-      access_mode: (Array.isArray(rows) && rows.length) ? String(rows[0].ACCESS_MODE || '') : '',
-      event_id: (Array.isArray(rows) && rows.length) ? Number(rows[0].EVENT_ID || 0) : 0,
-      source: 'pfs'
-    };
+      "SELECT et.ACCESS_MODE,et.EVENT_ID FROM performance_schema.events_transactions_current et" +
+      " JOIN performance_schema.threads th ON th.THREAD_ID=et.THREAD_ID" +
+      " WHERE th.PROCESSLIST_ID=CONNECTION_ID() AND et.STATE='ACTIVE' AND et.AUTOCOMMIT='NO' LIMIT 1");
+    var active = Array.isArray(rows) && rows.length > 0;
+    return { known: true, active: !!active || !!(native_state && native_state.multi_statement),
+             event_id: active ? Number(rows[0].EVENT_ID || 0) : 0,
+             access_mode: active ? String(rows[0].ACCESS_MODE || '') : '', source: 'kernel+pfs' };
   } catch (e) {
-    return { known: false, active: false, access_mode: '', source: 'unavailable', error: String(e) };
+    return { known: !!(native_state && native_state.known),
+             active: !!(native_state && (native_state.active || native_state.multi_statement)),
+             event_id: 0, source: 'kernel', error: String(e) };
   }
 }
 
@@ -102,9 +84,10 @@ function get_agent_tx_event_marker() {
 
 function set_agent_tx_event_marker(event_id) {
   try {
-    if (event_id) sys.exec_sql("SET @_shannon_agent_tx_event_id=" + Number(event_id));
-    else sys.exec_sql("SET @_shannon_agent_tx_event_id=NULL");
-  } catch (e) {}
+    query_checked("SET @_shannon_agent_tx_event_id=" + (event_id ? Number(event_id) : 'NULL') +
+      ",@_shannon_agent_tx_conversation_id=" + (event_id ? "'" + esc(A.conversation_id) + "'" : 'NULL'));
+    return get_agent_tx_event_marker() === Number(event_id || 0);
+  } catch (e) { return false; }
 }
 
 function get_tx_context() {
@@ -121,8 +104,9 @@ function get_tx_context() {
                access_mode: physical.access_mode, event_id: 0, source: physical.source };
     }
 
-    /* Lease + exact Performance Schema EVENT_ID correlation prevents a
-     * stale lease from misclassifying a later caller-owned transaction. */
+    if (lease_owned === null)
+      return { active: true, owner: TX_OWNER_UNKNOWN, known: false, source: physical.source };
+
     if (lease_owned && agent_event_marker &&
         Number(physical.event_id) === Number(agent_event_marker)) {
       set_tx_active_for(A.conversation_id, true);
@@ -130,14 +114,15 @@ function get_tx_context() {
                access_mode: physical.access_mode, event_id: physical.event_id, source: physical.source };
     }
 
+    if (lease_owned && (!physical.event_id || !agent_event_marker))
+      return { active: true, owner: TX_OWNER_UNKNOWN, known: false, source: physical.source };
     if (lease_owned) clear_tx_lease(A.conversation_id);
     set_tx_active_for(A.conversation_id, false);
     return { active: true, owner: TX_OWNER_CALLER, known: true,
              access_mode: physical.access_mode, event_id: physical.event_id, source: physical.source };
   }
 
-  /* With P_S unavailable, only the same-invocation JS mirror can prove
-   * ownership. A persisted lease alone is not enough because it may be stale. */
+  // With P_S unavailable, only the same-invocation JS mirror can prove ownership.
   if (tx_active_for(A.conversation_id) && lease_owned) {
     return { active: true, owner: TX_OWNER_AGENT, known: false,
              access_mode: '', event_id: agent_event_marker, source: physical.source };
@@ -146,22 +131,18 @@ function get_tx_context() {
            access_mode: '', event_id: 0, source: physical.source };
 }
 
-/* Backward-compatible name.  From this patch onward "real" means physical
- * session transaction, not merely "there is an agent lease". */
-function is_real_tx_active() {
-  return get_tx_context().active;
-}
-
-function is_agent_tx_active() {
-  var ctx = get_tx_context();
-  return ctx.active && ctx.owner === TX_OWNER_AGENT;
+/* Audit must never change control flow. */
+function audit_tx_failure(op, target, err) {
+  try {
+    mem_log_audit('tx', op, String(target || ''), String(err).substring(0, 400), 0, 0, '');
+  } catch (e) {}
 }
 
 function begin_tx_lease(conv_id, plan_id, timeout_minutes) {
   timeout_minutes = timeout_minutes || 30;
 
   try {
-    sys.exec_sql(
+    query_checked(
       "INSERT INTO mysql.agent_tx_lease(conversation_id, session_conn_id, plan_id, expires_at) " +
       "VALUES ('" + esc(conv_id) + "', CONNECTION_ID(), '" + esc(plan_id || '') + "', " +
       "DATE_ADD(NOW(), INTERVAL " + timeout_minutes + " MINUTE)) " +
@@ -171,31 +152,62 @@ function begin_tx_lease(conv_id, plan_id, timeout_minutes) {
       "created_at      = IF(expires_at < NOW() OR session_conn_id = CONNECTION_ID(), NOW(), created_at), " +
       "expires_at      = IF(expires_at < NOW() OR session_conn_id = CONNECTION_ID(), VALUES(expires_at), expires_at)"
     );
-  } catch (e) {}
+  } catch (e) {
+    /* No lease was written, so none may be assumed. */
+    audit_tx_failure('begin_tx_lease_failed', conv_id, e);
+    return false;
+  }
 
   return agent_tx_lease_owned(conv_id);
 }
 
-/** Remove the lease row — only for THIS session (CONNECTION_ID). */
+/** Remove this session's lease row; false on failure, never throws. */
 function clear_tx_lease(conv_id) {
   try {
-    sys.exec_sql(
+    query_checked(
       "DELETE FROM mysql.agent_tx_lease " +
       "WHERE conversation_id='" + esc(conv_id) + "' " +
       "AND session_conn_id = CONNECTION_ID()"
     );
-  } catch (e) {}
+    return true;
+  } catch (e) {
+    audit_tx_failure('clear_tx_lease_failed', conv_id, e);
+    return false;
+  }
 }
 
-/* Is the whole process list visible to this session?
- *
- * performance_schema.threads shows an account without PROCESS only its own
- * threads, so "this connection id is not in threads" is not evidence that
- * the connection is gone -- for an unprivileged caller it is true of every
- * connection but its own.  Comparing what we can see against
- * Threads_connected turns that into a fact that can be acted on.  Memoised
- * on A, which is rebuilt for every CALL (see lib_state.js), so this is one
- * extra query per invocation and not per reap. */
+/* The one ROLLBACK path: state is dropped only once the tx is confirmed gone. */
+function rollback_agent_transaction(reason) {
+  var saved_cleanup = A.runtime_cleanup;
+  A.runtime_cleanup = true;
+  try {
+    var ctx = get_tx_context();
+    if (!ctx.active) return { ok: true, already_closed: true };
+    if (ctx.owner !== TX_OWNER_AGENT)
+      return { ok: false, error: 'transaction_not_owned', owner: ctx.owner };
+
+    try {
+      query_checked('ROLLBACK');
+    } catch (e) {
+      audit_tx_failure('rollback_failed', A.conversation_id, e);
+      return { ok: false, error: 'rollback_failed', detail: String(e) };
+    }
+
+    var after = get_session_tx_state();
+    if (!after.known || after.active) {
+      audit_tx_failure('rollback_not_verified', A.conversation_id, reason || '');
+      return { ok: false, error: 'rollback_not_verified' };
+    }
+    set_tx_active_for(A.conversation_id, false);
+    A.agent_tx_started_at = 0;
+    set_agent_tx_event_marker(0);
+    if (!clear_tx_lease(A.conversation_id))
+      return { ok: true, lease_retained: true };
+    return { ok: true };
+  } finally { A.runtime_cleanup = saved_cleanup; }
+}
+
+// Is the whole process list visible to this session?
 function processlist_fully_visible() {
   if (A._pl_visible !== undefined) return A._pl_visible;
   A._pl_visible = false;
@@ -214,18 +226,7 @@ function processlist_fully_visible() {
   return A._pl_visible;
 }
 
-/** Leases whose owning connection no longer exists.
- *
- * clear_tx_lease() is scoped to CONNECTION_ID() on purpose, so a client that
- * died mid-approval left its row behind.  Its physical transaction rolled
- * back with the connection, but begin_tx_lease() overwrites only an
- * *expired* row, so the conversation stayed locked for the rest of the
- * 30-minute lease and every begin_tx answered lease_owned_by_other_session.
- * Reaping by liveness instead of by clock is what makes that recoverable: a
- * connection that is gone cannot be holding a transaction open.
- *
- * Only attempted when the process list is fully visible -- otherwise "not in
- * threads" means nothing and this would delete every other session's lease. */
+// Leases whose owning connection no longer exists.
 function reap_dead_tx_leases() {
   if (!processlist_fully_visible()) return 0;
   try {
@@ -238,9 +239,7 @@ function reap_dead_tx_leases() {
   } catch (e) { return 0; }
 }
 
-/** Clean expired AGENT leases owned by this connection.  Never rollback a
- * caller-owned transaction merely because a lease row from some older
- * agent invocation expired. */
+// Clean expired AGENT leases owned by this connection.
 function cleanup_expired_tx_leases() {
   try {
     var expired = query(
@@ -249,17 +248,15 @@ function cleanup_expired_tx_leases() {
     );
     if (!Array.isArray(expired) || !expired.length) return [];
 
-    /* The lease is already expired, so get_tx_context() deliberately will
-     * not trust it.  For timeout cleanup, correlate the session marker with
-     * the physical P_S EVENT_ID directly: that proves the active transaction
-     * is the same one the Agent started, without risking a caller rollback. */
+    // The lease is already expired, so get_tx_context() deliberately will not trust it.
     var physical = get_session_tx_state();
     var marker = get_agent_tx_event_marker();
-    if (physical.known && physical.active && marker &&
-        Number(physical.event_id) === Number(marker)) {
-      try { sys.exec_sql('ROLLBACK'); } catch (e) {}
-      set_tx_active_for(A.conversation_id, false);
-      set_agent_tx_event_marker(0);
+    if (physical.known && physical.active) {
+      /* Never discard ownership evidence for an unverified active tx. */
+      if (!marker || Number(physical.event_id) !== Number(marker)) return [];
+      if (!rollback_agent_transaction('lease_expired').ok) return [];
+    } else if (!physical.known) {
+      return []; /* Do not erase a lease when physical state is unknown. */
     }
     for (var i = 0; i < expired.length; i++) {
       clear_tx_lease(expired[i].conversation_id);
@@ -270,46 +267,27 @@ function cleanup_expired_tx_leases() {
   } catch (e) { return []; }
 }
 
-/* Final safety net is allowed to rollback only AGENT-owned transactions.
- * CALLER-owned transactions deliberately survive CALL shannon_chat() and
- * remain under the caller's COMMIT/ROLLBACK control. */
+// Final safety net is allowed to rollback only AGENT-owned transactions.
 function finalize_tx_safety_net() {
   var ctx = get_tx_context();
   if (!ctx.active || ctx.owner !== TX_OWNER_AGENT) return '';
 
-  try { sys.exec_sql('ROLLBACK'); } catch (e) {}
-  set_tx_active_for(A.conversation_id, false);
-  clear_tx_lease(A.conversation_id);
-  set_agent_tx_event_marker(0);
+  var rb = rollback_agent_transaction('safety_net');
+  if (!rb.ok) {
+    if (rb.error === 'rollback_failed')
+      return '\n' + t('[安全网] 回滚失败，事务状态未确认；保留事务租约。',
+                      '[Safety net] Rollback failed; transaction state unverified, lease retained.');
+    return '\n' + t('[安全网] ROLLBACK 已发送，但无法确认事务结束；保留事务租约。',
+                    '[Safety net] ROLLBACK issued but closure unverified; lease retained.');
+  }
+  if (rb.lease_retained)
+    return '\n' + t('[安全网] Agent 未提交事务已强制回滚，但事务租约清理失败。',
+                    '[Safety net] Agent-owned transaction rolled back, but its lease could not be cleared.');
   return '\n' + t('[安全网] Agent 未提交事务已强制回滚。',
                   '[Safety net] Uncommitted agent-owned transaction force-rolled back.');
 }
 
-/* The sql_mode the policy gate assumes, checked once per turn.
- *
- * Everything the gate knows about a statement -- classify_statement(),
- * sql_write_targets(), check_system_schema_policy(), is_destructive_ddl(),
- * the multi-statement check -- comes from sql_lex_info(), a hand-written
- * lexer.  Inside a string literal it treats a backslash as an escape and a
- * double quote as a string delimiter.  Both are sql_mode-dependent:
- *
- *   NO_BACKSLASH_ESCAPES  the server reads a backslash as an ordinary
- *                         character, so 'a\' is a *complete* literal to the
- *                         server and an unterminated one to the lexer -- from
- *                         there the two disagree about which bytes are string
- *                         and which are SQL, and the gate is classifying a
- *                         statement the server will not run.
- *   ANSI_QUOTES           " opens an identifier, not a string.
- *
- * The same modes corrupt data on the way in: esc() escapes backslashes *and*
- * doubles quotes, so under NO_BACKSLASH_ESCAPES the backslash half is wrong
- * and a stored message comes back with its backslashes doubled, while
- * esc_like()'s \% stops escaping anything.
- *
- * So rather than teach the lexer every mode, refuse the turn when the session
- * is in one the lexer cannot read.  This is a check, not a SET: silently
- * changing the caller's sql_mode would change how their own statements
- * behave for the rest of the connection. */
+// The sql_mode the policy gate assumes, checked once per turn.
 var GATE_INCOMPATIBLE_SQL_MODES = ['NO_BACKSLASH_ESCAPES', 'ANSI_QUOTES', 'ANSI'];
 
 function sql_mode_gate_check() {
@@ -342,25 +320,6 @@ function sql_mode_gate_check() {
   };
 }
 
-/* ML write-tool metadata used to live here as a standalone ML_WRITE_TOOLS
- * table, maintained in parallel with execute_tool()'s if-chain and
- * validate_tool_call()'s switch, with nothing keeping the three in sync.
- * It is now derived from the tool spec itself -- see tool_review_meta() in
- * lib_tool_registry.js and the `write` / `risk` / `tableArg` /
- * `fallbackArg` / `transactional` fields on each ml_* spec.
- *
- * Why this metadata has to exist at all: classify_statement() keys off the
- * leading SQL keyword.  It does not recognise CALL, and these tools do not
- * carry a `sql` argument anyway (their arguments are table_name /
- * model_handle), so build_review_step() synthesizes sql='' for them and
- * classify_statement('') reports is_write=false.  Without explicit metadata
- * evaluate_step_policy() would wave every ML write through as
- * 'safe_read_only' even under review_mode with require_approval_for_write.
- *
- * transactional:false likewise still matters: sys.ML_* procedures own their
- * own transaction boundaries, so execute_review_step() must not wrap them in
- * an explicit BEGIN/COMMIT. */
-
 function sql_lex_info(sql) {
   var s = String(sql || '');
   var tokens = [];
@@ -370,6 +329,7 @@ function sql_lex_info(sql) {
   var in_line_comment = false, in_block_comment = false;
   var escaped = false;
   var top_level_semicolons = 0;
+  var executable_comment = false;
 
   function flush() {
     if (token) {
@@ -412,16 +372,16 @@ function sql_lex_info(sql) {
       flush(); in_line_comment = true; i++; continue;
     }
     if (ch === '#') { flush(); in_line_comment = true; continue; }
-    if (ch === '/' && nx === '*') { flush(); in_block_comment = true; i++; continue; }
+    if (ch === '/' && nx === '*') {
+      if (s[i + 2] === '!') executable_comment = true;
+      flush(); in_block_comment = true; i++; continue;
+    }
     if (ch === "'") { flush(); in_single = true; continue; }
     if (ch === '"') { flush(); in_double = true; continue; }
     if (ch === '`') { flush(); in_backtick = true; continue; }
 
     if (ch === '(') {
-      /* A name immediately followed by '(' is a function call, and the two
-       * are told apart nowhere else: '(' is a depth change, not a token, so
-       * by the time the caller sees top_tokens, COUNT the aggregate and
-       * COUNT the column alias are the same string. See top_calls below. */
+
       var pending_call = !!token;
       flush();
       if (pending_call) tokens[tokens.length - 1].call = true;
@@ -440,9 +400,7 @@ function sql_lex_info(sql) {
   }
   flush();
 
-  /* top: every top-level token. top_calls: the subset that was written as a
-   * call, `name(`. Built in one pass rather than two filters because this
-   * runs on every statement the agent classifies. */
+  // top: every top-level token.
   var top = [], top_calls = [];
   for (var ti = 0; ti < tokens.length; ti++) {
     if (tokens[ti].depth !== 0) continue;
@@ -463,11 +421,14 @@ function sql_lex_info(sql) {
     }
   }
 
-  /* A single trailing semicolon is harmless; any top-level semicolon with
-   * tokens following it is a multi-statement payload. */
   var trimmed = s.trim();
   var trailing_only = top_level_semicolons === 1 && /;\s*$/.test(trimmed);
   return {
+    executable_comment: executable_comment,
+    file_io: tokens.some(function(t, i) {
+      return t.text === 'LOAD_FILE' || (t.text === 'INTO' && tokens[i + 1] &&
+        (tokens[i + 1].text === 'OUTFILE' || tokens[i + 1].text === 'DUMPFILE'));
+    }),
     first_keyword: first,
     dml_keyword: dml,
     top_tokens: top,
@@ -477,42 +438,9 @@ function sql_lex_info(sql) {
   };
 }
 
-/* ------------------------------------------------------ read-path ceiling
- *
- * Why a read needs a policy at all.
- *
- * Every row a tool reads is materialised into the per-thread JerryScript
- * heap, whose size is fixed when the server is built
- * (SHANNONBASE_JERRY_HEAP_KB; 2048KB by default, and 512KB before
- * 2026-09-17 -- ask engine_heap_bytes() in lib_lang.js rather than assuming
- * either). Past 512KB the engine addresses it with 32-bit compressed
- * pointers, which CMakeLists.txt turns on and checks; the point for this
- * guard is that the ceiling is a fixed amount of memory per thread, not an
- * amount of work. `SELECT * FROM fact_sales` is therefore not a slow
- * query, it is an out-of-memory, and until the port's fatal handler was
- * overridden it took the whole server down with exit().
- *
- * The model was asked to always write a LIMIT, in the prompt, and that is
- * exactly the kind of instruction a model drops on turn six of a hard
- * question. So the ceiling is enforced here instead.
- *
- * Reject rather than rewrite. Injecting a LIMIT the model did not write
- * means the number it reasons about afterwards -- a total, a rank, a row
- * count -- is quietly not the number the database holds, and the model has
- * no way to tell. Refusing costs one turn and tells it exactly what to
- * change; a wrong answer delivered confidently costs the user's trust in
- * every other answer. The refusal text is written to be actionable, because
- * a refusal the model cannot act on is just a slower failure.
- *
- * Implicit-aggregate reads are exempt: a SELECT with an aggregate outside
- * any parenthesis and no top-level GROUP BY returns exactly one row by
- * definition, and making the model write `SELECT COUNT(*) ... LIMIT 1` would
- * be noise it learns to route around. */
 var READ_ROW_LIMIT_MAX_DEFAULT = 1000;
 var REVIEW_STEP_STUCK_TTL_DEFAULT = 120;
 
-/* The ceiling an operator can lower but a session cannot raise, for the same
- * reason the approval switches work that way -- see get_review_policy(). */
 function read_row_limit_max() {
   return _combine_min(get_operator_policy(), 'read_row_limit_max',
                       READ_ROW_LIMIT_MAX_DEFAULT, 1);
@@ -522,10 +450,7 @@ function read_sql_limit_info(lex) {
   var top = lex.top_tokens || [];
   var idx = top.indexOf('LIMIT');
   if (idx === -1) return { has_limit: false, value: null };
-  /* `LIMIT n`, `LIMIT off, n` and `LIMIT n OFFSET off` all put the row count
-   * in a numeric token after LIMIT; in the two-number comma form it is the
-   * second one. A placeholder or an expression leaves value null, which the
-   * caller treats as "present but unknown" rather than as unbounded. */
+
   var nums = [];
   for (var i = idx + 1; i < top.length && nums.length < 2; i++) {
     if (/^[0-9]+$/.test(top[i])) nums.push(Number(top[i]));
@@ -545,32 +470,14 @@ function read_sql_is_single_row(lex) {
   /* A set operation re-opens the row count even if each leg aggregates. */
   if (top.indexOf('UNION') !== -1 || top.indexOf('INTERSECT') !== -1 ||
       top.indexOf('EXCEPT') !== -1) return false;
-  /* Call tokens only. Scanning every top-level token instead meant
-   * `SELECT x AS count FROM big` -- the lexer upper-cases identifiers, so
-   * the alias arrives as COUNT -- was read as an implicit aggregate and
-   * skipped the ceiling entirely. An alias is not a call. */
+  // Call tokens only.
   var calls = lex.top_call_tokens || [];
   for (var i = 0; i < calls.length; i++)
     if (_AGG_FUNCS.indexOf(calls[i]) !== -1) return true;
   return false;
 }
 
-/* Bound an unbounded read by capping it, rather than refusing it.
- *
- * The ceiling exists so a result set cannot exhaust the JavaScript engine
- * heap. Appending LIMIT does that exactly; rejecting the statement only
- * costs the model a turn, and for the most ordinary analytical shape there
- * is -- SELECT ... SUM() ... GROUP BY <month> -- it cost the whole answer:
- * read_sql_is_single_row() treats any GROUP BY as unbounded, so a six-row
- * monthly report was refused for want of a LIMIT the model had no reason to
- * think it needed.
- *
- * Only for a single read whose text carries no LIMIT of its own. The cap
- * goes on its own line so a trailing line comment cannot swallow it, and a
- * trailing semicolon is removed first.
- *
- * @return the sql to run, capped when it needed capping.
- */
+// Bound an unbounded read by capping it, rather than refusing it.
 function apply_read_ceiling(sql, stmt) {
   if (!stmt || !stmt.is_read || stmt.multiple_statements) return sql;
   if (stmt.first_keyword !== 'SELECT' && stmt.first_keyword !== 'WITH') return sql;
@@ -583,13 +490,10 @@ function apply_read_ceiling(sql, stmt) {
   return trimmed + '\nLIMIT ' + read_row_limit_max();
 }
 
-/* Returns null when the statement may run as written, or a tool-shaped
- * rejection when it may not. `stmt` is the classify_statement() result the
- * caller already has. */
+// Returns null when the statement may run as written, or a tool-shaped rejection when it may not.
 function guard_read_sql(sql, stmt) {
   if (!stmt || !stmt.is_read) return null;
-  /* SHOW / DESCRIBE / EXPLAIN take no LIMIT worth speaking of and are
-   * bounded by the catalogue rather than by user data. */
+
   if (stmt.first_keyword !== 'SELECT' && stmt.first_keyword !== 'WITH')
     return null;
 
@@ -623,11 +527,7 @@ function guard_read_sql(sql, stmt) {
   return null;
 }
 
-/* Default statement wall clock for agent reads, in milliseconds. Long
- * enough that an ordinary analytical query over a warm Rapid table is not
- * cut off, short enough that a mistake does not hold the turn open for
- * minutes. Not a per-request option: an operator can lower it through
- * mysql.agent_policy, and nothing else needs to reach it. */
+// Default statement wall clock for agent reads, in milliseconds.
 var READ_TIMEOUT_MS_DEFAULT = 30000;
 
 function read_timeout_ms() {
@@ -635,32 +535,22 @@ function read_timeout_ms() {
                       READ_TIMEOUT_MS_DEFAULT, 1000);
 }
 
-/* The loop's own budgets, and the reason they live here with the read
- * ceilings rather than as constants inside the loop: these two decide
- * whether an answer comes back complete. An instance whose questions need
- * more steps wants more turns; one behind a client that gives up after a
- * minute wants a deadline far shorter than ten minutes. Both are therefore
- * operator business -- and operator-only, in the same direction as every
- * other ceiling: a request may be given less, never more. */
 var MAX_TURNS_DEFAULT        = 10;
 var TURN_DEADLINE_MS_DEFAULT = 10 * 60 * 1000;
 
 function max_turns() {
-  return _combine_min(get_operator_policy(), 'max_turns', MAX_TURNS_DEFAULT, 1);
+  var base = get_operator_policy();
+  var ceiling = Number(base.max_turns);
+  var fallback = isFinite(ceiling) && ceiling > 0 ? ceiling : MAX_TURNS_DEFAULT;
+  return Math.floor(_combine_min(base, 'max_turns', cfg('max_turns', fallback), 1));
 }
 
-/* Floored at ten seconds: below that the deadline would expire inside the
- * first model call, and every turn would end as 'deadline' before anything
- * had been attempted -- a misconfiguration that looks like a broken agent. */
 function turn_deadline_ms() {
   return _combine_min(get_operator_policy(), 'turn_deadline_ms',
                       TURN_DEADLINE_MS_DEFAULT, 10000);
 }
 
-/* Prefix telling the model it is looking at a prefix, not the answer.
- * Without it a truncated read is indistinguishable from a complete one, and
- * the model will happily total up a fraction of the rows and report it as
- * the total. */
+// Prefix telling the model it is looking at a prefix, not the answer.
 function truncation_note(rows) {
   var total = rows_total(rows);
   var got   = Array.isArray(rows) ? rows.length : 0;
@@ -672,33 +562,19 @@ function truncation_note(rows) {
     'conclusions from them; use an aggregate (COUNT/SUM/GROUP BY) and let the database compute it.\n');
 }
 
-/* The statement-level wall clock. Without it a read that passes the row
- * ceiling can still hold the turn open indefinitely on an unindexed join,
- * and the agent has no way to interrupt it. Expressed as an optimizer hint
- * so it travels with the statement and needs no session state -- which
- * matters because the agent shares its session with the caller.
- *
- * SELECT only: MAX_EXECUTION_TIME is ignored with a warning on anything
- * else, and a warning per statement is noise in the trace. */
+// The statement-level wall clock.
 function with_read_timeout(sql, stmt, ms) {
   ms = Number(ms) || 0;
   if (ms <= 0 || !stmt || stmt.first_keyword !== 'SELECT') return sql;
   var ceiling = Math.round(ms);
   var hint = 'MAX_EXECUTION_TIME(' + ceiling + ')';
-  /* A statement that already carries a hint block gets the timeout merged
-   * into that block; a second hint comment would be ignored with a warning. */
+
   if (/^\s*SELECT\s+\/\*\+/i.test(sql)) {
-    /* Only the leading hint block is ours to rewrite. Matching the whole
-     * statement would reach into string literals -- WHERE note LIKE
-     * '%MAX_EXECUTION_TIME(0)%' is a legal predicate, and rewriting it
-     * changes what the query asks while looking like a timeout fix. */
+    // Only the leading hint block is ours to rewrite.
     var blk = /^(\s*SELECT\s+\/\*\+)([\s\S]*?)(\*\/)/i.exec(sql);
-    /* Unterminated hint block: the server rejects it either way, so keep
-     * the old behaviour rather than inventing a second one. */
+
     if (!blk) return sql.replace(/(\/\*\+)/, '$1 ' + hint);
-    /* The model writes this SQL, so an existing MAX_EXECUTION_TIME is an
-     * input, not a caller's choice: honour it only where it is stricter.
-     * MAX_EXECUTION_TIME(0) means "no limit" and must never win. */
+
     var body = /MAX_EXECUTION_TIME/i.test(blk[2])
              ? clamp_exec_time_hint(blk[2], ceiling)
              : ' ' + hint + blk[2];
@@ -707,10 +583,7 @@ function with_read_timeout(sql, stmt, ms) {
   return sql.replace(/^(\s*SELECT)(\s)/i, '$1 /*+ ' + hint + ' */$2');
 }
 
-/* Rewrite every MAX_EXECUTION_TIME(n) in a hint block down to `ceiling`
- * unless it is already stricter. A malformed or zero value is replaced
- * outright. Takes the hint block, never a whole statement: see
- * with_read_timeout(). */
+// Rewrite every MAX_EXECUTION_TIME(n) in a hint block down to `ceiling` unless it is already stricter.
 function clamp_exec_time_hint(sql, ceiling) {
   return sql.replace(/MAX_EXECUTION_TIME\s*\(\s*([0-9]*)\s*\)/gi,
                      function (whole, digits) {
@@ -728,18 +601,21 @@ function classify_statement(sql) {
   var _DDL   = ['CREATE','ALTER','DROP','TRUNCATE','RENAME'];
   var _TCL   = ['BEGIN','START','COMMIT','ROLLBACK','SAVEPOINT'];
 
-  var is_write = !!lex.dml_keyword;
+  var external_effects = lex.file_io || lex.executable_comment || first === 'LOAD' || first === 'CALL';
+  var is_write = !!lex.dml_keyword || external_effects;
   var is_read  = _READ.indexOf(first) !== -1 && !is_write;
   var is_ddl   = _DDL.indexOf(first) !== -1;
   var is_tcl   = _TCL.indexOf(first) !== -1;
 
-  var risk = 'low';
+  var risk = external_effects ? 'high' : 'low';
   if (is_ddl) {
     risk = 'high';
   } else if (is_write) {
     risk = ((lex.dml_keyword === 'DELETE' || lex.dml_keyword === 'UPDATE') &&
             !lex.has_top_level_where) ? 'high' : 'medium';
   }
+
+  if (external_effects) risk = 'high';
 
   /* Only meaningful for DDL; a SELECT has no object class to speak of. */
   var act = is_ddl ? ddl_action_class(sql, lex)
@@ -754,6 +630,7 @@ function classify_statement(sql) {
   else                      kind = 'OTHER';
 
   return {
+    external_side_effects: !!external_effects,
     kind:          kind,
     first_keyword: first,
     dml_keyword:   lex.dml_keyword,
@@ -770,13 +647,6 @@ function classify_statement(sql) {
   };
 }
 
-/* The refusal shared by validate_run_ddl() and evaluate_step_policy(), so the
- * two gates cannot drift apart -- which is how require_approval_for_ddl
- * became dead code once before.  Returns null when the statement is allowed.
- *
- * Like allow_destructive_ddl and unlike the require_approval_* flags, these
- * are enforced whatever review_mode says: an operator who has not turned
- * review on has not thereby asked for the agent to be able to mint logins. */
 function check_ddl_action_policy(sql, policy) {
   var act = ddl_action_class(sql);
   if (act.action_class === 'account' && !(policy && policy.allow_account_ddl))
@@ -813,22 +683,7 @@ function check_ddl_action_policy(sql, policy) {
   return null;
 }
 
-/* Schemas the agent must not write to without an explicit opt-in.
- *
- * `mysql` is the one that matters: it holds the grant tables, and it also
- * holds the agent's own memory, approval plans and audit trail.  A model that
- * can UPDATE mysql.user can grant itself anything; a model that can DELETE
- * FROM mysql.agent_review_history can erase the record of what it did.  Until
- * this gate existed, neither was refused -- review_mode defaults to 'off',
- * where require_approval_for_write does not apply, so the only thing standing
- * between the model and the grant tables was whether the *caller* happened to
- * hold UPDATE on mysql.*.  A DBA using the agent generally does.
- *
- * sys is included because it holds this agent's own stored program: rewriting
- * sys.shannon_chat is the agent editing itself.  The two read-only schemas
- * are included for completeness; the server refuses writes to them anyway,
- * and a clear refusal beats an engine error the model will try to work
- * around. */
+// Schemas the agent must not write to without an explicit opt-in.
 var SYSTEM_SCHEMAS = {
   mysql: 1, sys: 1, performance_schema: 1, information_schema: 1
 };
@@ -844,12 +699,7 @@ function ref_schema(ref) {
   return m ? m[1] : '';
 }
 
-/* One table reference as SQL spells it: `db` . `tbl`, backquotes optional and
- * whitespace allowed around the dot.  Every pattern below is built from this
- * one string so they cannot disagree about what a name looks like: while only
- * add_refs() knew that "mysql . user" is a single qualified reference,
- * INSERT INTO mysql . user captured "mysql" alone and the policy check read
- * it as an unqualified write to the session's own (non-system) database. */
+// One table reference as SQL spells it: `db` .
 var _SQL_REF = '`?[A-Za-z0-9_$]+`?(?:\\s*\\.\\s*`?[A-Za-z0-9_$]+`?)?';
 var _RE_INSERT  = new RegExp('\\binsert\\s+(?:low_priority\\s+|delayed\\s+|high_priority\\s+|' +
                              'ignore\\s+)*(?:into\\s+)?(' + _SQL_REF + ')', 'i');
@@ -858,36 +708,19 @@ var _RE_REPLACE = new RegExp('\\breplace\\s+(?:low_priority\\s+|delayed\\s+)*(?:
 var _RE_DDL_OBJ = new RegExp('\\b(?:table|view|index|trigger|event|database|schema|tablespace)\\s+' +
                              '(?:if\\s+(?:not\\s+)?exists\\s+)?(' + _SQL_REF + ')', 'i');
 var _RE_DDL_ON  = new RegExp('\\bon\\s+(' + _SQL_REF + ')', 'i');
-/* RENAME TABLE takes a list of pairs, so every destination in the statement
- * is a target; global, and lastIndex is reset at each use. */
+
 var _RE_RENAME_TO = new RegExp('\\bto\\s+(' + _SQL_REF + ')', 'gi');
-/* ALTER TABLE t RENAME [TO|AS] new.  The object keywords are excluded so this
- * fires neither on RENAME TABLE, which the pair scan above already covers,
- * nor on RENAME COLUMN/INDEX/KEY, whose destination is part of a table the
- * clauses above have already collected. */
+// ALTER TABLE t RENAME [TO|AS] new.
 var _RE_ALTER_RENAME = new RegExp('\\brename\\s+(?:to\\s+|as\\s+)?' +
                                   '(?!table\\b|column\\b|index\\b|key\\b)(' + _SQL_REF + ')', 'i');
 
-/* Which tables does this statement WRITE to?
- *
- * Deliberately not infer_affected_tables(): that one collects every table
- * mentioned anywhere and then throws the schema qualifier away, which is
- * exactly backwards for this question.  Reading information_schema inside an
- * INSERT ... SELECT is ordinary and must stay allowed; writing to it is not.
- * So only the target position of each write verb is examined.
- *
- * Conservative where it is unsure: an UPDATE's target list is everything
- * between UPDATE and SET, because a multi-table UPDATE can write to any of
- * them, and a DELETE's is both the explicit target list and the FROM list for
- * the same reason. */
+// Which tables does this statement WRITE to?
 function sql_write_targets(sql) {
   var s = String(sql || '');
   var out = [], seen = {};
 
   function add(ref) {
-    /* "mysql . user" and "mysql.user" are the same reference: MySQL allows
-     * whitespace around the qualifier dot, and a name that loses its
-     * qualifier here reads downstream as an unqualified write. */
+
     var name = String(ref || '').trim().replace(/[`;,()]/g, '').replace(/\s*\.\s*/g, '.');
     if (!name || seen[name]) return;
     /* Aliases, keywords and derived tables are not write targets. */
@@ -897,9 +730,7 @@ function sql_write_targets(sql) {
   }
 
   function add_refs(segment) {
-    /* A table reference is the first identifier of each comma- or
-     * JOIN-separated item; anything after it is an alias or a join
-     * condition. */
+
     var items = String(segment || '').split(/,|\bjoin\b|\binner\b|\bleft\b|\bright\b|\bcross\b/i);
     for (var i = 0; i < items.length; i++) {
       var m = String(items[i]).trim().match(/^`?([A-Za-z0-9_$]+`?(?:\s*\.\s*`?[A-Za-z0-9_$]+`?)?)/);
@@ -916,18 +747,13 @@ function sql_write_targets(sql) {
     add_refs(m[2]);
   }
 
-  /* DDL names its object after the object keyword.  DATABASE/SCHEMA is the
-   * case with no dot to find: DROP DATABASE mysql names a schema directly. */
+  // DDL names its object after the object keyword.
   var first = String((s.match(/^\s*(\w+)/) || ['', ''])[1]).toUpperCase();
   if (['CREATE','ALTER','DROP','TRUNCATE','RENAME'].indexOf(first) !== -1) {
     if ((m = s.match(_RE_DDL_OBJ))) add(m[1]);
-    /* An index or a trigger is named first and the table it writes to comes
-     * after ON, so the clause above collects the wrong one of the two:
-     * CREATE INDEX i ON mysql.user (x) named only `i`. */
+
     if (/\b(?:index|trigger)\b/i.test(s) && (m = s.match(_RE_DDL_ON))) add(m[1]);
-    /* A rename's destination is a write target of its own, and it does not
-     * have to be in the source's schema: the clauses above see shop.t in
-     * RENAME TABLE shop.t TO mysql.evil and nothing sees where it lands. */
+
     if (/^\s*rename\s+table\b/i.test(s)) {
       _RE_RENAME_TO.lastIndex = 0;
       while ((m = _RE_RENAME_TO.exec(s))) add(m[1]);
@@ -938,15 +764,7 @@ function sql_write_targets(sql) {
   return out;
 }
 
-/* Refuse a write whose target is in a system schema.
- *
- * Enforced regardless of review_mode, like allow_destructive_ddl: an approval
- * prompt is the wrong control here, because the operator approving it is
- * being shown a statement whose danger is not in its shape.
- *
- * `db` is the session's current database, because an unqualified target in a
- * system schema is the same write with the qualifier left implicit --
- * USE mysql; DELETE FROM user WHERE ... reads as ordinary DML otherwise. */
+// Refuse a write whose target is in a system schema.
 function check_system_schema_policy(sql, policy, db) {
   if (policy && policy.allow_system_schema_writes) return null;
 
@@ -977,78 +795,25 @@ function check_system_schema_policy(sql, policy, db) {
                       '@chat_options -- otherwise run it yourself as a DBA.') };
 }
 
-/**
- * Does this DDL statement destroy data or schema objects?
- *
- * DROP anywhere at the top level covers DROP TABLE / DROP DATABASE and also
- * ALTER TABLE ... DROP COLUMN / DROP INDEX, which are equally irreversible
- * from the agent's point of view.  TRUNCATE is included for the obvious
- * reason.  Deliberately conservative: this only gates a statement behind an
- * explicit operator opt-in (review_policy.allow_destructive_ddl), so erring
- * toward "destructive" costs a configuration flag, never data.
- */
+// Does this DDL statement destroy data or schema objects?
 function is_destructive_ddl(sql) {
   var lex = sql_lex_info(sql);
   if (lex.first_keyword === 'TRUNCATE') return true;
   return lex.top_tokens.indexOf('DROP') !== -1;
 }
 
-/* What KIND of thing does this DDL act on?
- *
- * run_ddl used to ask one question -- "is the first keyword CREATE / ALTER /
- * DROP / TRUNCATE / RENAME?" -- and then one more, "does it contain DROP?".
- * Everything that passed both was equivalent.  That put these in the same
- * tier as ALTER TABLE ... SECONDARY_LOAD:
- *
- *   CREATE USER a IDENTIFIED BY 'p'        a new login
- *   ALTER USER root IDENTIFIED BY 'p'      a changed password
- *   CREATE FUNCTION f ... LANGUAGE JAVASCRIPT
- *                                          new server-side code, which for
- *                                          this project means new agent code
- *   CREATE EVENT e ON SCHEDULE ... DO ...  a scheduler entry that outlives
- *                                          the conversation that made it
- *
- * and review_mode defaults to 'off', where allow_destructive_ddl is the only
- * gate that still applies -- so by default none of the four was reviewed or
- * refused.  They are separated here so each can carry its own opt-in.
- *
- * The rule is "first recognised object keyword at the top level wins", not
- * "first token after CREATE", because the modifiers between them are
- * open-ended (DEFINER=u@h, ALGORITHM=UNDEFINED, SQL SECURITY INVOKER, OR
- * REPLACE, IF NOT EXISTS) while the object keywords are a closed set.  It
- * also keeps CREATE TABLE user from reading as account DDL: TABLE is seen
- * first.  sql_lex_info() has already dropped comments, string literals and
- * backquoted identifiers, so a column named `user` or a DEFAULT 'USER'
- * cannot reach this. */
+// What KIND of thing does this DDL act on?
 var _DDL_OBJECT_CLASS = {
   USER: 'account', ROLE: 'account',
   FUNCTION: 'code', PROCEDURE: 'code', TRIGGER: 'code', EVENT: 'code',
-  /* Server-wide rather than schema-scoped, and reachable through run_ddl
-   * because both spellings start with a keyword it accepts:
-   *
-   *   ALTER INSTANCE ROTATE INNODB MASTER KEY    re-keys tablespace encryption
-   *   ALTER INSTANCE RELOAD TLS                  swaps the server's certificate
-   *   ALTER INSTANCE DISABLE INNODB REDO_LOG     leaves the server uncrashsafe
-   *   CREATE RESOURCE GROUP rg TYPE = SYSTEM     CPU affinity / thread priority
-   *
-   * None destroys an object, so is_destructive_ddl() does not see them, and
-   * before they were listed here the fallback below filed them under
-   * 'schema' -- i.e. the same tier as adding an index.  RESOURCE also has to
-   * be named for a second reason: the scan stops at the first recognised
-   * keyword, so without it CREATE RESOURCE GROUP rg TYPE = USER reached the
-   * USER entry above and was refused as account DDL, while the otherwise
-   * identical TYPE = SYSTEM fell through and was allowed. */
+
   INSTANCE: 'instance', RESOURCE: 'instance',
   TABLE: 'schema', INDEX: 'schema', VIEW: 'schema', DATABASE: 'schema',
   SCHEMA: 'schema', TABLESPACE: 'schema', SERVER: 'schema', SEQUENCE: 'schema',
-  /* Named so the "closed set" claim below is true rather than nearly true;
-   * both are ordinary storage/metadata DDL and stay in the schema tier. */
+
   LOGFILE: 'schema', SPATIAL: 'schema'
 };
 
-/* `lex` is an optional already-computed sql_lex_info(sql) for the same
- * statement -- classify_statement() has one in hand, and lexing is the whole
- * cost of this function. */
 function ddl_action_class(sql, lex) {
   lex = lex || sql_lex_info(sql);
   var top = lex.top_tokens;
@@ -1061,23 +826,10 @@ function ddl_action_class(sql, lex) {
     }
   }
   return {
-    /* An unrecognised shape stays 'schema', i.e. exactly how it was treated
-     * before this function existed, because failing closed on anything
-     * unparsed would refuse ordinary DDL.
-     *
-     * The cost of that choice is that this fallback is fail-OPEN, so every
-     * gated class has to be listed above exhaustively or it silently lands in
-     * the ungated tier -- which is precisely what happened to ALTER INSTANCE
-     * and CREATE RESOURCE GROUP while this comment claimed the set was
-     * "closed and fully enumerated".  A new gated class means auditing the
-     * map, not just adding a flag; the selfcheck below pins the cases that
-     * have bitten so far. */
+
     action_class: klass || 'schema',
     ddl_object:   object,
-    /* Called out separately because it is the self-modifying case: the agent
-     * is a LANGUAGE JAVASCRIPT routine, so this is the agent writing agent
-     * code.  A capability for the platform, a hole for the governance -- and
-     * either way not something to grant by the same flag as a new index. */
+
     is_js_routine: klass === 'code' && top.indexOf('JAVASCRIPT') !== -1
   };
 }
@@ -1152,121 +904,6 @@ function logical_plan_to_hint(tasks, schema_from_embeddings) {
   return lines.join('\n');
 }
 
-function rule_planner(msg, db) {
-
-  /* Every route below is read-only introspection.  A request to CREATE an
-   * index, ALTER a table or SECONDARY_LOAD one contains the very same nouns
-   * these patterns key on ("索引", "表结构"), so without this guard an action
-   * request was answered with a catalog dump and the DDL never happened.
-   * Hand those to the agent loop, which has run_ddl. */
-  if (/建立?索引|创建索引|新建索引|加索引|添加索引|删除索引|建表|创建表|新建表|删表|删除表|改表|修改表结构|加载到|卸载|secondary_?load|secondary_?unload|\bcreate\s+(table|index|database|schema)\b|\balter\s+table\b|\bdrop\s+(table|index|database|schema)\b|\btruncate\b|\brename\s+table\b|\badd\s+index\b/i.test(String(msg || '')))
-    return null;
-
-  if (/有哪些(数据库|schema)|所有数据库|列出.*数据库|show.?databases|show.?schemas|list.*databases/i.test(msg)) {
-    return [
-      { sql: "SELECT SCHEMA_NAME AS database_name" +
-            " FROM information_schema.SCHEMATA" +
-            " ORDER BY SCHEMA_NAME",
-        desc: t('当前实例所有数据库', 'All databases in current instance') }
-    ];
-  }
-
-  if (/有哪些表|所有表|列出.*表|show.?tables|list.*tables|what.*tables/i.test(msg) &&
-      !/结构|schema|column|字段信息|列信息|列名|create|structure|definition|利润表|现金流量表|资产负债表|报表/i.test(msg)) {
-    return [
-      { sql: "SELECT TABLE_NAME,TABLE_ROWS,TABLE_COMMENT" +
-             " FROM information_schema.TABLES" +
-             " WHERE TABLE_SCHEMA=DATABASE() AND TABLE_TYPE='BASE TABLE'" +
-             " ORDER BY TABLE_NAME",
-        desc: t('获取所有表概览', 'Get all tables overview') }
-    ];
-  }
-
-  if (/(表.*结构|结构.*表|字段|列信息|column.*info|table.*structure|describe.*table)/i.test(msg)) {
-    return [
-      { sql: "SELECT TABLE_NAME,TABLE_ROWS," +
-             "  ROUND((DATA_LENGTH+INDEX_LENGTH)/1024/1024,2) AS size_mb," +
-             "  TABLE_COMMENT" +
-             " FROM information_schema.TABLES" +
-             " WHERE TABLE_SCHEMA=DATABASE() AND TABLE_TYPE='BASE TABLE'" +
-             " ORDER BY TABLE_NAME",
-        desc: t('所有表概览（行数 / 大小 / 注释）',
-                'All tables overview (rows / size / comment)') },
-        { sql: "SELECT TABLE_NAME," +
-              "  GROUP_CONCAT(" +
-              "    CONCAT(COLUMN_NAME,' ',COLUMN_TYPE," +
-              "      IF(COLUMN_KEY<>'',CONCAT(' ',COLUMN_KEY),'')," +
-              "      IF(IS_NULLABLE='NO',' NOT NULL','')" +
-              "    ) ORDER BY ORDINAL_POSITION SEPARATOR ', '" +
-              "  ) AS columns" +
-              " FROM information_schema.COLUMNS" +
-              " WHERE TABLE_SCHEMA=DATABASE()" +
-              " GROUP BY TABLE_NAME" +
-              " ORDER BY TABLE_NAME",
-          desc: t('所有表的列定义（每表一行紧凑格式）',
-                  'Column definitions for all tables (one compact row per table)') },
-       { sql: "SELECT TABLE_NAME,COLUMN_NAME,REFERENCED_TABLE_NAME,REFERENCED_COLUMN_NAME" +
-              " FROM information_schema.KEY_COLUMN_USAGE" +
-              " WHERE CONSTRAINT_SCHEMA=DATABASE()" +
-              "   AND REFERENCED_TABLE_NAME IS NOT NULL",
-         desc: t('外键关系（JOIN 路径）', 'Foreign key relationships (JOIN paths)') }
-    ];
-  }
-
-  if (/(外键|foreign.?key|join.*关系|关联关系|table.*relation|related.*table)/i.test(msg)) {
-    return [
-      { sql: "SELECT TABLE_NAME,COLUMN_NAME,REFERENCED_TABLE_NAME,REFERENCED_COLUMN_NAME" +
-             " FROM information_schema.KEY_COLUMN_USAGE" +
-             " WHERE CONSTRAINT_SCHEMA=DATABASE() AND REFERENCED_TABLE_NAME IS NOT NULL",
-        desc: t('所有外键关系（JOIN 路径）', 'All foreign key relationships (JOIN paths)') }
-    ];
-  }
-
-  if (/(索引|index.*分析|缺少.*索引|覆盖.*索引|index.*analysis|missing.*index|covering.*index)/i.test(msg)) {
-    return [
-      { sql: "SELECT TABLE_NAME,INDEX_NAME,NON_UNIQUE,SEQ_IN_INDEX," +
-             "COLUMN_NAME,CARDINALITY,INDEX_TYPE" +
-             " FROM information_schema.STATISTICS WHERE TABLE_SCHEMA=DATABASE()" +
-             " ORDER BY TABLE_NAME,INDEX_NAME,SEQ_IN_INDEX",
-        desc: t('当前库所有索引详情', 'All index details for current database') },
-      { sql: "SELECT TABLE_NAME,COLUMN_NAME,DATA_TYPE" +
-             " FROM information_schema.COLUMNS" +
-             " WHERE TABLE_SCHEMA=DATABASE()" +
-             "   AND COLUMN_NAME NOT IN (" +
-             "     SELECT DISTINCT COLUMN_NAME FROM information_schema.STATISTICS" +
-             "     WHERE TABLE_SCHEMA=DATABASE())" +
-             " ORDER BY TABLE_NAME,ORDINAL_POSITION",
-        desc: t('未被索引覆盖的列（候选索引）', 'Unindexed columns (index candidates)') }
-    ];
-  }
-
-  if (/(数据量|行数|record.?count|row.?count|表.*大小|数据大小|table.*size)/i.test(msg)) {
-    return [
-      { sql: "SELECT TABLE_NAME,TABLE_ROWS," +
-             "  ROUND((DATA_LENGTH+INDEX_LENGTH)/1024/1024,2) AS size_mb," +
-             "  DATA_FREE" +
-             " FROM information_schema.TABLES" +
-             " WHERE TABLE_SCHEMA=DATABASE() AND TABLE_TYPE='BASE TABLE'" +
-             " ORDER BY DATA_LENGTH+INDEX_LENGTH DESC",
-        desc: t('各表数据量与磁盘占用', 'Table row counts and disk usage') }
-    ];
-  }
-
-  if (/(性能.*top|top.*性能|最慢.*查询|query.*perf|slow.*queries|performance.*top)/i.test(msg)) {
-    return [
-      { sql: "SELECT DIGEST_TEXT,COUNT_STAR," +
-             "  ROUND(AVG_TIMER_WAIT/1e12,3) AS avg_sec," +
-             "  ROUND(MAX_TIMER_WAIT/1e12,3) AS max_sec," +
-             "  SUM_ROWS_EXAMINED,SUM_ROWS_SENT" +
-             " FROM performance_schema.events_statements_summary_by_digest" +
-             " ORDER BY SUM_TIMER_WAIT DESC LIMIT 20",
-        desc: t('SQL 性能 TOP20', 'SQL performance TOP20') }
-    ];
-  }
-
-  return null;
-}
-
 var MAX_PLAN_STEPS = 15;
 
 function execute_plan(steps, db) {
@@ -1294,35 +931,12 @@ function execute_plan(steps, db) {
       continue;
     }
     if (stmt.is_read && !stmt.multiple_statements) {
-      try {
-        var raw = query_checked(with_read_timeout(sql, stmt, read_timeout_ms()));
-        result_text = compress(rows_to_text(raw), per_step_limit);
-        if (rows_truncated(raw)) result_text = truncation_note(raw) + result_text;
-      } catch (e) {
-        step_ok = false;
-        var err_text = String(e);
-        var recovery = try_recover_unknown_table(err_text, sql);
-        if (recovery) {
-          try {
-            var rec_rows = query_checked(
-                with_read_timeout(recovery.sql, classify_statement(recovery.sql),
-                                  read_timeout_ms()));
-            result_text = recovery.desc + '\n' +
-                          (rows_truncated(rec_rows) ? truncation_note(rec_rows) : '') +
-                          compress(rows_to_text(rec_rows), per_step_limit);
-            sql = recovery.sql;
-            step_ok = true;
-          } catch (e2) {
-            result_text = t('执行出错：', 'Error: ') + String(e2);
-          }
-        } else {
-          result_text = t('执行出错：', 'Error: ') + err_text;
-        }
-      }
+      var planned = execute_tool('query_db', { sql: sql }, db);
+      result_text = compress(planned.response || planned.error || '', per_step_limit);
+      step_ok = !!planned.ok;
     } else {
       step_ok = false;
-      result_text = t('跳过非只读或多语句 SQL（plan_sql 仅执行单条 SELECT/SHOW/DESC/EXPLAIN/WITH）：',
-                      'Skipped non-read-only or multi-statement SQL: ') + sql.substring(0, 80);
+      result_text = 'Skipped non-read-only or multi-statement SQL: ' + sql.substring(0, 80);
     }
     last_result_text = result_text;
     results.push({ step: i + 1, desc: step.desc || ('Step ' + (i+1)),
@@ -1337,27 +951,7 @@ function execute_plan(steps, db) {
   return results;
 }
 
-function validate_result(result, sql) {
-  if (!result || String(result).trim().length === 0) return 'empty_result';
-  var s = String(result);
-  if (/unknown table/i.test(s)) return 'unknown_table';
-  if (/unknown column/i.test(s)) return 'unknown_column';
-  if (/syntax error/i.test(s)) return 'syntax_error';
-  if (/denied/i.test(s) || /access denied/i.test(s)) return 'access_denied';
-  return null;
-}
-
-/* Registry-driven validation.
- *
- * This replaces a ~200-line switch that hand-wrote argument checks and
- * bilingual error text for every tool.  The checks now come from the tool's
- * JSON Schema (lib_tool_schema.js) and its optional spec.validate hook; the
- * error text comes from the spec's `messages` map, into which every one of
- * the old switch's strings was carried verbatim so user-visible output does
- * not regress.
- *
- * Return contract is unchanged: null means valid, a string is the message
- * shown to the model. */
+// Registry-driven validation.
 function validate_tool_call(tool_obj, policy) {
   if (!tool_obj || typeof tool_obj.tool !== 'string')
     return t('工具调用格式错误：缺少 tool 字段',
@@ -1387,13 +981,7 @@ function replace_ph(sql, db) {
   );
 }
 
-/**
- * Shared EXPLAIN FORMAT=JSON tree walker. MySQL's JSON explain plan nests
- * table/access-method nodes under a handful of well-known keys depending on
- * whether the plan involves joins, subqueries, or grouping/ordering. Both
- * parse_explain (human-readable text) and sum_explain_rows (numeric
- * estimate) need to visit the same nodes, so the traversal lives here once.
- */
+// Shared EXPLAIN FORMAT=JSON tree walker.
 function walk_explain_tree(node, visitor) {
   if (!node || typeof node !== 'object') return;
   visitor(node);
@@ -1423,17 +1011,7 @@ function parse_explain(json_str) {
   } catch(e) { return json_str.substring(0, 150); }
 }
 
-/**
- * Numeric row estimate extracted from the same EXPLAIN JSON tree.
- *
- * For a single-table UPDATE/DELETE (the common review-gated case) there is
- * exactly one table node, so this degenerates to that table's
- * rows_examined_per_scan — exactly "how many rows will this WHERE clause
- * touch" that the review preview was missing. For multi-table plans (JOINs)
- * we report the largest single-table scan rather than summing across
- * tables, since summing overstates the actual result cardinality and would
- * mislead more than 'unknown' did.
- */
+// Numeric row estimate extracted from the same EXPLAIN JSON tree.
 function sum_explain_rows(json_str) {
   try {
     var plan = JSON.parse(json_str);
@@ -1449,13 +1027,7 @@ function sum_explain_rows(json_str) {
   } catch (e) { return null; }
 }
 
-/**
- * EXPLAIN-based best-effort row estimate for a write statement. This is an
- * optimizer estimate (same statistics EXPLAIN always uses), not an exact
- * count — labelled as such wherever it's displayed. Returns null if EXPLAIN
- * fails or the statement shape doesn't produce a usable estimate (e.g. a
- * plain INSERT...VALUES with no scan).
- */
+// EXPLAIN-based best-effort row estimate for a write statement.
 function estimate_affected_rows(sql) {
   try {
     var ex = query("EXPLAIN FORMAT=JSON " + sql);
@@ -1466,15 +1038,17 @@ function estimate_affected_rows(sql) {
   } catch (e) { return null; }
 }
 
-/* Registry-driven dispatch.
- *
- * The ~900-line if-chain this replaces now lives as impl_* functions next to
- * the spec that declares them (lib_tool_specs_*.js).  Handler contract:
- *   handler(args, ctx) -> { ok, response, ... }
- *   ctx = { tool, db, chat_opt, policy, conversation_id }
- * ctx.tool is what lets one handler back several spellings of the same
- * routine (ml_model_load / ml_model_unload, the three batch column tools),
- * exactly as the old chain did by testing `tool` inside a shared branch. */
+function tool_time_budget(spec) {
+  var base = get_operator_policy();
+  var fallback = Number(spec.timeout_ms) || (spec.category === 'ml' ? 120000 : 30000);
+  var cap = _combine_min(base, 'tool_timeout_ms', cfg('tool_timeout_ms', fallback), 1);
+  if (spec.category === 'ml')
+    cap = Math.min(cap, _combine_min(base, 'ml_tool_timeout_ms', cfg('ml_tool_timeout_ms', fallback), 1));
+  if (Number(spec.timeout_ms) > 0) cap = Math.min(cap, Number(spec.timeout_ms));
+  return cap;
+}
+
+// Registry-driven dispatch.
 function execute_tool(tool, args, db) {
   var spec = get_tool_spec(tool);
   if (!spec || !spec.handler) {
@@ -1482,8 +1056,19 @@ function execute_tool(tool, args, db) {
              response: t('错误：未知工具 "', 'Error: unknown tool "') + tool + '"',
              error: 'unknown_tool' };
   }
-  /* Counted here because this is the one place every tool call passes
-   * through, including the ones the approval path executes. */
+
+  if (A.runtime_active && tool !== 'rollback_tx' && runtime_sql_timeout() <= 0)
+    return { ok: false, error: 'agent_deadline_exceeded', response: 'Agent deadline exceeded.' };
+  if (spec.write || spec.ddl || tool === 'begin_tx') A.execution_effect = true;
+
+  var span_started = Date.now(), parent_span = A.current_span_id;
+  A.current_span_id = gen_query_id() + gen_query_id();
+  var saved_parent = A.parent_span_id;
+  A.parent_span_id = parent_span || '';
+  var saved_deadline = A.tool_deadline_at;
+  var cap = tool_time_budget(spec);
+  A.tool_deadline_at = Math.min(saved_deadline || Infinity, Date.now() + cap);
+  try {
   A.tool_calls = Number(A.tool_calls || 0) + 1;
   var chat_opt = get_chat_options();
   var ctx = {
@@ -1494,35 +1079,68 @@ function execute_tool(tool, args, db) {
     conversation_id: A.conversation_id
   };
 
-  /* Hooks bracket the handler here, rather than at each call site, because
-   * this is the only place every tool call passes through -- including the
-   * ones the approval path and the rule planner make. A rule that can be
-   * bypassed by calling a tool a different way is not a rule. */
   var pre = run_pre_tool_hooks(ctx.tool, args || {}, ctx);
-  if (pre.deny) return run_post_tool_hooks(ctx.tool, args || {}, ctx, pre.result);
+  if (pre.deny) return (result = tool_result_envelope(run_post_tool_hooks(ctx.tool, args || {}, ctx, pre.result)));
 
-  var result = spec.handler(pre.args || {}, ctx);
-  return run_post_tool_hooks(ctx.tool, pre.args || {}, ctx, result);
+  /* A hook can rewrite args in place, so validate the final shape again. */
+  var effective_args = pre.args || {};
+  var validation_error = validate_tool_call(
+    { tool: ctx.tool, args: effective_args }, ctx.policy);
+  if (validation_error) {
+    return (result = tool_result_envelope(run_post_tool_hooks(ctx.tool, effective_args, ctx,
+      { ok: false, error: 'hook_args_invalid', response: validation_error })));
+  }
+  var admission = spec.trusted ? null : trusted_tool_admission(ctx.tool,spec);
+  if (admission) return (result = tool_result_envelope(admission));
+  var required_tx = null;
+  if (spec.requiresTx) {
+    if (spec.transactional === false)
+      return (result = tool_result_envelope({ok:false,error:'transaction_contract_invalid',response:'requiresTx conflicts with transactional:false.'}));
+    required_tx = get_tx_context();
+    if (!required_tx.known || !required_tx.active ||
+        [TX_OWNER_AGENT,TX_OWNER_CALLER].indexOf(required_tx.owner) < 0)
+      return (result = tool_result_envelope({ok:false,error:'transaction_required',response:'This tool requires a known active transaction.'}));
+  }
+  if (A.approved_args && A.approved_tool === ctx.tool && JSON.stringify(effective_args) !== A.approved_args)
+    return (result = tool_result_envelope({ ok: false, error: 'approval_arguments_changed', response: 'Hook changed approved arguments; review again.' }));
+  if (spec.category !== 'tx') {
+    // Share the contract built after hooks with the handler for this call only.
+    var policy_step = build_review_step({ tool: ctx.tool }, effective_args, db, false, ctx);
+    var decision = evaluate_step_policy(policy_step, ctx.policy);
+    if (decision.action === 'reject' || (decision.action === 'pause' &&
+        !(A.approved_tool === ctx.tool && A.approved_args)))
+      return (result = tool_result_envelope({ ok: false, error: decision.action === 'pause' ? 'approval_required' : decision.reason,
+               response: decision.message || 'This tool requires explicit review.' }));
+    if (ctx.trusted_plan && A.approved_sql !== ctx.trusted_plan.preview)
+      return (result = tool_result_envelope({ok:false,error:'trusted_template_changed',response:'Trusted template, target or version changed. Request a fresh approval.'}));
+  }
+  var result = spec.handler(effective_args, ctx);
+  result = run_post_tool_hooks(ctx.tool, effective_args, ctx, result);
+  if (required_tx && result && result.ok) {
+    var after_tx = get_tx_context();
+    if (!after_tx.known || !after_tx.active || after_tx.owner !== required_tx.owner ||
+        (required_tx.event_id && after_tx.event_id !== required_tx.event_id))
+      result = {ok:false,error:'transaction_contract_violated',response:'Tool changed or closed its required transaction.'};
+  }
+  return (result = tool_result_envelope(result));
+  } catch (tool_error) {
+    return (result = tool_result_envelope({ ok: false, error: 'tool_exception', response: String(tool_error) }));
+  } finally {
+    // Writes may create a knowledge table (e.g. ML_EMBED_TABLE) in this turn.
+    if ((spec.write || spec.ddl) && !tool_is_memory_scoped(tool)) A.rag_discovery = null;
+    A.tool_deadline_at = saved_deadline;
+    mem_log_audit('tool', 'span', String(tool), JSON.stringify({
+      trace_id: current_turn_id(), span_id: A.current_span_id, parent_span_id: parent_span || '',
+      route: A.route || 'tool_loop', ok: !!(result && result.ok),
+      plan_id:A.current_plan_id || '',step_no:Number(A.current_step_id || 0),
+      execution_id:A.execution ? A.execution.id : '',
+      contract_hash:result && result.contract_hash || '',error:result && result.error || ''
+    }), 1, Date.now() - span_started, '');
+    A.current_span_id = parent_span;
+    A.parent_span_id = saved_parent;
+  }
 }
 
-/* ------------------------------------------------- operator policy baseline
- *
- * mysql.agent_policy holds what the instance allows; @chat_options holds
- * what this request wants. The request may tighten the baseline and may
- * never relax it.
- *
- * Read once per turn and cached on A: the table is tiny, but the read
- * happens on a path that runs for every tool call, and a policy that
- * changed halfway through a turn would be worse than one read slightly
- * stale.
- *
- * The read is a plain SELECT, so it runs as the caller: an account with no
- * grant on mysql.* cannot see the baseline and is treated as policy
- * unavailable, which means every governed switch falls back to its
- * restrictive value. That is the safe direction, but it does mean the
- * baseline only binds callers who can read the table. Making it bind everyone
- * needs a SQL SECURITY DEFINER reader, which is part of the operator feature
- * and is not shipped yet. */
 function get_operator_policy() {
   if (A.operator_policy) return A.operator_policy;
   var base = null;
@@ -1543,11 +1161,6 @@ function get_operator_policy() {
   return base;
 }
 
-
-/* The baseline to assume when the operator's baseline cannot be read: every
- * governed permission at its safe value. Numeric ceilings are left out --
- * their defaults already bound the session, and inventing a tighter number
- * here would fail turns rather than make them safer. */
 function _restrictive_policy() {
   return {
     auto_execute_read_only:        'false',
@@ -1559,15 +1172,7 @@ function _restrictive_policy() {
     allow_code_ddl:                'false',
     allow_instance_ddl:            'false',
     allow_system_schema_writes:    'false',
-    /* Egress. Only the destination is taken back, not the provider: a
-     * baseline that cannot be read is a broken install, and answering it by
-     * forcing local inference would take a working deployment offline. What
-     * it does mean is that the session no longer picks the host, so the
-     * configured provider goes to that provider's own endpoint.
-     *
-     * allow_remote_provider is deliberately absent. Refusing remote
-     * inference outright is an operator's call to make, not a default to
-     * arrive at silently because a grant is missing. */
+
     allow_endpoint_override:       'false'
   };
 }
@@ -1580,12 +1185,7 @@ function _pol_has(base, key) {
   return Object.prototype.hasOwnProperty.call(base, key);
 }
 
-/* Combine one boolean option.
- *
- * `safe_value` is the value that restricts the agent more. Whichever side
- * asks for it wins, so a session can turn a permission off but not on, and
- * an operator who has expressed no opinion leaves the session's choice
- * alone. */
+// Combine one boolean option.
 function _combine_bool(base, key, session_value, safe_value) {
   if (session_value === safe_value) return safe_value;
   if (_pol_has(base, key) && _pol_bool(base[key]) === safe_value) return safe_value;
@@ -1608,10 +1208,7 @@ function get_review_policy(chat_opt) {
   var base = get_operator_policy();
   var mode = String(cfg.review_mode || '').toLowerCase();
   var session_review = (mode === 'review' || mode === 'true' || mode === '1');
-  /* review_mode is the one option whose tighter value is "on" rather than
-   * "off": an operator who has switched review on is saying that nothing
-   * runs unreviewed, and a session must not be able to answer that with
-   * review_mode='off'. */
+
   var effective_review = session_review ||
       (_pol_has(base, 'review_mode') &&
        String(base.review_mode).toLowerCase() === 'review');
@@ -1623,22 +1220,17 @@ function get_review_policy(chat_opt) {
       _combine_bool(base, 'require_approval_for_write', cfg.require_approval_for_write !== false, true),
     require_approval_for_ddl:
       _combine_bool(base, 'require_approval_for_ddl', cfg.require_approval_for_ddl !== false, true),
-    /* Opt-in, and unlike the require_approval_* flags this one is enforced
-     * even when review_mode is off: DROP / TRUNCATE are irreversible, so the
-     * agent never issues them unless an operator has explicitly said it may. */
+
     allow_destructive_ddl:
       _combine_bool(base, 'allow_destructive_ddl', cfg.allow_destructive_ddl === true, false),
-    /* Same shape and the same reasoning as allow_destructive_ddl, for the two
-     * DDL classes that were previously indistinguishable from adding an
-     * index.  See check_ddl_action_policy(). */
+
     allow_account_ddl:
       _combine_bool(base, 'allow_account_ddl', cfg.allow_account_ddl === true, false),
     allow_code_ddl:
       _combine_bool(base, 'allow_code_ddl', cfg.allow_code_ddl === true, false),
     allow_instance_ddl:
       _combine_bool(base, 'allow_instance_ddl', cfg.allow_instance_ddl === true, false),
-    /* Same opt-in shape, and enforced with review_mode off for the same
-     * reason: see check_system_schema_policy(). */
+
     allow_system_schema_writes:
       _combine_bool(base, 'allow_system_schema_writes',
                     cfg.allow_system_schema_writes === true, false),
@@ -1647,16 +1239,10 @@ function get_review_policy(chat_opt) {
                     cfg.require_approval_for_risky_sql !== false, true),
     max_pending_steps: _combine_min(base, 'max_pending_steps',
                                     Number(cfg.max_pending_steps || 3), 1),
-    /* How long an awaiting_approval plan may sit untouched before it's
-     * auto-cancelled (see cleanup_expired_review_plans). Mirrors the tx
-     * lease's 30-minute default so a forgotten approval prompt doesn't
-     * permanently hijack every subsequent message in the conversation. */
+
     review_plan_ttl_minutes: _combine_min(base, 'review_plan_ttl_minutes',
                                           Number(cfg.review_plan_ttl_minutes || 30), 1),
-    /* How long a step may sit in `executing` before it is treated as
-     * interrupted. Much longer than the approval TTL on purpose: this one
-     * races a statement that may still be running. Operator-tunable only,
-     * like the read ceilings. See recover_stuck_review_steps(). */
+    // How long a step may sit in `executing` before it is treated as interrupted.
     review_step_stuck_ttl_minutes:
       _combine_min(base, 'review_step_stuck_ttl_minutes',
                    REVIEW_STEP_STUCK_TTL_DEFAULT, 5)
@@ -1676,11 +1262,14 @@ function normalize_review_command(text) {
   return null;
 }
 
+function parse_review_approval(text) {
+  var m = String(text || '').trim().match(/^approve\s+([A-Za-z0-9_-]+)\s+(\d+)\s+([a-f0-9]{64})$/i);
+  return m ? { plan_id: m[1], step_id: Number(m[2]), digest: m[3].toLowerCase() } : null;
+}
+
 function parse_review_modify(text) {
   var s = String(text || '').trim();
-  /* [\s\S] rather than . — '.' does not match a newline, so a pasted
-   * multi-line "Modify: UPDATE ...\n  WHERE ..." failed the anchored match
-   * entirely and was reported as a format error. */
+  // [\s\S] rather than .
   var m = s.match(/^(?:modify|修改)\s*[:：]?\s*([\s\S]+)$/i);
   return m && m[1] ? m[1].trim() : null;
 }
@@ -1709,11 +1298,6 @@ function infer_affected_tables(sql) {
   return tables;
 }
 
-/* Risk is a ladder, and a spec's declared risk is a floor rather than an
- * alternative to what the SQL says.  forget_memory carries no SQL of its own,
- * so classify_statement() would rate it 'low' and it would sail past the
- * approval gate its spec explicitly asks for; conversely an UPDATE with no
- * WHERE must stay 'high' even if its spec only claims 'medium'. */
 var RISK_RANK = { low: 0, medium: 1, high: 2 };
 
 function risk_max(a, b) {
@@ -1795,26 +1379,26 @@ function ml_display_sql(tool_name, args) {
   }
 }
 
-function build_review_step(tool_obj, args, db, compute_estimate) {
+function build_review_step(tool_obj, args, db, compute_estimate, execution_ctx) {
   var tool_name  = tool_obj && tool_obj.tool ? tool_obj.tool : 'unknown';
   var step_spec  = get_tool_spec(tool_name);
   var ml_meta    = tool_review_meta(tool_name);
-  var sql = '';
-  if (tool_obj && tool_obj.tool === 'plan_sql') {
+  var sql = '', trusted_error = null, business_plan = null;
+  if (step_spec && step_spec.trusted) {
+    try { business_plan = trusted_plan(step_spec,args || {}); sql = business_plan.preview; }
+    catch (e) { trusted_error = trusted_failure(e); }
+  } else if (tool_obj && tool_obj.tool === 'plan_sql') {
     var steps = Array.isArray(args && args.steps) ? args.steps : [];
     sql = String((steps[0] && steps[0].sql) || '');
   } else if (tool_obj && tool_obj.tool === 'list_tables') {
-    /* Pure metadata lookup; synthesize an equivalent SHOW TABLES for display
-     * purposes only (classify_statement/infer_affected_tables need *some*
-     * SQL-shaped string to reason about — this tool has no user-authored SQL). */
+
     sql = "SHOW TABLES" + ((args && args.keyword) ? " LIKE '%" + args.keyword + "%'" : '');
   } else if (tool_obj && tool_obj.tool === 'describe_table') {
     var tn_disp = (args && args.table_name) ? args.table_name :
                   (Array.isArray(args && args.table_names) ? args.table_names.join(',') : '');
     sql = "DESC " + tn_disp;
   } else if (step_spec && typeof step_spec.displaySql === 'function') {
-    /* Tools whose arguments are not SQL render their own approval preview --
-     * otherwise the review prompt shows an empty "SQL:" line. */
+
     sql = step_spec.displaySql(args || {});
   } else if (ml_meta) {
     /* ML procedures carry no user-authored SQL, so synthesize a CALL preview. */
@@ -1822,7 +1406,7 @@ function build_review_step(tool_obj, args, db, compute_estimate) {
   } else {
     sql = String((args && args.sql) || '');
   }
-  sql = replace_ph(sql, db);
+  if (!business_plan) sql = replace_ph(sql, db);
   var stmt4 = classify_statement(sql);
 
   var affected = ml_meta ? [] : infer_affected_tables(sql);
@@ -1834,46 +1418,32 @@ function build_review_step(tool_obj, args, db, compute_estimate) {
 
   var step = {
     id: 1,
+    execution_db: String(db || ''),
     tool: tool_name,
     sql: sql,
     args: args || {},
     affected_tables: affected,
-    /* The spec's declaration is a floor, not an alternative: a tool whose
-     * arguments are not SQL (the memory tools) would otherwise be rated
-     * is_write=false / risk='low' by classify_statement and skip the gate its
-     * spec asks for, while an UPDATE with no WHERE must stay 'high' whatever
-     * its spec claims. */
+
     writes: ml_meta ? true : (stmt4.is_write || !!(step_spec && step_spec.write)),
     ddl: stmt4.is_ddl || !!(step_spec && step_spec.ddl),
     risk: ml_meta ? ml_meta.risk
                   : risk_max(stmt4.risk, (step_spec && step_spec.risk) || 'low'),
-    /* DDL implicitly commits, so it must never be wrapped in an explicit
-     * BEGIN/COMMIT by execute_review_step.  Neither may a tool that declares
-     * transactional:false (sys.ML_* procedures, memory writes). */
+
     transactional: ml_meta ? (ml_meta.transactional !== false)
                            : ((step_spec && step_spec.transactional === false)
                                 ? false : !stmt4.is_ddl),
     estimated_rows: ml_meta ? t('不适用（ML 存储过程）', 'n/a (ML procedure)') : 'unknown',
-    /* scope/requiresTx come from the spec, not from the SQL text: a
-     * memory-scoped tool writes only to mysql.agent_*, so the approval gate
-     * that exists to protect user tables should not fire for it. */
+
     scope: step_spec ? step_spec.scope : 'db',
     requiresTx: !!(step_spec && step_spec.requiresTx),
+    trusted_error: trusted_error,
     thought: tool_obj && tool_obj.thought ? tool_obj.thought : ''
   };
 
-  /* EXPLAIN-based row estimate — only for write statements (the case the
-   * approval preview actually needs to protect against: a WHERE clause
-   * that touches far more rows than intended), and only when the caller
-   * has confirmed we're actually about to render a review prompt.
-   * build_review_step is also called on every single turn purely to
-   * evaluate policy (see evaluate_step_policy call site) — running an
-   * extra EXPLAIN round-trip there would double the SQL calls per turn
-   * for the common auto-execute path, so compute_estimate defaults falsy
-   * and only build_review_steps (called exclusively from the pause
-   * branch) opts in. */
-  /* Not for a spec-rendered preview: that SQL is illustrative, not
-   * executable, so EXPLAIN would only buy a wasted round trip and an error. */
+  if (business_plan) {
+    step.affected_tables = [business_plan.table];
+    if (execution_ctx) execution_ctx.trusted_plan = business_plan;
+  }
   var has_display_sql = !!(step_spec && typeof step_spec.displaySql === 'function');
   if (compute_estimate && !ml_meta && !has_display_sql &&
       stmt4.is_write && !stmt4.is_ddl) {
@@ -1887,18 +1457,22 @@ function build_review_step(tool_obj, args, db, compute_estimate) {
 }
 
 function evaluate_step_policy(step, policy) {
+  var admission = step && trusted_tool_admission(step.tool,get_tool_spec(step.tool));
+  if (admission || (step && step.trusted_error)) {
+    var denied = admission || step.trusted_error;
+    return {action:'reject',reason:denied.error,message:denied.response};
+  }
+  if (step && get_tool_spec(step.tool) && get_tool_spec(step.tool).trusted)
+    return {action:'pause',reason:'trusted_approval_required',message:'Fixed business operations always require explicit approval.'};
+  if (step && step.sql && ['query_db','update_data','run_ddl','plan_sql'].indexOf(step.tool) >= 0 &&
+      classify_statement(step.sql).external_side_effects)
+    return { action: 'reject', reason: 'sql_side_effect_not_allowed',
+             message: 'File I/O, executable comments and raw procedural SQL require a dedicated reviewed tool.' };
   var is_ddl   = !!(step && step.ddl);
   var is_write = !!(step && step.writes);
   var is_risky = !!(step && step.risk === 'high');
 
-  /* Destructive DDL is refused regardless of review_mode unless an operator
-   * has opted in.  Everything else about DDL is a policy decision below --
-   * it used to be rejected outright here, which made require_approval_for_ddl
-   * dead code and left ALTER TABLE ... SECONDARY_LOAD (a prerequisite of
-   * ml_train) impossible to perform through the agent at all. */
-  /* Checked before the destructive gate only so that DROP USER reports the
-   * more specific of the two refusals.  Both still apply: opting in to
-   * account DDL does not also opt in to dropping things. */
+  // Destructive DDL is refused regardless of review_mode unless an operator has opted in.
   if (is_ddl && step.sql) {
     var act_denied = check_ddl_action_policy(step.sql, policy);
     if (act_denied)
@@ -1915,22 +1489,11 @@ function evaluate_step_policy(step, policy) {
 
   if (!policy) return { action: 'execute', reason: 'review_disabled' };
 
-  /* Memory-scoped writes (remember_fact) touch only mysql.agent_* and join no
-   * transaction, so require_approval_for_write -- which exists to guard user
-   * tables -- does not apply to them.  forget_memory is deliberately not
-   * exempt: it carries risk:'high' and still lands in the gate below. */
-  if (is_write && !is_ddl && !is_risky &&
-      step && step.scope === 'memory' && !step.requiresTx)
+  /* remember_fact writes only mysql.agent_*, so the write gate does not apply. */
+  if (is_write && !is_ddl && !is_risky && step && tool_is_memory_scoped(step.tool))
     return { action: 'execute', reason: 'memory_scoped_write' };
 
-  /* These three are NOT gated on review_mode.
-   *
-   * They used to sit below an early return for review_mode !== 'review',
-   * which defaults to 'off' -- so their defaults (all true) were dead code
-   * and the shipped posture executed UPDATE/INSERT/DELETE with no human in
-   * the loop. review_mode now means "review everything, including reads";
-   * these mean "never touch this class unreviewed", which is a statement an
-   * operator should not have to opt into twice. */
+  // These three are NOT gated on review_mode.
   if (is_ddl && policy.require_approval_for_ddl)
     return { action: 'pause', reason: 'ddl_requires_approval' };
   if (is_write && policy.require_approval_for_write)
@@ -1941,32 +1504,45 @@ function evaluate_step_policy(step, policy) {
   if (policy.review_mode !== 'review')
     return { action: 'execute', reason: 'review_disabled' };
 
-  /* Read-only fast path — explicitly gated on !is_write. Previously this
-   * branch fired whenever auto_execute_read_only was true regardless of
-   * whether the step actually wrote anything, so a write step could slip
-   * through mislabeled as 'safe_read_only' whenever an operator had
-   * disabled require_approval_for_write for an unrelated reason. */
+  // Read-only fast path — explicitly gated on !is_write.
   if (!is_write && !is_ddl && policy.auto_execute_read_only)
     return { action: 'execute', reason: 'safe_read_only' };
 
-  /* Reaching here means the step IS a write or high-risk statement, but
-   * policy explicitly exempted it from approval (require_approval_for_write
-   * / require_approval_for_risky_sql set to false). Execute it — that's the
-   * operator's explicit intent — but under its own accurate reason instead
-   * of borrowing 'safe_read_only', so audit logs reflect what actually
-   * happened. */
   if (is_write || is_ddl || is_risky)
     return { action: 'execute', reason: 'approval_explicitly_disabled_by_policy' };
 
   return { action: 'pause', reason: 'review_mode' };
 }
 
+var REVIEW_DIGEST_SQL = "SHA2(CAST(JSON_ARRAY(tool,COALESCE(sql_text,'')," +
+  "CAST(COALESCE(args_json,'{}') AS JSON),writes,ddl,COALESCE(transactional,1),execution_db) AS CHAR),256)";
+
+function review_step_digest(step) {
+  var rows = query_checked("SELECT SHA2(CAST(JSON_ARRAY('" + esc(step.tool || '') + "','" +
+    esc(step.sql || '') + "',CAST('" + esc(JSON.stringify(step.args || {})) + "' AS JSON)," +
+    Number(!!step.writes) + "," + Number(!!step.ddl) + "," + Number(step.transactional !== false) +
+    ",'" + esc(step.execution_db || '') + "') AS CHAR),256) AS digest");
+  if (!rows || !rows[0] || !rows[0].digest) throw new Error('review_digest_unavailable');
+  return String(rows[0].digest);
+}
+
 function render_review_prompt(plan, step, policy) {
+  var trusted_guard = trusted_review_guard(step,step.execution_db);
+  if (trusted_guard) return '['+trusted_guard.error+'] '+trusted_guard.response;
+  var digest = review_step_digest(step);
+  var saved = query_checked("UPDATE mysql.agent_review_plan_step SET approval_digest='" + digest +
+    "' WHERE plan_id='" + esc(plan.plan_id) + "' AND step_no=" + Number(step.id) +
+    " AND status IN ('pending','awaiting_approval','failed','error') AND " + REVIEW_DIGEST_SQL + "='" + digest + "'");
+  if (!saved || (Number(saved.affected_rows) !== 1 && step.approval_digest !== digest))
+    return 'Review content changed; refresh the plan before approving.';
+  step.approval_digest = digest;
+
   var lines = [];
   lines.push(t('【审批中断】请确认下一步执行：', '[Approval pause] Please review the next step:'));
-  lines.push(t('计划 ID：', 'Plan ID: ') + (plan && plan.plan_id ? plan.plan_id : '')); 
+  lines.push(t('计划 ID：', 'Plan ID: ') + (plan && plan.plan_id ? plan.plan_id : ''));
   lines.push(t('步骤：', 'Step: ') + (step && step.id ? step.id : 1) + '/' + ((plan && plan.total_steps) ? plan.total_steps : 1));
   lines.push(t('工具：', 'Tool: ') + (step && step.tool ? step.tool : 'unknown'));
+  lines.push('Database: ' + String(step.execution_db || '') + ' | SHA-256: ' + digest.substring(0, 12));
   lines.push(t('SQL：', 'SQL: ') + (step && step.sql ? step.sql : ''));
   lines.push(t('影响表：', 'Affected tables: ') + ((step && step.affected_tables && step.affected_tables.length) ? step.affected_tables.join(', ') : t('未知', 'unknown')));
   lines.push(t('预计影响行数：', 'Estimated rows: ') + (step && step.estimated_rows ? step.estimated_rows : 'unknown'));
@@ -1974,7 +1550,8 @@ function render_review_prompt(plan, step, policy) {
   lines.push(t('风险等级：', 'Risk: ') + (step && step.risk ? step.risk : 'low'));
   if (plan && plan.description) lines.push(t('计划描述：', 'Plan description: ') + plan.description);
   lines.push('');
-  lines.push(t('请回复：Approve / Reject / Modify:SQL', 'Please reply: Approve / Reject / Modify:SQL'));
+  lines.push('Approve ' + plan.plan_id + ' ' + step.id + ' ' + digest);
+  lines.push(t('或回复 Reject / Modify:SQL', 'Or reply Reject / Modify:SQL'));
   return lines.join('\n');
 }
 
@@ -1985,11 +1562,7 @@ function build_review_steps(tool_obj, args, db) {
     var steps = [];
     for (var i = 0; i < raw_steps.length; i++) {
       var step_args = raw_steps[i] || {};
-      /* Pick the tool that actually matches the statement kind: a write
-       * (INSERT/UPDATE/DELETE/REPLACE) sub-step must route to 'update_data',
-       * or execute_tool('query_db', ...) will reject it as non-read-only at
-       * execution time — even after the step sailed through review and was
-       * Approved. Read-only sub-steps keep 'query_db'. */
+
       var step_sql  = replace_ph(String(step_args.sql || ''), db);
       var step_stmt = classify_statement(step_sql);
       var step_tool = step_stmt.is_write ? 'update_data' : 'query_db';
@@ -2007,9 +1580,7 @@ function build_review_steps(tool_obj, args, db) {
 }
 
 function save_review_plan(plan) {
-  /* Creation/persistence is append-oriented.  Step rows are never DELETE +
-   * rebuilt because their status/result/error fields are the CAS-protected
-   * source of truth for approval execution. */
+  // Creation/persistence is append-oriented.
   if (!plan || !plan.plan_id || !plan.conversation_id) return false;
   var plan_id = plan.plan_id;
   var conv_id = plan.conversation_id;
@@ -2020,21 +1591,12 @@ function save_review_plan(plan) {
   var plan_json = JSON.stringify({ plan_id: plan_id, current_step_index: current_step_index, total_steps: total_steps });
 
   try {
-    /* Steps first, plan row last.
-     *
-     * These are separate statements and the agent shares its session with
-     * the caller, so wrapping them in a transaction here is not available --
-     * a COMMIT would commit whatever the caller had open.  Ordering gets the
-     * same guarantee for the only reader that matters: load_review_state()
-     * finds a plan through mysql.agent_review_plan, so a failure partway
-     * through the steps now leaves rows nobody can reach rather than a plan
-     * that is missing steps.  mem_purge_operational_logs() collects the
-     * unreachable rows. */
+    // Steps first, plan row last.
     for (var i = 0; i < (plan.steps || []).length; i++) {
       var step = plan.steps[i];
-      sys.exec_sql(
+      exec_sql(
         "INSERT IGNORE INTO mysql.agent_review_plan_step(" +
-        "plan_id,step_no,tool,sql_text,args_json,affected_tables,writes,ddl,risk,estimated_rows,status,result_preview,error_text,transactional) VALUES (" +
+        "plan_id,step_no,tool,sql_text,args_json,affected_tables,writes,ddl,risk,estimated_rows,status,result_preview,error_text,transactional,execution_db) VALUES (" +
         "'" + esc(plan_id) + "'," + Number(step.id || (i + 1)) + "," +
         "'" + esc(step.tool || '') + "'," +
         "'" + esc(step.sql || '') + "'," +
@@ -2047,41 +1609,19 @@ function save_review_plan(plan) {
         "'" + esc(step.status || 'pending') + "'," +
         "'" + esc(step.result_preview || '') + "'," +
         "'" + esc(step.error_text || '') + "'," +
-        Number(step.transactional !== false ? 1 : 0) + ")"
+        Number(step.transactional !== false ? 1 : 0) + ",'" + esc(step.execution_db || A.current_db || '') + "')"
       );
     }
 
-    /* At most one plan per conversation may be awaiting approval.
-     *
-     * Ordering the candidates was not enough: plan_id is gen_query_id(),
-     * i.e. random, so "ORDER BY created_at DESC, plan_id DESC" is
-     * deterministic but unrelated to which plan the user is looking at --
-     * two tabs raising a plan in the same second still had even odds of
-     * Approve running the other one's. Making the second plan supersede the
-     * first removes the ambiguity instead of ordering it: whatever the user
-     * approves next is the plan they were just shown.
-     *
-     * Scoped away from this plan_id so that re-saving an existing plan --
-     * which is what the ON DUPLICATE KEY below is for -- does not supersede
-     * itself.
-     *
-     * This runs before the new plan row, so a failure in the INSERT below
-     * leaves the old plan superseded and no new one to approve. The other
-     * order has a window too -- two approvable plans at once, which is the
-     * ambiguity this exists to remove -- and the two cannot be made atomic
-     * here, because the agent shares its session with the caller and a
-     * COMMIT would commit whatever the caller had open (see the note on
-     * write order below). Failing closed is the better of the two: the
-     * caller is told the plan could not be saved and asks again, rather
-     * than approving one of two plans and not knowing which. */
+    // At most one plan per conversation may be awaiting approval.
     if (status === 'awaiting_approval') {
-      sys.exec_sql(
+      exec_sql(
         "UPDATE mysql.agent_review_plan SET status='superseded', updated_at=CURRENT_TIMESTAMP" +
         " WHERE conversation_id='" + esc(conv_id) + "'" +
         "   AND status='awaiting_approval' AND plan_id<>'" + esc(plan_id) + "'");
     }
 
-    sys.exec_sql(
+    exec_sql(
       "INSERT INTO mysql.agent_review_plan(plan_id,conversation_id,status,current_step_index,total_steps,description,plan_json) VALUES ('" +
         esc(plan_id) + "','" + esc(conv_id) + "','" + esc(status) + "'," +
         current_step_index + "," + total_steps + ", '" + esc(description) + "', '" + esc(plan_json) + "') " +
@@ -2101,7 +1641,7 @@ function update_review_plan_cursor(plan) {
   var total = Number(plan.total_steps || (plan.steps ? plan.steps.length : 0));
   var plan_json = JSON.stringify({ plan_id: plan.plan_id, current_step_index: idx, total_steps: total });
   try {
-    var raw = sys.exec_sql(
+    var raw = exec_sql(
       "UPDATE mysql.agent_review_plan SET current_step_index=" + idx +
       ", total_steps=" + total +
       ", plan_json='" + esc(plan_json) + "', updated_at=CURRENT_TIMESTAMP " +
@@ -2114,11 +1654,12 @@ function update_review_plan_cursor(plan) {
 function update_review_step_definition(plan_id, step) {
   if (!plan_id || !step || !step.id) return false;
   try {
-    var raw = sys.exec_sql(
+    var raw = exec_sql(
       "UPDATE mysql.agent_review_plan_step SET " +
       "tool='" + esc(step.tool || '') + "', " +
       "sql_text='" + esc(step.sql || '') + "', " +
       "args_json='" + esc(JSON.stringify(step.args || {})) + "', " +
+      "execution_db='" + esc(step.execution_db || '') + "', approval_digest=NULL, " +
       "affected_tables='" + esc((step.affected_tables || []).join(',')) + "', " +
       "writes=" + Number(step.writes ? 1 : 0) + ", " +
       "ddl=" + Number(step.ddl ? 1 : 0) + ", " +
@@ -2139,17 +1680,13 @@ function load_review_state(conv_id) {
       "SELECT plan_id, conversation_id, status, current_step_index, total_steps, description, plan_json " +
       "FROM mysql.agent_review_plan " +
       "WHERE conversation_id='" + esc(conv_id) + "' AND status='awaiting_approval' " +
-      /* save_review_plan() supersedes the previous awaiting_approval plan,
-       * so there should be exactly one row here.  The ORDER BY is the
-       * belt-and-braces half: created_at is a second-resolution TIMESTAMP,
-       * so without a tiebreak two rows that did survive would be returned
-       * in an arbitrary order. */
+
       "ORDER BY created_at DESC, plan_id DESC LIMIT 1"
     );
     if (!Array.isArray(rows) || !rows.length || !rows[0].plan_id) return null;
     var plan = rows[0];
     var step_rows = query(
-      "SELECT step_no, tool, sql_text, args_json, affected_tables, writes, ddl, risk, estimated_rows, status, result_preview, error_text, transactional " +
+      "SELECT step_no, tool, sql_text, args_json, affected_tables, writes, ddl, risk, estimated_rows, status, result_preview, error_text, transactional, execution_db, approval_digest " +
       "FROM mysql.agent_review_plan_step " +
       "WHERE plan_id='" + esc(plan.plan_id) + "' ORDER BY step_no"
     );
@@ -2162,6 +1699,8 @@ function load_review_state(conv_id) {
         steps.push({
           id: Number(sr.step_no),
           tool: sr.tool,
+          execution_db: sr.execution_db,
+          approval_digest: sr.approval_digest,
           sql: sr.sql_text,
           args: try_parse_json(sr.args_json) || {},
           affected_tables: String(sr.affected_tables || '').split(',').filter(function(x){ return x; }),
@@ -2175,8 +1714,7 @@ function load_review_state(conv_id) {
           transactional: (typeof sr.transactional !== 'undefined' && sr.transactional !== null)
             ? !!Number(sr.transactional)
             : (ml_meta ? (ml_meta.transactional !== false) : true),
-          /* Derived from the registry rather than persisted: the spec is the
-           * authority and needs no extra columns on the plan-step table. */
+
           scope: sr_spec ? sr_spec.scope : 'db',
           requiresTx: !!(sr_spec && sr_spec.requiresTx)
         });
@@ -2192,9 +1730,6 @@ function load_review_state(conv_id) {
       steps: steps
     };
 
-    /* Crash recovery: a reviewed DML and its step.status='completed' may
-     * commit atomically before the separate plan cursor update runs. Skip
-     * already-completed steps so a retry can never execute them twice. */
     while (loaded.current_step_index < loaded.steps.length &&
            loaded.steps[loaded.current_step_index].status === 'completed') {
       loaded.current_step_index++;
@@ -2217,46 +1752,6 @@ function try_parse_json(text) {
   try { return JSON.parse(text); } catch (e) { return null; }
 }
 
-/**
- * DEPRECATED — kept for backward compatibility with any external callers.
- * New code should use the affected_rows field returned by execute_tool()
- * (especially execute_tool('update_data', ...).affected_rows) instead of
- * the approximate information_schema.TABLE_ROWS statistic.
- */
-function capture_table_counts(step, db) {
-  if (!step || !Array.isArray(step.affected_tables) || !step.affected_tables.length || !db) return null;
-  try {
-    var names = step.affected_tables.map(function(t){ return "'" + esc(t) + "'"; }).join(',');
-    var rows = query(
-      "SELECT TABLE_NAME, TABLE_ROWS FROM information_schema.TABLES " +
-      "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME IN (" + names + ")"
-    );
-    if (!Array.isArray(rows)) return null;
-    var counts = {};
-    for (var i = 0; i < rows.length; i++) {
-      counts[String(rows[i].TABLE_NAME || '')] = Number(rows[i].TABLE_ROWS || 0);
-    }
-    return counts;
-  } catch (e) { return null; }
-}
-
-/**
- * DEPRECATED — see capture_table_counts above.
- */
-function compare_table_counts(before_counts, after_counts) {
-  if (!before_counts || !after_counts) return null;
-  var lines = [];
-  for (var table in before_counts) {
-    if (!Object.prototype.hasOwnProperty.call(before_counts, table)) continue;
-    var before = Number(before_counts[table] || 0);
-    var after = Number(after_counts[table] || 0);
-    if (before !== after) {
-      lines.push(table + ': ' + before + ' -> ' + after);
-    }
-  }
-  return lines.length ? lines.join('; ') : null;
-}
-
 function get_pending_review_step(plan) {
   if (!plan || !Array.isArray(plan.steps) || plan.steps.length === 0) return null;
   var idx = Number(plan.current_step_index || 0);
@@ -2264,41 +1759,18 @@ function get_pending_review_step(plan) {
   return plan.steps[idx];
 }
 
-function update_review_step_status(plan_id, step_no, status, result_preview, error_text) {
-  if (!plan_id || !step_no || !status) return;
-  try {
-    sys.exec_sql(
-      "UPDATE mysql.agent_review_plan_step SET status='" + esc(status) + "', " +
-      "result_preview='" + esc(result_preview || '') + "', " +
-      "error_text='" + esc(error_text || '') + "' " +
-      "WHERE plan_id='" + esc(plan_id) + "' AND step_no=" + Number(step_no)
-    );
-  } catch (e) {}
-}
-
 function clear_review_state(conv_id, plan_id, final_status) {
   if (!conv_id || !plan_id) return;
   final_status = final_status || 'completed';
   try {
-    sys.exec_sql(
+    exec_sql(
       "UPDATE mysql.agent_review_plan SET status='" + esc(final_status) + "', updated_at=CURRENT_TIMESTAMP " +
       "WHERE plan_id='" + esc(plan_id) + "'"
     );
   } catch (e) {}
 }
 
-/**
- * Auto-cancel awaiting_approval plans that have sat untouched past
- * review_plan_ttl_minutes. Without this, a user who gets a pause prompt and
- * then wanders off to a different question stays permanently stuck: every
- * subsequent message hits the load_review_state() check at the top of
- * shannon_agent_run and gets reinterpreted as an Approve/Reject/Modify
- * command with no escape hatch. Mirrors cleanup_expired_tx_leases's
- * pattern/TTL semantics. Runs with no LIMIT, so it also sweeps up any
- * orphaned older plans for the same conversation (e.g. left behind by a
- * crash between saving a new plan and clearing the previous one) — not
- * just the single latest row that load_review_state would have looked at.
- */
+// Auto-cancel awaiting_approval plans that have sat untouched past review_plan_ttl_minutes.
 function cleanup_expired_review_plans(conv_id, ttl_minutes) {
   if (!conv_id) return;
   ttl_minutes = Math.max(1, Number(ttl_minutes) || 30);
@@ -2317,26 +1789,7 @@ function cleanup_expired_review_plans(conv_id, ttl_minutes) {
   } catch (e) {}
 }
 
-/* The other way a plan gets stuck, and the one the sweep above cannot see.
- *
- * claim_review_step() sets a step to `executing` in its own autocommitted
- * UPDATE, before the statement it guards runs -- that ordering is what makes
- * the claim exclusive. If the server dies in the window between the claim
- * and the transition to completed/failed, the step stays `executing`
- * forever: the plan is no longer `awaiting_approval`, so the TTL sweep skips
- * it, and `executing` has no transition back to `pending`, so nothing else
- * moves it either. Every later message in that conversation is then read as
- * an approval command for a step that will never finish.
- *
- * Such a step is resolved to `indeterminate` rather than retried or failed,
- * because which of those is true is exactly what was lost. See the note on
- * the status in REVIEW_STEP_TRANSITIONS.
- *
- * The clock is the plan row's updated_at, which claim_review_step() touches
- * on every successful claim; the step table has no updated_at of its own.
- * The TTL is deliberately separate from and longer than the approval TTL: a
- * legitimately slow ALTER TABLE is still `executing` an hour in, and calling
- * that one in doubt would be a worse bug than the one being fixed. */
+// The other way a plan gets stuck, and the one the sweep above cannot see.
 function recover_stuck_review_steps(conv_id, ttl_minutes) {
   if (!conv_id) return 0;
   ttl_minutes = Math.max(1, Number(ttl_minutes) || 120);
@@ -2352,11 +1805,10 @@ function recover_stuck_review_steps(conv_id, ttl_minutes) {
     );
     if (!Array.isArray(stuck) || !stuck.length) return 0;
     for (var i = 0; i < stuck.length; i++) {
-      /* CAS on status='executing' so a step that just finished on another
-       * connection is not clobbered by this sweep. */
+
       var moved = false;
       try {
-        var raw = sys.exec_sql(
+        var raw = exec_sql(
           "UPDATE mysql.agent_review_plan_step SET status='indeterminate', " +
           "error_text='interrupted while executing; outcome unknown' " +
           "WHERE plan_id='" + esc(stuck[i].plan_id) + "' AND step_no=" + Number(stuck[i].step_no) +
@@ -2386,41 +1838,16 @@ var REVIEW_STEP_TRANSITIONS = {
   'failed':             ['executing', 'pending', 'rejected'],
   'rejected':           [],
   'error':              ['pending'],
-  /* Terminal, and deliberately has no way back.
-   *
-   * A step reaches it when it was claimed as `executing` and the process
-   * that claimed it never said what happened -- a crash, a kill, a lost
-   * connection. The write it was running may have committed, may have
-   * rolled back, and nothing on this side can tell which: the claim is
-   * autocommitted before the statement runs, so its presence proves only
-   * that execution started.
-   *
-   * Retrying it automatically is the one thing that must not happen. Half
-   * of the time the statement did commit, and `UPDATE ... SET balance =
-   * balance - 100` applied twice is worse than not applied at all. So the
-   * plan stops here and a human decides, with the rollback log saying
-   * exactly which statement is in doubt. */
+  // Terminal, and deliberately has no way back.
   'indeterminate':      []
 };
 
-function get_step_status(plan_id, step_no) {
-  try {
-    var rows = query(
-      "SELECT status FROM mysql.agent_review_plan_step " +
-      "WHERE plan_id='" + esc(plan_id) + "' AND step_no=" + Number(step_no)
-    );
-    if (Array.isArray(rows) && rows.length > 0) return String(rows[0].status || 'pending');
-  } catch (e) {}
-  return 'pending';
-}
+function claim_review_step(plan_id, step_no, from_status, to_status, digest) {
 
-function claim_review_step(plan_id, step_no, from_status, to_status) {
-  /* Validate against the shared transition table — same source of truth
-   * that transition_review_step uses via its reverse-lookup. */
   var allowed = REVIEW_STEP_TRANSITIONS[from_status];
   if (!allowed || allowed.indexOf(to_status) === -1) {
     try {
-      sys.exec_sql(
+      exec_sql(
         "INSERT INTO mysql.agent_rollback_log(conversation_id, plan_id, step_no, sql_text, error_text, rollback_reason) VALUES (" +
         "'" + esc(A.conversation_id || '') + "', '" + esc(plan_id) + "', " + Number(step_no) + ", '', " +
         "'claim_review_step REFUSED: " + esc(from_status) + " -> " + esc(to_status) + " not in REVIEW_STEP_TRANSITIONS', 'state_machine')"
@@ -2430,21 +1857,23 @@ function claim_review_step(plan_id, step_no, from_status, to_status) {
   }
 
   try {
-    var raw = sys.exec_sql(
+    var raw = exec_sql(
       "UPDATE mysql.agent_review_plan_step SET status='" + esc(to_status) + "' " +
       "WHERE plan_id='" + esc(plan_id) + "' AND step_no=" + Number(step_no) +
-      " AND status='" + esc(from_status) + "'"
+      " AND status='" + esc(from_status) + "'" +
+      (digest ? " AND approval_digest='" + esc(digest) + "' AND " + REVIEW_DIGEST_SQL + "='" + esc(digest) + "'" : '')
     );
+    /* A rejected UPDATE returns {error}, i.e. no affected_rows: not a lost CAS. */
+    if (raw && raw.error) {
+      audit_tx_failure('claim_review_step_failed', plan_id, raw.error);
+      return false;
+    }
     // sys.exec_sql returns an object {affected_rows: N}, not a JSON string
     var won = (raw && Number(raw.affected_rows) === 1);
     if (won) {
-      /* Give recover_stuck_review_steps() a clock. The step table has no
-       * updated_at, so the plan row's is what dates the claim; without this
-       * touch a step claimed long after the plan was created would look
-       * stale immediately. Best-effort: losing the touch costs a premature
-       * indeterminate at worst, never a wrong execution. */
+      // Give recover_stuck_review_steps() a clock.
       try {
-        sys.exec_sql("UPDATE mysql.agent_review_plan SET updated_at=NOW() " +
+        exec_sql("UPDATE mysql.agent_review_plan SET updated_at=NOW() " +
                      "WHERE plan_id='" + esc(plan_id) + "'");
       } catch (e2) {}
     }
@@ -2462,7 +1891,7 @@ function transition_review_step(plan_id, step_no, to_status, result_preview, err
 
   if (!valid_from.length) {
     try {
-      sys.exec_sql(
+      exec_sql(
         "INSERT INTO mysql.agent_rollback_log(conversation_id, plan_id, step_no, sql_text, error_text, rollback_reason) VALUES (" +
         "'" + esc(A.conversation_id || '') + "', '" + esc(plan_id) + "', " + Number(step_no) + ", '', " +
         "'No valid FROM status for transition to " + esc(to_status) + "', 'state_machine')"
@@ -2473,22 +1902,24 @@ function transition_review_step(plan_id, step_no, to_status, result_preview, err
 
   /* Single atomic UPDATE: check AND write in one statement */
   try {
-    var raw = sys.exec_sql(
+    var raw = exec_sql(
       "UPDATE mysql.agent_review_plan_step SET status='" + esc(to_status) + "', " +
       "result_preview='" + esc(result_preview || '') + "', " +
       "error_text='" + esc(error_text || '') + "' " +
       "WHERE plan_id='" + esc(plan_id) + "' AND step_no=" + Number(step_no) +
       " AND status IN ('" + valid_from.map(esc).join("','") + "')"
     );
+    /* A rejected UPDATE is not a lost CAS race; do not file it as one. */
+    if (raw && raw.error) {
+      audit_tx_failure('transition_review_step_failed', plan_id, raw.error);
+      return false;
+    }
     // sys.exec_sql returns an object {affected_rows: N}, not a JSON string
     if (raw && Number(raw.affected_rows) === 1) return true;
   } catch (e) {}
 
-  /* Transition refused — either the current status is not in valid_from
-   * (concurrent claim_review_step changed it) or the row doesn't exist.
-   * Log for audit and return false. */
   try {
-    sys.exec_sql(
+    exec_sql(
       "INSERT INTO mysql.agent_rollback_log(conversation_id, plan_id, step_no, sql_text, error_text, rollback_reason) VALUES (" +
       "'" + esc(A.conversation_id || '') + "', '" + esc(plan_id) + "', " + Number(step_no) + ", '', " +
       "'Atomic transition REFUSED to " + esc(to_status) + " (valid from: " + esc(valid_from.join(',')) + ")', 'state_machine')"
@@ -2500,7 +1931,7 @@ function transition_review_step(plan_id, step_no, to_status, result_preview, err
 function append_review_history(conv_id, plan_id, step_no, action, user_cmd, comment, result_preview, rollback_flag) {
   if (!conv_id || !plan_id || !action) return;
   try {
-    sys.exec_sql(
+    exec_sql(
       "INSERT INTO mysql.agent_review_history(conversation_id, plan_id, step_no, action, user_cmd, comment, result_preview, rollback_flag) VALUES (" +
       "'" + esc(conv_id) + "', '" + esc(plan_id) + "', " + Number(step_no || 0) + ", '" + esc(action) + "', '" + esc(user_cmd || '') + "', '" + esc(comment || '') + "', '" + esc(result_preview || '') + "', " +
       Number(rollback_flag ? 1 : 0) + ")"
@@ -2511,7 +1942,7 @@ function append_review_history(conv_id, plan_id, step_no, action, user_cmd, comm
 function log_rollback_event(conv_id, plan_id, step_no, sql_text, error, rollback_reason) {
   if (!conv_id || !plan_id) return;
   try {
-    sys.exec_sql(
+    exec_sql(
       "INSERT INTO mysql.agent_rollback_log(conversation_id, plan_id, step_no, sql_text, error_text, rollback_reason) VALUES (" +
       "'" + esc(conv_id) + "', '" + esc(plan_id) + "', " + Number(step_no || 0) + ", '" + esc(sql_text || '') + "', '" + esc(error || '') + "', '" + esc(rollback_reason || '') + "')"
     );
@@ -2531,6 +1962,32 @@ function review_state_tables_transactional() {
 }
 
 function execute_review_step(step, db) {
+  var saved_step = A.current_step_id, outcome;
+  A.current_step_id = step && step.id || 0;
+  try { outcome = execute_review_step_body(step,db); return outcome; }
+  finally {
+    var spec = step && get_tool_spec(step.tool);
+    if (spec && spec.trusted) mem_log_audit('trusted','outcome',step.tool,JSON.stringify({
+      trace_id:current_turn_id(),execution_id:A.execution ? A.execution.id : '',
+      plan_id:A.current_plan_id || '',step_no:A.current_step_id,
+      ok:!!(outcome && outcome.ok),error:outcome && outcome.error || '',
+      contract_hash:outcome && outcome.contract_hash || ''
+    }),1,0,'');
+    A.current_step_id = saved_step;
+  }
+}
+
+function execute_review_step_body(step, db) {
+  // execute_tool validates the current trusted contract after all pre-hooks;
+  // the approval entry point separately checks it before claiming the step.
+  var current_spec = step && get_tool_spec(step.tool);
+  var trusted_shape = current_spec && current_spec.trusted && trusted_review_error(step,db);
+  if (trusted_shape) return trusted_shape;
+  if (current_spec && current_spec.requiresTx && step.transactional === false)
+    return {ok:false,error:'transaction_contract_invalid',response:'A required transaction cannot be disabled by a review step.'};
+  if (step && step.approval_digest && (review_step_digest(step) !== step.approval_digest ||
+      String(db || '') !== String(step.execution_db || '')))
+    return { ok: false, error: 'approval_content_changed', response: 'Approved content or database changed; review again.' };
   if (!step || !step.tool) {
     return { ok: false, response: t('审批步骤无效。', 'Invalid approval step.'), error: 'invalid_step' };
   }
@@ -2538,7 +1995,7 @@ function execute_review_step(step, db) {
   var tx_started_here = false;
   var tx_ctx_before = get_tx_context();
 
-  if ((step.writes || step.ddl) && step.transactional !== false) {
+  if ((step.writes || step.ddl || (current_spec && current_spec.requiresTx)) && step.transactional !== false) {
     if (!tx_ctx_before.active) {
       if (!tx_ctx_before.known && tx_ctx_before.owner === TX_OWNER_UNKNOWN) {
         return { ok: false,
@@ -2554,26 +2011,23 @@ function execute_review_step(step, db) {
   }
 
   var res;
+  var approved_args = A.approved_args, approved_tool = A.approved_tool, approved_sql = A.approved_sql;
+  A.approved_args = step.approval_digest ? JSON.stringify(step.args || {}) : null;
+  A.approved_tool = step.tool;
+  A.approved_sql = step.sql;
   try {
     res = execute_tool(step.tool, step.args || {}, db);
   } catch (e) {
     res = { ok: false, response: t('步骤执行异常：', 'Step execution exception: ') + String(e), error: 'exception' };
-  }
+  } finally { A.approved_args = approved_args; A.approved_tool = approved_tool; A.approved_sql = approved_sql; }
 
   if (!res || !res.ok) {
     if (tx_started_here) execute_tool('rollback_tx', {}, db);
     return res || { ok: false, response: t('步骤执行失败。', 'Step execution failed.'), error: 'step_failed' };
   }
 
-  /* If this function created the AGENT transaction, durable success is not
-   * reported until COMMIT itself succeeds.  For reviewed transactional DML,
-   * the completed transition is staged inside that same transaction so the
-   * data change and review state become durable atomically. */
   if (tx_started_here) {
-    /* For reviewed transactional writes, stage executing->completed in the
-     * SAME InnoDB transaction as the user DML.  Although the UPDATE is issued
-     * before COMMIT, "completed" does not become durable until that COMMIT,
-     * eliminating the COMMIT-success/state-update crash window. */
+
     var staged_review_completion = false;
     if (A.current_plan_id && step.id && (step.writes || step.ddl)) {
       if (!review_state_tables_transactional()) {
@@ -2629,16 +2083,14 @@ function parse_tool_call(raw) {
   if (!raw) return null;
   var s = String(raw).trim();
 
-  /* Prefer exact JSON.  The model is instructed to output one object, so
-   * this path is both simpler and immune to braces inside JSON strings. */
+  // Prefer exact JSON.
   s = s.replace(/^\s*```(?:json)?\s*/i, '').replace(/\s*```\s*$/i, '').trim();
   try {
     var direct = JSON.parse(s);
     if (direct && typeof direct.tool === 'string') return direct;
   } catch (e0) {}
 
-  /* Compatibility path for models that prepend prose. Track string/escape
-   * state so SQL such as JSON_OBJECT('{...}') does not break brace depth. */
+  // Compatibility path for models that prepend prose.
   var depth = 0, start = -1, end = -1, in_string = false, escaped = false;
   for (var i = 0; i < s.length; i++) {
     var ch = s[i];

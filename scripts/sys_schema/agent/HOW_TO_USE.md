@@ -164,7 +164,7 @@ All 4 levels receive the same `(user_message, conversation_id)` signature.
 
 ## 3.3 Route selection / 路由选择
 
-Once the dispatcher resolves to the built-in agent (L4), `shannon_agent_run()` first checks for **pending review commands** (`Approve`/`Reject`/`Modify`), then selects one of 4 routes:
+Once the dispatcher resolves to the built-in agent (L4), `shannon_agent_run()` first checks for **pending review commands** (`Approve`/`Reject`/`Modify`), then selects the catalog path or the shared agent loop:
 
 ```mermaid
 flowchart TD
@@ -174,22 +174,51 @@ flowchart TD
     P -->|Yes| R[Resume review state machine]
     P -->|No| RT{Route?}
     RT -->|Catalog exact-match| A[ROUTE A: Catalog]
-    RT -->|Rule-based query| B[ROUTE B: Rule Planner]
-    RT -->|Knowledge / RAG query| C[ROUTE C: RAG / HeatWave]
-    RT -->|Everything else| D2[ROUTE D: LLM Agent Loop]
+    RT -->|Everything else| K[Discover visible VECTOR stores and retrieve local knowledge]
+    K --> D2[ROUTE D: LLM Agent Loop + schema and knowledge context]
     A --> O[Result Set]
-    B --> O
-    C --> O
     D2 --> O
 ```
 
 | Route | Trigger | Description | Max Turns |
 |-------|---------|-------------|-----------|
 | **Pending Review** | `Approve`/`Reject`/`Modify:SQL` in user message | Resumes a paused review plan; transitions steps through the state machine with CAS protection | N/A |
-| **A: Catalog** | `catalog_match()` returns a hit | Exact schema/object name match → runs canned SQL directly | 1 |
-| **B: Rule Planner** | `rule_planner()` returns non-null | Schema/DDL introspection with a mini-loop for `describe_table`/`query_db` | 5 |
-| **C: RAG** | `is_knowledge_query()` returns true | Knowledge-base query → discovers vector tables → dispatches via HeatWave | 1 |
+| **A: Catalog** | `catalog_match()` returns a hit | Exact schema/object name match → executes canned SQL through the shared tool guards | 1 |
 | **D: LLM Agent Loop** | Fallback for everything else | Full LLM-driven agent loop with tool execution, review pauses, and safety nets | **10** |
+
+### Local knowledge context / 本地知识库上下文
+
+Before the first model call, the agent inspects `VECTOR` columns visible to the
+current SQL user in user schemas, including the current database. It pairs each
+vector column with a text column, preferring `segment`, `content`, `text` or
+`body`; explicit `vector_store_columns` takes precedence. Tables without a
+corresponding text column are not document stores. System schemas and agent
+memory tables are excluded: principal-scoped memory still uses its own path.
+
+It retrieves relevant passages through the shared `ml_rag` tool and `sys.ML_RAG`
+with `skip_generate=1`, groups stores by their column mappings, and ranks the
+combined citations by distance. These passages join the current database's
+schema context and conversation memory in the same model prompt. Automatic
+retrieval does not generate a separate answer or bypass tool hooks/approval.
+RAG remains available when `memory_options.enabled=false`.
+
+The knowledge block is fenced as untrusted reference data and limited to at
+most 1000 estimated tokens within the auxiliary context allocation. Memory,
+RAG and schema share the existing overall prompt budget. No stores or no matches
+leaves the normal SQL/agent flow available; retrieval errors are reflected in
+`@chat_options.rag_context` and audit rather than becoming invented evidence.
+The output contains hit count, source tables/document names, distances and
+truncation/degradation status.
+
+The existing `schema_name`, `tables`, `vector_store_columns`, `embed_model_id`,
+`retrieve_top_k` and `retrieval_options` inputs constrain retrieval. Nested
+`rag_options` values override their top-level equivalents; an explicit
+`rag_options.vector_store` limits the candidate tables. `retrieve_top_k=0`
+disables automatic knowledge retrieval. If a vector column declares
+`{"model_id":"..."}` or `{"embed_model_id":"..."}` in its comment, discovery
+requires that model to match; unlabelled columns use the configured embedding
+model. Retrieval still checks actual vector compatibility. No model provenance
+is inferred from the existence of a VECTOR column alone.
 
 ### Schema context building (Route D)
 
@@ -354,11 +383,9 @@ Below are all recognized `chat_options` keys. Each entry shows name, type, defau
 > smaller of the two. A key with no row in the table is left entirely to the
 > session, so an instance that never populates it behaves exactly as before.
 >
-> Four policy keys have no `@chat_options` counterpart and are settable only by
-> the operator, because they are resource ceilings rather than intentions:
-> `read_row_limit_max` and `read_timeout_ms` bound a single read;
-> `max_turns` and `turn_deadline_ms` bound one agent turn — the two numbers that
-> decide whether an answer comes back complete or partial.
+> `read_row_limit_max`, `read_timeout_ms` and `turn_deadline_ms` remain operator-only
+> resource ceilings. `max_turns` may also be requested by the session, bounded by
+> the operator ceiling; without an explicit setting it defaults to 10.
 
 ### Top-level keys
 
@@ -496,8 +523,6 @@ Controls the four memory layers. Every key is optional; the defaults below are w
   "retention": { "enabled": true, "purge_batch": 500, "max_facts_per_principal": 2000 },
   "derive": { "enabled": true, "enqueue_batch": 200 },
   "graph": { "enabled": true, "depth": 1, "max_nodes": 12 },
-  "quota": { "enabled": true, "max_llm_calls_per_day": 0, "max_prompt_tokens_per_day": 0,
-             "max_artifact_bytes_per_day": 0, "max_turns_per_day": 0 },
   "artifact": { "enabled": true, "spill_threshold_chars": 1200, "preview_chars": 800,
                 "page_chars": 4000, "max_bytes": 1048576, "ttl_days": 7 },
   "vector_index": "scan"
@@ -527,7 +552,6 @@ Controls the four memory layers. Every key is optional; the defaults below are w
 | `retrieval.weight_vector` / `weight_lexical` | Per-leg weight in the fusion. Equal by default, and deliberately so — nothing yet says either retriever deserves more, which is what the recall-quality set exists to decide. A weight of `0` removes a leg entirely. |
 | `derive` | Asynchronous derivation. Any row that should carry a vector and does not is recorded in `mysql.agent_derive_queue` and filled in on a later turn's maintenance slot. `enabled` is the enqueue-side switch: turning it off stops the backlog being *recorded*, not the queue being drained. `drain_batch` (default 10, 0 disables) bounds how many tasks one turn works off; `lease_seconds`, `max_attempts` and `purge_done_days` govern retry and retention. Rows the writer deliberately left unembedded are marked `meta.embed_skipped` and are never enqueued. |
 | `graph` | Expansion around whatever L3 recall returned, emitted as a `[Related Entities]` block. `depth: 1` is the neighbours of a recalled fact; deeper walks are available but nothing yet says they pay. |
-| `quota` | Per-principal, per-day ceilings, checked once on entry. `0` is unlimited and every one of them defaults to `0`: this ships as metering, and an instance that was running fine yesterday must not start refusing work because it was upgraded. |
 | `artifact` | Large-result handling. A tool result longer than `spill_threshold_chars` (or wider than 150 rows, which `rows_to_table` silently truncated before any character limit applied) is stored whole and the model is given `preview_chars` plus an `artifact_id`. `read_artifact` pages through the rest at `page_chars` per call. |
 
 **Isolation.** All L2/L3 recall is filtered by `principal_prefix` — `SHA2(CURRENT_USER(),256)` truncated to 16 hex, carried by `mysql.agent_memory.document_name` and by `mysql.agent_semantic_fact.principal_prefix`. The predicate is written into the retrieval statement itself, beside the `DISTANCE()`, so it is not a parameter anything outside the agent can supply or omit — that is why episodic recall no longer goes through `sys.ML_RAG`, whose equivalent filter *is* a parameter. A recall with no isolation key returns nothing rather than falling back to an unfiltered scan.
@@ -577,7 +601,7 @@ The agent includes multiple layers of protection to prevent raw SQL output, empt
 | Mechanism | What it prevents |
 |-----------|-----------------|
 | **MAX_TURNS** (default 10, from `mysql.agent_policy`) | Infinite loops — the agent stops after this many LLM turns |
-| **TURN_DEADLINE_MS** (default 10 min, from `mysql.agent_policy`) | A turn budget is not a time budget: ten turns against a slow or retrying provider is unbounded in wall-clock terms. Checked between steps, so it never interrupts a statement mid-flight |
+| **TURN_DEADLINE_MS** (default 10 min, from `mysql.agent_policy`) | Starts before admission and maintenance; bounds SQL calls with a scoped timer and clamps each model retry to the remaining budget. Cancellation remains cooperative |
 | **Per-call wall clock** | A provider that hangs for its full timeout on each of three attempts outruns the deadline regardless, so each model call is sized from what is left of the turn. It can only shorten the call, never lengthen it |
 | **MAX_ERRORS = 3** | Error cascades — stops after 3 consecutive validation/execution errors |
 | **Duplicate detection** | The same `tool\|args` signature as *any* previous turn in the run — not merely the last one — forces summary |
@@ -653,7 +677,6 @@ sentence for every ending that is not completion:
 | `mysql.agent_artifact` | Large tool results, deduped per `(principal_prefix, content_hash)`. The only agent table **not** in `TABLESPACE=innodb_system`: its payload is unbounded by design and the system tablespace never gives space back, so it gets its own reclaimable file-per-table tablespace. |
 | `mysql.agent_memory_edge` | Typed relations between facts, tables and turns. `edge_key` is a generated hash of the edge tuple, standing in for a natural unique key far past InnoDB's 768-byte index limit at 4K pages. |
 | `mysql.agent_derive_queue` | Work deferred off the turn that created it — today, embeddings that were not computed inline. Drained a bounded batch at a time by the agent itself, on the maintenance slot every invocation passes through. |
-| `mysql.agent_usage` | Per-principal, per-day counters: turns, model calls, tokens, tool calls, artifact bytes, latency. |
 | `mysql.agent_rollback_log` | Rejected and rolled-back approval steps, with the reason. |
 | `mysql.agent_policy` | The instance's baseline, which a session may tighten and may never relax. Every approval and ceiling used to be read from `@chat_options` alone — a session variable set by whoever is making the request, so the session that asked the agent to drop a table could grant itself permission in the same breath. A missing row means "no opinion", so an instance that never populates it behaves exactly as before. Read it to everyone who uses the agent; keep `INSERT`/`UPDATE` for whoever administers the instance. |
 
@@ -698,16 +721,6 @@ reimplementation of `max_execution_time` — it is the value the agent puts
 into a `MAX_EXECUTION_TIME` hint on each read it issues, because the agent
 shares its session with the caller and setting the session variable would
 follow the caller's own statements out of the routine.
-
-`mysql.agent_usage` is **metering, not enforcement**. It records what each
-principal spent (turns, model calls, tokens, artifact bytes, latency) so the
-spend is queryable and attributable. The optional
-`memory_options.quota.*` ceilings on top of it are a check on entry, not a
-reservation: they exist for the one class of cost the server has no
-counterpart for — money spent at a model provider — and their overshoot is
-bounded by how many turns the account can have in flight, which is
-`MAX_USER_CONNECTIONS`. Do not rely on them for anything the account
-attributes above can express.
 
 **Connection pooling.** `@chat_options`, `@chat_api_key` and
 `@_shannon_last_conv_id` are session variables, and a pooled connection
@@ -765,7 +778,6 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON mysql.agent_review_plan_step  TO app@'%'
 GRANT SELECT, INSERT, UPDATE, DELETE ON mysql.agent_review_history    TO app@'%';
 GRANT SELECT, INSERT, UPDATE, DELETE ON mysql.agent_rollback_log      TO app@'%';
 GRANT SELECT, INSERT, UPDATE, DELETE ON mysql.agent_conversation_summary TO app@'%';
-GRANT SELECT, INSERT, UPDATE         ON mysql.agent_usage         TO app@'%';
 -- Read-only: the instance's ceilings are not the application's to change.
 GRANT SELECT ON mysql.agent_policy TO app@'%';
 ```
@@ -1133,3 +1145,171 @@ CALL sys.shannon_chat('再帮我统计最近 7 天的异常订单');
 SET @chat_options = JSON_MERGE_PATCH(@chat_options, JSON_OBJECT('conversation_id', 'new'));
 CALL sys.shannon_chat('查看用户表有哪些索引');
 ```
+
+## Request recovery and transaction bounds
+
+Set `@chat_options.idempotency_key` to a non-empty string of at most 128
+characters when a client may retry a request. The key is scoped to the SQL
+principal and bound to the conversation and message. Reusing it for a different
+request returns `idempotency_key_conflict`. A completed request returns its saved
+response. A concurrent or interrupted request returns
+`execution_outcome_uncertain`; it never automatically repeats the tools.
+Use a new key for an approval reply or another message.
+
+`mysql.agent_execution` stores the execution ID, request fingerprint, run token,
+status and response. Autocommit requests also receive a generated key when none
+is supplied; use an explicit key to reconnect and retry. RUNNING records with
+an uncertain result require operator reconciliation against the business data
+and trace before a new execution is authorized. Do not delete them merely
+because they are old. This is duplicate suppression, not a claim of exactly-once
+external effects or automatic compensation. Custom dispatcher plugins must
+implement their own retry contract.
+
+Keyed execution requires autocommit with no caller transaction. The Agent never
+commits a caller transaction to persist its own ledger. Unkeyed calls may join
+a caller transaction; their persistence and retry semantics remain the caller's
+responsibility. Grant the application only the Agent metadata access it needs:
+
+```sql
+GRANT SELECT, INSERT, UPDATE ON mysql.agent_execution TO app@'%';
+```
+
+Entry recovery must prove the previous Agent transaction closed before new work
+starts. Transaction activity comes from the current THD; P_S event identity is
+still required to prove that an active transaction belongs to the Agent.
+Missing identity with a live lease blocks recovery without erasing evidence.
+Caller transactions are never committed or rolled back by the Agent.
+
+An Agent-owned transaction cannot cross a model call. Group approved writes in
+one review step, which begins, executes and closes its transaction without an
+intervening inference. `mysql.agent_policy.tx_max_open_ms` may lower the 5000ms
+transaction-age ceiling. Expired transactions cannot commit; cleanup retains
+its separate bounded rollback allowance. Caller transaction lifetime remains
+under caller control.
+
+The request deadline starts before admission and maintenance. SQL calls use a
+scoped server timer, model retries recompute the remaining timeout, and session
+options cannot extend that budget. Cancellation is cooperative with the SQL
+engine/provider; a backend must honor its timeout or cancellation checks.
+Maintenance skips caller transactions. Reads inside a multi-statement transaction
+use the primary engine, including when the caller requested FORCED secondary
+execution; the setting is restored when the SQL call returns.
+
+Daily user quotas and usage accounting are not part of the runtime. Legacy
+`mysql.agent_usage` storage is retained for schema compatibility and is no
+longer written by the Agent. Per-request diagnostics and execution bounds remain.
+
+
+### Harness result and operational contracts (2026-11-11)
+
+Every dispatched tool result carries `content` (text plus structured result data),
+`citations`, `trace_id`, `span_id`, and `parent_span_id`. An archived result also
+exposes `artifact_id` as a field. `query_db` reports `limit_reached`, `truncated`,
+and aggregate `consistency` separately. A full LIMIT page is bounded evidence;
+it does not establish full-table totals. Supported consistency checks compare
+simple explicitly aliased COUNT/SUM/AVG projections from the same result row,
+including NULL/empty-set behavior. Complex expressions and window functions
+remain unchecked; this is not a proof that a query answers the user's question.
+Post-tool hook replacements pass through the same result envelope.
+
+`tool_timeout_ms` caps every tool; `ml_tool_timeout_ms` additionally caps ML tools
+(default 120000 ms). Operator and session ceilings combine using the smaller
+value, and the turn deadline still applies. A client can cancel its running
+statement using its driver's cancellation operation or `KILL QUERY <connection_id>`
+from another permitted connection. Native SQL and local/remote generation use
+the session cancellation flag. Shared LightGBM training checks that flag before
+dataset creation, after dataset creation, between boosting iterations and
+before serializing the model; interrupted training does not persist a model. Generation cancellation is terminal and does not
+retry or summarize the partial generation. Cancellation is cooperative: an
+individual native training kernel must reach an interruption point before it
+can return; the harness does not forcibly stop a CPU kernel.
+
+`CALL sys.shannon_agent_metrics(7)` returns daily invocation count, prompt and
+completion token totals, and nearest-rank `p50_ms`/`p95_ms`. Samples live in
+`mysql.agent_memory_audit` (`tier='runtime', op='turn'`) and use its retention
+policy. The routine is SQL SECURITY INVOKER and filters the calling SQL
+principal. Existing daily `agent_usage` sums are not used to derive percentiles.
+Tool span samples use `tier='tool', op='span', store=<tool name>`; this also
+avoids truncating long tool names into the audit operation's 16-character field.
+
+Trace embeddings use `agent_sql_trace.embed_eligible`, recorded at execution
+time, rather than re-inferring success from a truncated preview. Only eligible
+successful reads are enqueued, drained, or retrieved. Historical traces are
+conservatively ineligible after upgrade, because they lack a reliable success
+bit. `memory_options.derive.enabled=false` stops both direct and sweep enqueue;
+it does not discard or stop already queued work. `few_shot_top_k=0` disables
+procedural retrieval.
+
+The development harness has six SQL execution-match fixtures (joins, missing
+rows, NULL, decimals, empty aggregates and HAVING). Run `harness/execution_match`
+for deterministic guarded execution, or `harness/text2sql` with a configured
+model to generate SQL for the fixture questions and compare its executed result
+bags with independent oracles. The latter makes actual model calls, may incur
+provider costs, and is deliberately opt-in; deterministic green tests alone do
+not establish model accuracy. See `mysql-test/suite/agent/t/shannon_harness.test`
+for fixture setup. Result comparison ignores row/column names and row ordering,
+retains duplicate rows, and requires the requested column order.
+
+
+## Fixed business tools and required transactions
+
+`approve_order(order_id, expected_version)` is a compiled business tool. It
+accepts exact nonnegative integer versions and positive integer IDs; SQL,
+table names and status overrides are rejected. The expected source status is
+fixed to `pending`, and the destination is `approved`. The operator enables it
+by configuring a fully qualified InnoDB table with `id` (unique primary key),
+`status` and `version` columns:
+
+```sql
+-- Run as the instance administrator, replacing app.orders with your table.
+INSERT INTO mysql.agent_policy(policy_key, policy_value) VALUES
+  ('trusted_order_table', 'app.orders'),
+  ('trusted_tool_allowlist', 'approve_order'),
+  ('trusted_writes_only', 'true')
+ON DUPLICATE KEY UPDATE policy_value=VALUES(policy_value);
+
+SET @chat_options=JSON_OBJECT('idempotency_key','order-42-prepare');
+CALL sys.shannon_chat('Approve order 42 with expected version 3');
+-- Copy the exact Approve <plan> <step> <digest> reply shown by the agent.
+-- Use a new idempotency_key for that reply; reuse it only when retrying it.
+```
+
+The operator allowlist is required. A session `trusted_tool_allowlist` may
+only narrow it. `trusted_writes_only=true` rejects ordinary business SQL write
+and DDL tools; transaction controls and scoped agent memory operations remain
+available. A session can enable this restriction but cannot disable an operator
+restriction. SQL privileges still apply to the effective SQL principal of the
+invoker-security agent routine. Provision only the necessary business grants;
+these settings do not authenticate an application end user.
+
+The approval preview binds the compiled template version, target table, typed
+arguments, update, locking read, verification read and expected results through
+a contract hash included in the existing approval digest. Changed contracts
+require a new plan and approval. `Modify:SQL` cannot convert this operation into
+arbitrary SQL, and disabling general review never skips its explicit approval.
+
+After approval the agent opens a short transaction if needed, locks the order,
+checks its InnoDB engine, and updates only the matching `pending` version. The
+actual affected row count must be exactly one. It verifies the resulting
+`approved` status and incremented version on InnoDB before committing business
+changes and review completion together. Zero/multiple rows, verification errors
+and SQL permission errors fail the operation. The private savepoint rolls back
+the tool's changes on failure. An existing caller transaction remains under the
+caller's COMMIT/ROLLBACK control; its successful result is marked
+`pending_caller_commit`. Verification reports `consistency_source: InnoDB`.
+It does not certify that an asynchronous Rapid copy has caught up.
+
+Developers can add compiled declarative tools with `register_trusted_tool`:
+a fixed name, explicit version, strict argument schema and builder returning
+`table`, `lock_sql`, `sql`, `verify_sql` and `expected`. Builders are reviewed
+server code, never loaded from model output or session JSON. The initial
+implementation supports one transactional DML plus verification; review table
+triggers and other side effects when authorizing a business table.
+
+For every registered tool, `requiresTx:true` now checks known active transaction
+state and ownership at execution, including direct calls, and detects a handler
+that closes or replaces its transaction. Combining it with
+`transactional:false` is rejected. Review execution opens a short transaction
+for required-transaction tools. Outcome audit records correlate execution,
+plan, step, trace and template contract hash through `agent_memory_audit`.
+No new system tables or procedures are introduced for this feature.

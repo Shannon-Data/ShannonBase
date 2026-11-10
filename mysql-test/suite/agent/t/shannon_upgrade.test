@@ -530,3 +530,23 @@ SELECT CHAR_LENGTH(edge_key) AS edge_key_len FROM mysql.agent_memory_edge
  WHERE principal_prefix='0000upgrade00000';
 DELETE FROM mysql.agent_memory_edge WHERE principal_prefix='0000upgrade00000';
 USE test;
+
+--echo # Trace eligibility upgrades old datadirs conservatively and is idempotent.
+ALTER TABLE mysql.agent_sql_trace DROP COLUMN embed_eligible;
+SET @have_ast_eligible = (SELECT COUNT(*) FROM information_schema.COLUMNS
+ WHERE TABLE_SCHEMA='mysql' AND TABLE_NAME='agent_sql_trace' AND COLUMN_NAME='embed_eligible');
+SET @cmd = "ALTER TABLE mysql.agent_sql_trace ADD COLUMN embed_eligible TINYINT(1) NOT NULL DEFAULT 0 COMMENT 'Only successful read traces selected by the writer may be derived or recalled' AFTER embedding";
+SET @str = IF(@have_ast_eligible=0, @cmd, 'DO 0');
+PREPARE stmt FROM @str;
+EXECUTE stmt;
+DROP PREPARE stmt;
+
+SET @have_ast_eligible = (SELECT COUNT(*) FROM information_schema.COLUMNS
+ WHERE TABLE_SCHEMA='mysql' AND TABLE_NAME='agent_sql_trace' AND COLUMN_NAME='embed_eligible');
+SET @cmd = "ALTER TABLE mysql.agent_sql_trace ADD COLUMN embed_eligible TINYINT(1) NOT NULL DEFAULT 0 COMMENT 'Only successful read traces selected by the writer may be derived or recalled' AFTER embedding";
+SET @str = IF(@have_ast_eligible=0, @cmd, 'DO 0');
+PREPARE stmt FROM @str;
+EXECUTE stmt;
+DROP PREPARE stmt;
+
+SELECT COLUMN_DEFAULT,IS_NULLABLE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='mysql' AND TABLE_NAME='agent_sql_trace' AND COLUMN_NAME='embed_eligible';

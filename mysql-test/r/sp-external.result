@@ -795,6 +795,7 @@ Db	Name	Type	Language	Definer	Modified	Created	Security_type	Comment	character_s
 test	bar	PROCEDURE	JAVASCRIPT	root@localhost	<modified>	<created>	DEFINER		utf8mb4	utf8mb4_0900_ai_ci	utf8mb4_0900_ai_ci
 SHOW PROCEDURE STATUS where Language like "%JAVA%"//
 Db	Name	Type	Language	Definer	Modified	Created	Security_type	Comment	character_set_client	collation_connection	Database Collation
+sys	shannon_agent_metrics	PROCEDURE	JAVASCRIPT	mysql.sys@localhost	<modified>	<created>	INVOKER		utf8mb4	utf8mb4_0900_ai_ci	utf8mb4_0900_ai_ci
 sys	shannon_chat	PROCEDURE	JAVASCRIPT	mysql.sys@localhost	<modified>	<created>	INVOKER	
 Description
 -----------

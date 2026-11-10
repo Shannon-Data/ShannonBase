@@ -110,6 +110,7 @@ VIEW_TABLE_USAGE
 agent_artifact
 agent_conversation_summary
 agent_derive_queue
+agent_execution
 agent_memory
 agent_memory_audit
 agent_memory_edge
@@ -903,7 +904,7 @@ AND table_name not like 'ndb%' AND table_name COLLATE utf8mb3_general_ci not lik
 GROUP BY TABLE_SCHEMA;
 TABLE_SCHEMA	count(*)
 information_schema	47
-mysql	52
+mysql	53
 create table t1 (i int, j int);
 create trigger trg1 before insert on t1 for each row
 begin
@@ -2042,11 +2043,11 @@ use test;
 #                           CACHE; OPENED_TABLES INCREASES"
 #
 SELECT * FROM INFORMATION_SCHEMA.TABLES;
-SELECT VARIABLE_VALUE INTO @val1 FROM performance_schema.global_status WHERE
+SELECT VARIABLE_VALUE INTO @val1 FROM performance_schema.session_status WHERE
 VARIABLE_NAME LIKE 'Opened_tables';
 SELECT ENGINE FROM INFORMATION_SCHEMA.TABLES;
 # The below SELECT query should give same output as above SELECT query.
-SELECT VARIABLE_VALUE INTO @val2 FROM performance_schema.global_status WHERE
+SELECT VARIABLE_VALUE INTO @val2 FROM performance_schema.session_status WHERE
 VARIABLE_NAME LIKE 'Opened_tables';
 # The below select should return '1'
 SELECT @val1 = @val2;

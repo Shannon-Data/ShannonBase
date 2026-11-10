@@ -1,0 +1,21 @@
+--source include/have_debug.inc
+--disable_query_log
+CALL mtr.add_suppression("\\[LightGBM\\] \\[Warning\\]");
+SET @saved_debug=@@SESSION.debug;
+--enable_query_log
+USE test;
+CREATE TABLE agent_ml_cancel(x INT PRIMARY KEY,label INT) SECONDARY_ENGINE=RAPID;
+INSERT INTO agent_ml_cancel VALUES(1,0),(2,0),(3,0),(4,0),(5,1),(6,1),(7,1),(8,1);
+ALTER TABLE agent_ml_cancel SECONDARY_LOAD;
+SET @cancel_model='agent_cancelled_training';
+SET SESSION debug='+d,ml_train_cancel_before_iteration';
+--error ER_QUERY_INTERRUPTED
+CALL sys.ML_TRAIN('test.agent_ml_cancel','label',JSON_OBJECT('task','classification'),@cancel_model);
+--disable_query_log
+SET SESSION debug=@saved_debug;
+--enable_query_log
+SELECT COUNT(*) AS cancelled_model_persisted FROM ML_SCHEMA_root.MODEL_CATALOG WHERE MODEL_HANDLE='agent_cancelled_training';
+SELECT 1 AS session_reusable;
+ALTER TABLE agent_ml_cancel SECONDARY_UNLOAD;
+DROP TABLE agent_ml_cancel;
+DROP DATABASE ML_SCHEMA_root;

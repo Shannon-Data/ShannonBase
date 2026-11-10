@@ -497,6 +497,8 @@ SET @cmd = "CREATE TABLE IF NOT EXISTS agent_review_plan_step (
     tool           VARCHAR(32) COMMENT 'Tool name or action for this step',
     sql_text       TEXT      COMMENT 'SQL to execute for this step',
     args_json      TEXT      COMMENT 'Serialized tool args',
+    execution_db   VARCHAR(64) NOT NULL DEFAULT '',
+    approval_digest CHAR(64) CHARACTER SET ascii COLLATE ascii_bin DEFAULT NULL,
     affected_tables TEXT     COMMENT 'Comma-separated affected tables',
     writes         TINYINT(1) DEFAULT 0 COMMENT 'Whether the step writes data',
     ddl            TINYINT(1) DEFAULT 0 COMMENT 'Whether the step changes schema',
@@ -907,6 +909,7 @@ PREPARE stmt FROM @str;
 EXECUTE stmt;
 DROP PREPARE stmt;
 
+
 --
 -- Lexical retrieval. Vector recall alone cannot find a row by a name the
 -- embedding model never learned -- a table name, a column name, an order id --
@@ -1005,6 +1008,16 @@ DROP PREPARE stmt;
 -- Tables added alongside the retrieval work. See mysql_system_tables.sql for
 -- what each one is for.
 --
+-- Eligibility is deliberately not inferred for historical traces: old rows
+-- do not have a reliable execution-success bit and may contain failed SQL.
+SET @have_ast_eligible = (SELECT COUNT(*) FROM information_schema.COLUMNS
+ WHERE TABLE_SCHEMA='mysql' AND TABLE_NAME='agent_sql_trace' AND COLUMN_NAME='embed_eligible');
+SET @cmd = "ALTER TABLE mysql.agent_sql_trace ADD COLUMN embed_eligible TINYINT(1) NOT NULL DEFAULT 0 COMMENT 'Only successful read traces selected by the writer may be derived or recalled' AFTER embedding";
+SET @str = IF(@have_ast_eligible=0, @cmd, 'DO 0');
+PREPARE stmt FROM @str;
+EXECUTE stmt;
+DROP PREPARE stmt;
+
 -- The definitions below are byte-identical to the ones there, column comments
 -- included, and that is load-bearing rather than tidy: mysql-test's
 -- check-testcase compares the whole information_schema.COLUMNS image before
@@ -1113,6 +1126,25 @@ EXECUTE stmt;
 DROP PREPARE stmt;
 
 set @is_mysql_encrypted = (select ENCRYPTION from information_schema.INNODB_TABLESPACES where NAME='mysql');
+SET @cmd = "CREATE TABLE IF NOT EXISTS agent_execution (
+    execution_id CHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    principal_prefix CHAR(16) NOT NULL,
+    conversation_id VARCHAR(64) NOT NULL,
+    request_hash CHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    run_token CHAR(36) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    status VARCHAR(24) NOT NULL,
+    response MEDIUMTEXT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (execution_id),
+    KEY idx_principal_created (principal_prefix, created_at)
+) ENGINE=InnoDB CHARACTER SET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci STATS_PERSISTENT=0
+  ROW_FORMAT=DYNAMIC TABLESPACE=innodb_system COMMENT='Agent keyed execution outcomes; uncertain runs are never replayed'";
+SET @str = CONCAT(@cmd, " ENCRYPTION='", @is_mysql_encrypted, "'");
+PREPARE stmt FROM @str;
+EXECUTE stmt;
+DROP PREPARE stmt;
+
 SET @have_agent_usage = (SELECT COUNT(*) FROM information_schema.TABLES
                            WHERE TABLE_SCHEMA = 'mysql'
                              AND TABLE_NAME   = 'agent_usage');
@@ -2263,3 +2295,12 @@ DELETE FROM global_grants WHERE PRIV = 'SET_USER_ID';
 -- from mysql_native_password into caching_sha2_password.
 UPDATE mysql.user SET plugin='caching_sha2_password', authentication_string='$A$005$THISISACOMBINATIONOFINVALIDSALTANDPASSWORDTHATMUSTNEVERBRBEUSED' WHERE user='mysql.sys';
 UPDATE mysql.user SET plugin='caching_sha2_password', authentication_string='$A$005$THISISACOMBINATIONOFINVALIDSALTANDPASSWORDTHATMUSTNEVERBRBEUSED' WHERE user='mysql.session';
+
+SET @have_agent_review_digest = (SELECT COUNT(*) FROM information_schema.COLUMNS
+  WHERE TABLE_SCHEMA='mysql' AND TABLE_NAME='agent_review_plan_step' AND COLUMN_NAME='approval_digest');
+SET @cmd = IF(@have_agent_review_digest=0,
+  "ALTER TABLE mysql.agent_review_plan_step ADD COLUMN execution_db VARCHAR(64) NOT NULL DEFAULT '', ADD COLUMN approval_digest CHAR(64) CHARACTER SET ascii COLLATE ascii_bin DEFAULT NULL",
+  "SELECT 'agent review digest already exists' AS msg");
+PREPARE stmt FROM @cmd;
+EXECUTE stmt;
+DROP PREPARE stmt;

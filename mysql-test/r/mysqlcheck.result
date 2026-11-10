@@ -8,6 +8,7 @@ mtr.test_suppressions                              OK
 mysql.agent_artifact                               OK
 mysql.agent_conversation_summary                   OK
 mysql.agent_derive_queue                           OK
+mysql.agent_execution                              OK
 mysql.agent_memory                                 OK
 mysql.agent_memory_audit                           OK
 mysql.agent_memory_edge                            OK
@@ -81,6 +82,9 @@ mysql.agent_conversation_summary
 note     : Table does not support optimize, doing recreate + analyze instead
 status   : OK
 mysql.agent_derive_queue
+note     : Table does not support optimize, doing recreate + analyze instead
+status   : OK
+mysql.agent_execution
 note     : Table does not support optimize, doing recreate + analyze instead
 status   : OK
 mysql.agent_memory
@@ -245,6 +249,7 @@ status   : OK
 mysql.agent_artifact                               OK
 mysql.agent_conversation_summary                   OK
 mysql.agent_derive_queue                           OK
+mysql.agent_execution                              OK
 mysql.agent_memory                                 OK
 mysql.agent_memory_audit                           OK
 mysql.agent_memory_edge                            OK
@@ -305,6 +310,9 @@ mysql.agent_conversation_summary
 note     : Table does not support optimize, doing recreate + analyze instead
 status   : OK
 mysql.agent_derive_queue
+note     : Table does not support optimize, doing recreate + analyze instead
+status   : OK
+mysql.agent_execution
 note     : Table does not support optimize, doing recreate + analyze instead
 status   : OK
 mysql.agent_memory

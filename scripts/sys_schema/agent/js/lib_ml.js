@@ -1,19 +1,8 @@
 //@include lib_lang.js
-
-/* The caller's API key, kept out of @chat_options so it is not echoed back
- * or persisted, and bound to the principal that supplied it.
- *
- * @chat_api_key is a session variable, and a session outlives a principal
- * whenever a connection pool hands the same physical connection to the next
- * user.  Without the binding, principal B calling with api_key absent or
- * masked to '***' silently inherited principal A's key -- A's credential and
- * A's bill.  Storing the owner alongside the key makes the reuse visible:
- * the key is only handed back to the principal it was saved under, and
- * anyone else is treated as having supplied none. */
 function save_secret_api_key(real_key) {
   if (!real_key || real_key === '***') return;
   try {
-    sys.exec_sql("SET @chat_api_key = '" +
+    exec_sql("SET @chat_api_key = '" +
                  esc(current_principal_prefix() + ':' + real_key) + "'");
   } catch (e) {}
 }
@@ -24,8 +13,7 @@ function load_secret_api_key() {
     if (!Array.isArray(rows) || !rows.length || !rows[0].k) return '';
     var stored = String(rows[0].k);
     var sep    = stored.indexOf(':');
-    /* No separator: written by an older server, before the binding existed.
-     * Not reused -- an unattributable key is exactly the case this guards. */
+    // No separator: written by an older server, before the binding existed.
     if (sep <= 0) return '';
     if (stored.substring(0, sep) !== current_principal_prefix()) return '';
     return stored.substring(sep + 1);
@@ -51,46 +39,12 @@ function get_chat_options() {
 }
 
 // `analyze_intent` is defined centrally in lib_lang.js for single-point modification.
-
-/**
- * Stopword-ish tokens that are so common across schemas (id/name/time/status
- * fields, generic verbs) that a raw substring hit carries almost no signal.
- * Kept small and cheap — this is not meant to be a real IDF corpus, just a
- * denylist for the highest-frequency offenders that were previously dragging
- * half the schema into Tier1 (see build_schema_context_fallback).
- */
 var LOW_SIGNAL_KEYWORDS = {
   'id':1,'name':1,'time':1,'date':1,'status':1,'type':1,'data':1,'value':1,
   '时间':1,'状态':1,'名称':1,'类型':1,'数据':1,'编号':1,'信息':1,'记录':1
 };
 
-/**
- * Score candidate tables against the user message using a lightweight
- * per-keyword IDF: a keyword that matches N distinct tables out of T total
- * contributes weight ~log(T/N) per match, instead of every match counting
- * equally.  This keeps generic column names (id/status/时间...) from
- * inflating the candidate set to near-schema-size once table count grows
- * into the hundreds/thousands — the failure mode that previously forced
- * Tier1 to truncate by scan order rather than by relevance.
- *
- * Returns an array of {table, score, name_hit} sorted by score descending
- * (score > 0 only). Table-name / comment substring hits get an additional
- * flat bonus since a keyword literally naming the table is strong signal
- * regardless of corpus frequency.
- */
-/**
- * Reset the per-turn infer_candidate_tables() memo cache. Call this once at
- * the top of shannon_agent_run(), before the cache is read/written anywhere
- * else, so scores from a previous user message never leak into the current
- * turn. Cheap by design — the cache itself is only ever populated (and thus
- * only ever needs clearing) within a single shannon_agent_run() invocation,
- * since the whole module (including `var A = {...}`) is re-evaluated fresh
- * on every call; this exists mainly to give within-turn callers (e.g.
- * build_schema_context() followed by a list_tables tool call using the same
- * keyword) an explicit, named reset point rather than reaching into A
- * directly, and to make the cache's lifetime an intentional contract rather
- * than an accident of A's re-initialization.
- */
+// Reset the per-turn infer_candidate_tables() memo cache.
 function clear_shared_idf_cache() {
   A.idf_cache = {};
 }
@@ -111,11 +65,7 @@ function infer_candidate_tables(db, intent, user_msg, limit) {
   for (var i = 0; i < raw_kw.length && keywords.length < 10; i++) {
     var k = String(raw_kw[i]).toLowerCase();
     if (k.length < 1 || seen[k]) continue;
-    /* Filter noise tokens produced by the [\u4e00-\u9fff]{1,4} regex
-     * splitting a long Chinese sentence into arbitrary 1-4 char chunks:
-     *   - single Chinese characters (年, 月, 的) carry zero search signal
-     *   - 1–2 digit numbers (1, 6, 24) are too generic for LIKE filtering
-     *     (4-digit numbers like 2024 are meaningful and pass through) */
+
     if (/^[\u4e00-\u9fff]$/.test(k)) continue;
     if (/^\d{1,2}$/.test(k)) continue;
     seen[k] = true;
@@ -189,11 +139,7 @@ function build_task_header(intent) {
              'Identify the primary table and aggregation dimensions before generating GROUP BY / aggregate SQL.');
   }
   if (intent && intent.kind === 'write') {
-    /* Without this, a change request fell through to the closing line below
-     * -- "confirm the table and columns, then generate the query" -- and a
-     * model that does what it is told printed the SQL for the user to run.
-     * The change has to go through the tools, because that is where the
-     * approval gate is: proposing it is what makes it reviewable. */
+
     return t('这是一个变更请求。确认目标对象后，请用 update_data（DML）或 run_ddl（DDL）把变更提交执行，'
              + '不要只把 SQL 写给用户让他自己去跑。需要人工确认时，审批流程会自动暂停并把该步骤展示给用户，'
              + '所以提交变更是安全的，也是让用户能够审批的唯一方式。',
@@ -232,34 +178,6 @@ function build_task_header(intent) {
            'Identify the target table and columns before generating the query.');
 }
 
-/* ------------------------------------------------- context budget, by model
- *
- * The budget used to be three hardcoded constants -- PROMPT_TOK_LIMIT
- * 102800, MAX_SCHEMA_CHARS 4000, MAX_TURNS 10 -- which were wrong in both
- * directions at once. 4000 characters of schema is about 1.3k tokens, so a
- * wide star schema ran out of room long before the model did and the failure
- * looked like "the model does not know that column". Meanwhile 102800 tokens
- * is more text than the engine can physically hold (see below), so the
- * budget could never be reached anyway: the heap gave out first.
- *
- * Two different ceilings apply, and the effective budget is the lower.
- *
- * The model's: whatever it can attend to, minus what the completion needs.
- * Taken from model_options.context_window when the caller sets it, otherwise
- * inferred from the model id, otherwise a deliberately small default -- an
- * unknown model is more likely to be a local 8k one than a frontier model,
- * and guessing high produces a provider error while guessing low only
- * produces a shorter prompt.
- *
- * The engine's: the prompt is a JavaScript string in the per-thread
- * JerryScript heap (SHANNONBASE_JERRY_HEAP_KB; 512KB when this was written),
- * and by the time it reaches the model it exists about three times
- * over -- the string, the esc() copy, and the assembled SQL. The limit is
- * therefore expressed in characters, not tokens, because that is the unit
- * the heap charges in: est_tok() counts a CJK character as roughly a token
- * and four ASCII characters as one, so an identical token count can differ
- * fourfold in bytes. This is the ceiling that actually binds on a long
- * Chinese conversation. */
 var MODEL_CONTEXT_DEFAULT = 8192;
 
 var MODEL_CONTEXT_TABLE = [
@@ -284,9 +202,6 @@ function model_context_window() {
   return MODEL_CONTEXT_DEFAULT;
 }
 
-/* How many tokens the prompt may occupy: the window less the completion
- * reservation less a margin, because est_tok() is an estimate and being
- * slightly over is a provider error rather than a slightly worse answer. */
 function prompt_token_budget() {
   var co  = get_chat_options();
   var mo  = (co && co.model_options) ? co.model_options : {};
@@ -297,20 +212,11 @@ function prompt_token_budget() {
   return Math.max(1000, budget);
 }
 
-/* The engine-heap ceiling, in characters.
- *
- * Three sixteenths of the heap: 96KB of 512KB, which is what this was tuned
- * to -- room for the two transient copies a model call makes (the prompt,
- * and the escaped copy that goes into the SQL) plus everything else the
- * routine is holding. Derived rather than fixed so that a build with a
- * larger SHANNONBASE_JERRY_HEAP_KB raises it too; see engine_heap_bytes()
- * in lib_lang.js. */
+// The engine-heap ceiling, in characters.
 function prompt_char_budget() {
   return Math.floor(engine_heap_bytes() * 3 / 16);
 }
 
-/* Schema context scales with the budget instead of being pinned at 4000
- * characters, but never grows past what the heap ceiling can carry. */
 function schema_char_budget() {
   var by_tokens = prompt_token_budget() * 0.35 * 3; /* ~3 chars per token */
   var cap = Math.floor(prompt_char_budget() * 0.35);
@@ -324,41 +230,8 @@ function cfg(key, default_val) {
   return (isFinite(v) && v > 0) ? v : default_val;
 }
 
-/* ml_generate() is the only path to a model, so it is the only place that has
- * to count.  The token figures are est_tok() estimates, not the backend's
- * accounting: sys.ML_GENERATE returns generated text and no usage block, and
- * an estimate that is always present beats an exact number that only one
- * provider reports.  est_tok() is the same estimator the prompt budget is
- * enforced with, so the recorded cost and the budget agree. */
-/* ------------------------------------------------- native tool calling
- *
- * The providers that support it will accept a tool catalogue and answer
- * with a structured call instead of a JSON object embedded in prose. That
- * is strictly better than parsing text: no brace matching, no fenced-block
- * stripping, no "the model explained the call instead of making it", and
- * the model is answering in the shape it was trained on.
- *
- * All of it lives here rather than in the ML layer, and deliberately.
- * register_tool() is the single description of every tool -- its schema,
- * its policy metadata, its documentation -- and rendering that description
- * into provider dialects inside C++ would fork it in the one direction it
- * must never fork. The C++ side learned two generic things instead
- * (extra_body in, raw response out) and never learns what a tool is, so a
- * provider changing its tool format is a change to this file.
- *
- * The text protocol stays as the fallback and is not going away: the local
- * ONNX path and Ollama's /api/generate have no tool channel at all, and an
- * OpenAI-compatible endpoint in front of a model that ignores `tools` will
- * answer in prose regardless. Every call site therefore has to handle both,
- * which is why the native path converts into exactly the shape
- * parse_tool_call() returns rather than introducing a second one. */
-
-/* Which dialect this provider speaks, or null for "no tool channel".
- *
- * Deliberately a whitelist. Sending `tools` to an endpoint that does not
- * expect it is not harmless -- Ollama's /api/generate rejects the request
- * outright -- so an unrecognised provider gets the text protocol, which
- * works everywhere. */
+// ml_generate() is the only path to a model, so it is the only place that has to count.
+// Which dialect this provider speaks, or null for "no tool channel".
 function llm_tool_dialect() {
   var co = get_chat_options();
   var mo = (co && co.model_options) ? co.model_options : {};
@@ -369,29 +242,22 @@ function llm_tool_dialect() {
   return null;
 }
 
-/* The catalogue, in the provider's shape, from the registry.
- *
- * A known cost, stated rather than hidden: on a provider with a tool
- * channel the catalogue is now sent twice -- once here, and once as the
- * text catalogue the prompt has always carried. That is deliberate for
- * now. Dropping the prompt's copy is the obvious saving, and it is also
- * what makes the text fallback unavailable the moment a provider silently
- * ignores `tools` -- which an OpenAI-compatible proxy in front of a model
- * without tool support does exactly. The duplication buys a fallback that
- * cannot break, and the audit trail now counts native calls
- * (A.native_tool_calls), so the decision to trim the prompt can be made
- * from evidence that the native path is actually being taken. */
+// The catalogue, in the provider's shape, from the registry.
 function llm_tools_extra_body(dialect) {
   var man = tool_manifest();
   var tools = [];
   for (var i = 0; i < man.length; i++) {
     var m = man[i];
     if (m.annotations && m.annotations.hidden) continue;
+    var spec = get_tool_spec(m.name);
+    if (spec && !tool_category_expanded(spec.category, A.user_message) &&
+        !(A.expanded_tools && A.expanded_tools[m.name])) continue;
     var desc = (A.lang === 'zh') ? m.description.zh : m.description.en;
-    /* Providers reject a description over a few hundred characters on some
-     * models, and the long form is the prompt's job anyway -- describe_tool
-     * still serves the full text on request. */
-    desc = String(desc || m.name).replace(/\s+/g, ' ').substring(0, 300);
+
+    var example = m.example;
+    if (example && (example.zh !== undefined || example.en !== undefined))
+      example = A.lang === 'zh' ? example.zh : example.en;
+    desc = String(desc || m.name) + '\nExample args: ' + JSON.stringify(example || {});
     var schema = m.input_schema || { type: 'object' };
     if (dialect === 'anthropic') {
       tools.push({ name: m.name, description: desc, input_schema: schema });
@@ -401,19 +267,10 @@ function llm_tools_extra_body(dialect) {
     }
   }
   if (!tools.length) return null;
-  /* tool_choice is left at the provider default ('auto'): the loop must be
-   * able to end with prose, so forcing a call would make finishing
-   * impossible. */
+
   return (dialect === 'anthropic') ? { tools: tools } : { tools: tools, tool_choice: 'auto' };
 }
 
-/* Pull a call out of the provider's own response, in the shape
- * parse_tool_call() would have produced from text.
- *
- * Only the first call is taken even when the provider returned several.
- * The loop executes one tool per turn and records one trace row per step;
- * running a batch here would bypass both. Parallel calls are worth having
- * and are a change to the loop, not to this function. */
 function llm_parse_native_tool_call(raw_json, dialect) {
   if (!raw_json) return null;
   var doc;
@@ -442,11 +299,7 @@ function llm_parse_native_tool_call(raw_json, dialect) {
   var call = msg.tool_calls[0];
   var fn = call && call.function;
   if (!fn || typeof fn.name !== 'string') return null;
-  /* OpenAI sends the arguments as a JSON *string*, and a model can still
-   * produce a malformed one. That is a tool call the loop must see and
-   * report, not a reason to fall back to scanning prose for a second call
-   * that is not there -- so the call survives with empty args and the
-   * schema validator produces the error the model can act on. */
+  // OpenAI sends the arguments as a JSON *string*, and a model can still produce a malformed one.
   var args = {};
   if (typeof fn.arguments === 'string' && fn.arguments.trim()) {
     try { args = JSON.parse(fn.arguments); } catch (e2) { args = {}; }
@@ -457,9 +310,6 @@ function llm_parse_native_tool_call(raw_json, dialect) {
            thought: String(msg.content == null ? '' : msg.content), native: true };
 }
 
-/* Anthropic interleaves prose with tool_use blocks; the prose is the
- * model's reasoning and belongs in the trace the same way `thought` does
- * on the text protocol. */
 function llm_text_blocks(blocks) {
   var out = [];
   for (var i = 0; i < blocks.length; i++)
@@ -468,14 +318,6 @@ function llm_text_blocks(blocks) {
   return out.join(' ').trim();
 }
 
-/* ML_GENERATE with verbose=1 answers with
- * {"text":..,"finish_reason":..,"prompt_tokens":..,"completion_tokens":..}.
- *
- * Falls back to treating the whole thing as the answer when it is not that
- * envelope, which covers two real cases: a server built before the option
- * existed, and a model whose answer happens to be JSON. The finish_reason
- * is then empty, which the caller reads as "unknown" -- the same thing it
- * reads when a provider declines to report one. */
 function parse_generate_envelope(raw) {
   var s = String(raw == null ? '' : raw);
   if (s.charAt(0) !== '{') return { text: s, finish_reason: '', prompt_tokens: -1, completion_tokens: -1, raw: '' };
@@ -492,17 +334,17 @@ function parse_generate_envelope(raw) {
   return { text: s, finish_reason: '', prompt_tokens: -1, completion_tokens: -1, raw: '' };
 }
 
-/* Token accounting prefers what the provider reported and falls back to
- * est_tok() only where it reported nothing. The estimate was previously the
- * only source, and it is the same estimator the prompt budget uses, so a
- * systematic bias in it was invisible: budget and bill were wrong together
- * and therefore agreed. */
 function llm_note_call(prompt, out, ms, env) {
   if (!A.cost)
     A.cost = { llm_calls: 0, prompt_tokens: 0, completion_tokens: 0, llm_ms: 0 };
   A.cost.llm_calls++;
   var pt = (env && env.prompt_tokens     >= 0) ? env.prompt_tokens     : est_tok(prompt);
   var ct = (env && env.completion_tokens >= 0) ? env.completion_tokens : est_tok(out);
+  if (env && env.prompt_tokens > 0) {
+    var raw_estimate = est_tok_raw(prompt);
+    if (raw_estimate > 0) A.token_ratio = Math.max(Number(A.token_ratio || 1),
+      Math.min(4, env.prompt_tokens / raw_estimate));
+  }
   A.cost.prompt_tokens     += pt;
   A.cost.completion_tokens += ct;
   A.cost.llm_ms            += Number(ms || 0);
@@ -510,20 +352,7 @@ function llm_note_call(prompt, out, ms, env) {
     A.cost.truncated_calls = Number(A.cost.truncated_calls || 0) + 1;
 }
 
-/* Operator control over where the prompt goes.
- *
- * The prompt carries query results, schema and recalled memory, and the only
- * thing that decides which host receives it is model_options.endpoint -- a
- * session variable. An operator could bound DDL and reads but had no way to
- * say "only our approved provider", so the one egress path the agent has was
- * the one path policy did not cover.
- *
- * Same shape as every other ceiling here: a missing key is no opinion, and a
- * session may only be narrowed by what the operator set.
- *   allow_remote_provider=false  -> local inference only
- *   allowed_providers=a,b        -> provider must be named; others rejected
- *   allow_endpoint_override=false-> session-supplied endpoint/api_key dropped
- */
+// Operator control over where the prompt goes.
 var EGRESS_KEYS = ['provider', 'endpoint', 'api_key',
                   'workspace_id', 'region', 'api_config'];
 
@@ -532,8 +361,7 @@ function apply_egress_policy(o) {
   if (!o) return o;
 
   if (_pol_has(base, 'allow_remote_provider') && !_pol_bool(base.allow_remote_provider)) {
-    /* Drop everything that could name an off-box destination. What is left is
-     * the local model id, which is what ML_GENERATE falls back to. */
+    // Drop everything that could name an off-box destination.
     for (var ek = 0; ek < EGRESS_KEYS.length; ek++) delete o[EGRESS_KEYS[ek]];
     return o;
   }
@@ -549,9 +377,6 @@ function apply_egress_policy(o) {
                         'Provider is not in the operator allow-list: ') + (o.provider || '(none)'));
   }
 
-  /* An allow-list of providers is meaningless while the session can still
-   * point the named provider at any host, so the endpoint is locked unless
-   * the operator opted back in. */
   var endpoint_locked =
       (_pol_has(base, 'allow_endpoint_override') && !_pol_bool(base.allow_endpoint_override)) ||
       (_pol_has(base, 'allowed_providers') && !_pol_has(base, 'allow_endpoint_override'));
@@ -560,21 +385,7 @@ function apply_egress_policy(o) {
   return o;
 }
 
-/* The same ceiling, for the options blob handed to a batch routine.
- *
- * apply_egress_policy() sits in ml_generate(), which is not the only way a
- * prompt leaves this instance: sys.ML_RAG reads $.model_options and passes it
- * to ML_MODEL_GENERATE untouched (ml_rag.sql), and sys.ML_RAG_TABLE forwards
- * its whole in_options blob to ML_RAG. A blob the model wrote therefore chose
- * the destination, which is the one thing retrieved content must never get to
- * do -- so the ceiling has to reach inside the nesting the routines read.
- *
- * Top-level destination keys are dropped outright rather than governed: no
- * batch routine reads one. ML_GENERATE_TABLE rebuilds its own option set from
- * a fixed list of keys, ML_EMBED_TABLE reads model_id and truncate, and
- * ML_RAG's generator options come from $.model_options. Carrying them further
- * buys nothing and leaves a path open for a routine that later forwards more
- * than it does today. */
+// The same ceiling, for the options blob handed to a batch routine.
 function apply_egress_policy_nested(o) {
   if (!o || typeof o !== 'object') return o;
   for (var i = 0; i < EGRESS_KEYS.length; i++) delete o[EGRESS_KEYS[i]];
@@ -596,24 +407,7 @@ function ml_generate(prompt, extra) {
 
   o = apply_egress_policy(o);
 
-  /* The options are assembled on their own, and the prompt is joined in
-     once at the end.
-     
-     This used to open with the prompt -- "SELECT sys.ML_GENERATE('" +
-     esc(prompt) + ... -- and then append the options onto it with a dozen
-     `sql += ...` statements. Strings are immutable, so every one of those
-     appends copied the whole accumulated string, prompt included: assembling
-     the options rebuilt the prompt roughly thirty times over. None of the
-     copies is live for long, but they do not have to be. The engine heap was
-     512KB when this was measured, the routine's own compiled body already
-     spends most of it, and the peak is what has to fit.
-     
-     Keeping the prompt out of the accumulator makes those appends cost what
-     they look like they cost -- they now operate on a few hundred bytes of
-     option text. The prompt is copied exactly twice: once to escape it, once
-     into the joined result. Array.join is deliberate rather than `+`: a
-     chain of + evaluates left to right and allocates an intermediate at each
-     step, which is the same trap one level down. */
+  // The options are assembled on their own, and the prompt is joined in once at the end.
   var opts = "JSON_OBJECT(" +
     "'task','"             + esc(o.task)             + "'," +
     "'model_id','"         + esc(o.model_id)         + "'," +
@@ -637,27 +431,14 @@ function ml_generate(prompt, extra) {
   if (o.reasoning_effort)
     opts += ",'reasoning_effort','" + esc(o.reasoning_effort) + "'";
 
-  /* The call's wall clock. An explicitly configured timeout_ms wins; with
-   * none, one derived from what is left of the turn deadline is sent rather
-   * than leaving the backend to apply its own. The backend's is per attempt
-   * -- three attempts plus backoff against a hanging cloud endpoint is about
-   * six minutes -- and the loop only checks its deadline between steps, so
-   * without this a ten-minute turn can return well after twenty. The derived
-   * value only ever shortens the call: see llm_attempt_timeout_ms(). */
-  var call_timeout = Number(o.timeout_ms) || llm_attempt_timeout_ms(o.provider);
+  // The call's wall clock.
+  var budget_timeout = llm_attempt_timeout_ms(o.provider);
+  var call_timeout = isFinite(Number(o.timeout_ms)) && Number(o.timeout_ms) > 0 ? Number(o.timeout_ms) : budget_timeout;
+  if (budget_timeout) call_timeout = Math.min(call_timeout, budget_timeout);
   if (call_timeout)
     opts += ",'timeout_ms'," + Math.round(call_timeout);
 
-  /* Ask for the envelope rather than the bare text, so the loop can see
-   * why generation stopped. A server that predates the option ignores it
-   * and returns plain text, which ml_generate_call() handles -- that is
-   * why the parse below falls back instead of failing.
-   *
-   * With a tool catalogue attached the raw provider response is needed too,
-   * because that is where a structured call arrives: on a tool call an
-   * OpenAI-compatible message carries null content and puts everything in
-   * message.tool_calls, so the extracted text alone would look like an
-   * empty answer. */
+  // Ask for the envelope rather than the bare text, so the loop can see why generation stopped.
   var dialect    = (extra && extra.tools === true) ? llm_tool_dialect() : null;
   var extra_body = dialect ? llm_tools_extra_body(dialect) : null;
   if (extra_body) {
@@ -670,44 +451,14 @@ function ml_generate(prompt, extra) {
 
   opts += ")";
 
-  var sql = ["SELECT sys.ML_GENERATE('", esc(prompt), "',", opts, ") AS result"].join('');
-
-  return ml_generate_call(sql, prompt, dialect);
+  return ml_generate_call(function () {
+    var remaining = A.runtime_active ? runtime_sql_timeout() : (call_timeout || 30000);
+    return "SELECT sys.ML_GENERATE('" + esc(prompt) + "',JSON_SET(" + opts +
+      ", '$.timeout_ms'," + Math.max(1, Math.min(call_timeout || remaining, remaining)) + ")) AS result";
+  }, prompt, dialect);
 }
 
-/* ------------------------------------------------------- model call retry
- *
- * What this replaces: a single `query(sql)`. query() turns a SQL error into
- * `{error: "..."}` rather than throwing, and the old code then read
- * `rows[0].result`, found nothing, and returned ''. Three things followed
- * from that. An unavailable model was indistinguishable from a model that
- * answered with whitespace, so the loop treated infrastructure failure as
- * "the model has nothing to say" and ended the turn. The error text --
- * which says whether it was a rate limit, a bad key, or a prompt over the
- * context window -- was discarded without ever being logged. And a failure
- * that would have succeeded half a second later was final.
- *
- * So: classify, then decide. Retrying a 401 is pointless and retrying a
- * context-length error just spends the same tokens again, whereas a 429 or
- * a dropped connection is exactly what backoff is for. A prompt that is too
- * long is reported as such so the caller can shrink it and come back --
- * that is what the loop's compaction does with it.
- *
- * Errors arrive as free text from whichever provider produced them, so the
- * classifier matches on substrings and defaults to retryable-once: a
- * transient failure misread as permanent ends the user's turn, while a
- * permanent one misread as transient costs a second of backoff. */
 var LLM_MAX_ATTEMPTS = 3;
-
-/* Per-attempt wall clock derived from the turn deadline, or 0 when no
- * deadline is in force (the loop publishes one; a bare ml_generate() call
- * from elsewhere has none, and keeps the backend default).
- *
- * It may only shorten the call, never lengthen it: the backend's own
- * defaults -- 30s, raised to 120s for a cloud provider (ml/ml_generate.cpp,
- * llm_generate_ollama.cpp) -- stay the upper bound, so this changes what
- * happens when the turn is nearly spent and nothing else. */
-var LLM_MIN_TIMEOUT_MS = 5000;
 
 function llm_attempt_timeout_ms(provider) {
   var until = Number(A.turn_deadline_at || 0);
@@ -715,15 +466,17 @@ function llm_attempt_timeout_ms(provider) {
   var p = String(provider || '').toLowerCase();
   var backend_default = (p && p !== 'ollama' && p !== 'onnx') ? 120000 : 30000;
   var left = until - Date.now();
-  var per = (left <= 0) ? LLM_MIN_TIMEOUT_MS
-                        : Math.max(LLM_MIN_TIMEOUT_MS,
-                                   Math.floor(left / LLM_MAX_ATTEMPTS));
+  var per = Math.max(1, Math.floor(left / LLM_MAX_ATTEMPTS));
   return Math.min(per, backend_default);
 }
 
 function classify_llm_error(msg) {
   var m = String(msg || '').toLowerCase();
   if (!m) return { kind: 'unknown', retryable: true };
+  if (m.indexOf('maximum statement execution time exceeded') !== -1)
+    return { kind: 'deadline', retryable: false };
+  if (/cancelled|canceled|kill query|query execution was interrupted/.test(m))
+    return { kind: 'cancelled', retryable: false };
   if (m.indexOf('context length') !== -1 || m.indexOf('context_length') !== -1 ||
       m.indexOf('too many tokens') !== -1 || m.indexOf('maximum context') !== -1 ||
       m.indexOf('prompt is too long') !== -1 || m.indexOf('input too long') !== -1)
@@ -745,35 +498,22 @@ function classify_llm_error(msg) {
   return { kind: 'unknown', retryable: true };
 }
 
-/* Backoff without a timer: JerryScript has no setTimeout, and the engine is
- * single-threaded inside the routine anyway, so the wait is the server's. */
 function llm_backoff_sleep(attempt) {
   var secs = Math.min(4, 0.5 * Math.pow(2, attempt));
+  if (A.runtime_active) secs = Math.min(secs, runtime_sql_timeout() / 1000);
+  if (secs <= 0) return;
   try { query("SELECT SLEEP(" + secs + ")"); } catch (e) {}
 }
 
 function ml_generate_call(sql, prompt, dialect) {
-  /* The seam the loop evaluation drives the agent through.
-   *
-   * ml_generate() is the only path to a model, so replacing what it returns
-   * replaces the model -- and that is what makes the agent loop testable at
-   * all. Everything that decides whether this agent is safe to ship lives
-   * between the model's answer and the user's: the read ceiling, the
-   * repeat detector, the error budget, compaction, the stop-reason
-   * taxonomy. None of it was reachable from a test, because reaching it
-   * meant having a model in CI, and the parts of it that misfire do so on
-   * inputs a real model produces only occasionally and never on demand.
-   *
-   * A scripted model makes those paths ordinary test cases: the script
-   * says "ask for this tool, then repeat it" and the repeat detector
-   * either fires or the test fails. It does not evaluate answer quality --
-   * that genuinely needs a real model and does not belong in MTR. It
-   * evaluates the harness, which is the part that has to be correct before
-   * answer quality is worth measuring.
-   *
-   * Set only by shannon_agent_selfcheck('loop'), never by a chat option:
-   * a session-settable way to replace the model would be a way to make the
-   * agent say anything. */
+  if (A.runtime_active) {
+    var ctx = get_tx_context();
+    if (!ctx.known || (ctx.active && ctx.owner !== TX_OWNER_CALLER)) {
+      A.last_llm_status = { ok: false, kind: 'transaction_open', error: 'Close the agent transaction before inference.' };
+      return '';
+    }
+  }
+  // The seam the loop evaluation drives the agent through.
   if (A.eval_script) return eval_script_respond(prompt, dialect);
 
   var attempts = LLM_MAX_ATTEMPTS;
@@ -782,7 +522,10 @@ function ml_generate_call(sql, prompt, dialect) {
 
   for (var attempt = 0; attempt < attempts; attempt++) {
     var t0 = Date.now();
-    var rows = query(sql);
+    if (A.runtime_active && runtime_sql_timeout() <= 0) {
+      last_kind = 'deadline'; last_err = 'Agent deadline exceeded'; break;
+    }
+    var rows = query(typeof sql === 'function' ? sql() : sql);
     var ms = Date.now() - t0;
 
     var err = (rows && !Array.isArray(rows) && rows.error) ? String(rows.error) : '';
@@ -791,12 +534,14 @@ function ml_generate_call(sql, prompt, dialect) {
 
     if (!err) {
       var env = parse_generate_envelope(String(rows[0].result));
+      llm_note_call(prompt, env.text, ms, env);
+      if (env.finish_reason === 'cancelled') {
+        A.last_llm_status = { ok: false, kind: 'cancelled', error: 'Generation cancelled.', attempts: attempt + 1 };
+        A.last_think = '';
+        return '';
+      }
       var raw = env.text;
-      llm_note_call(prompt, raw, ms, env);
-      /* A structured call, when the provider made one. Recorded on the
-       * status rather than returned, so that every existing caller of
-       * ml_generate() keeps receiving a string and only the agent loop --
-       * the one that asked for tools -- has to know about it. */
+      // A structured call, when the provider made one.
       var native_call = dialect ? llm_parse_native_tool_call(env.raw, dialect) : null;
       A.last_llm_status = { ok: true, kind: '', error: '', attempts: attempt + 1,
                             finish_reason: env.finish_reason,
@@ -813,44 +558,30 @@ function ml_generate_call(sql, prompt, dialect) {
     llm_note_failure(prompt, ms, cls.kind, err);
 
     if (!cls.retryable || attempt === attempts - 1) break;
-    /* Past the turn deadline there is nothing left to retry into: the loop
-     * will end the turn the moment this returns, so another attempt plus
-     * its backoff would only push the answer further past the budget the
-     * caller was promised. */
+
     if (A.turn_deadline_at && Date.now() >= Number(A.turn_deadline_at)) break;
     llm_backoff_sleep(attempt);
   }
 
-  /* Out of attempts. The caller gets '' as before -- every call site
-   * already handles an empty completion -- but A.last_llm_status now says
-   * why, so the loop can tell "the model is unreachable" from "the model
-   * had nothing to add" and say so to the user instead of apologising
-   * generically. */
+  // Out of attempts.
   A.last_llm_status = { ok: false, kind: last_kind, error: last_err, attempts: attempts };
   A.last_think = '';
   return '';
 }
 
-/* A failed call still consumed a request slot and still took time, so it is
- * still metered; it is counted separately so that a principal's error rate
- * is visible next to its spend. */
 function llm_note_failure(prompt, ms, kind, err) {
   if (!A.cost)
     A.cost = { llm_calls: 0, prompt_tokens: 0, completion_tokens: 0, llm_ms: 0 };
   if (A.cost.llm_errors === undefined) A.cost.llm_errors = 0;
   A.cost.llm_errors++;
   A.cost.llm_ms += Number(ms || 0);
-  /* Recorded where the rest of the agent's diagnostics live, so that a run
-   * of model failures is visible next to the retrievals and writes of the
-   * same turn rather than only in the server error log. */
+
   try {
     mem_log_audit('model', 'llm_error', 'ml_generate',
                   kind + ': ' + String(err).substring(0, 400), 0, Number(ms || 0), '');
   } catch (e) {}
 }
 
-/* Human-readable reason for the user when the model could not be reached at
- * all, rather than the generic "please try again". */
 function llm_failure_message() {
   var st = A.last_llm_status;
   if (!st || st.ok) return '';
@@ -878,13 +609,11 @@ function ml_rag(question, topK, opt_override) {
     { n_citations: topK, distance_metric: 'COSINE', skip_generate: 1 },
     opt_override || {}
   );
-  /* skip_generate defaults to 1, but a caller may switch it off and hand
-     ML_RAG its own $.model_options -- which is a generation call, and so
-     bound by the same egress ceiling as ml_generate(). */
+
   opt = apply_egress_policy_nested(opt);
   try {
-    sys.exec_sql("SET @_rag_out = NULL");
-    sys.exec_sql(
+    query_checked("SET @_rag_out = NULL");
+    query_checked(
       "CALL sys.ML_RAG(" +
       "'" + esc(question) + "'," +
       "@_rag_out," +
@@ -899,12 +628,7 @@ function ml_rag(question, topK, opt_override) {
   var raw = String(rows[0].result);
   try {
     var obj = JSON.parse(raw);
-    /* ML_RAG reports what it retrieved as `citations` plus a
-     * `processing_info` block -- it has never emitted `found`, `hit_count` or
-     * `n_citations`.  Reading only those three meant hits was always 0 and
-     * heatwave_dispatch scored every successful retrieval as a miss, then
-     * threw the citations away and answered from the bare model instead.
-     * Prefer the real fields and keep the old names as fallbacks. */
+
     var info = (obj.processing_info && typeof obj.processing_info === 'object')
       ? obj.processing_info : {};
     var citation_list = Array.isArray(obj.citations) ? obj.citations : [];
@@ -932,40 +656,6 @@ function ml_rag(question, topK, opt_override) {
   }
 }
 
-/* ---------------------------------------------------------------- RAG targets
- *
- * What scopes agent memory to one owner is a predicate the agent writes
- * itself -- document_name on agent_memory, principal_prefix on
- * agent_semantic_fact.  sys.ML_RAG takes that predicate as a *parameter*
- * instead, and applies it only when the caller supplies one.  So
- *
- *     rag_options.vector_store = ['mysql.agent_memory']
- *
- * with no document_name read back every principal's episodic memory, and
- * mysql.agent_sql_trace -- which has no document_name column at all, so the
- * filter is skipped even when supplied -- returned the SQL other people had
- * actually run.  Auto-discovery already excluded the system schemas; an
- * explicit vector_store went straight through.
- *
- * This is not a privilege escalation.  ML_RAG is SQL SECURITY INVOKER -- its
- * DEFINER= clause only records who created it -- so the read only ever
- * reached tables the caller could already SELECT, which for an application
- * account means the agent tables it must be granted for its own memory to
- * work.  What it walks around is the agent's isolation convention, in one
- * statement, with no agent in the path.
- *
- * The authoritative refusal therefore lives inside sys.ML_RAG: sys.* is
- * commonly granted at schema level, so a caller can invoke the routine
- * directly and anything enforced out here is bypassed.  This filter exists
- * so a caller who did come through the agent gets an agent-shaped answer
- * rather than a raw SQL error, and it is in one place so every route
- * inherits it.
- *
- * The agent's own recall does not pass through here, and no longer reaches
- * ML_RAG either: mem_vector_search() builds its options directly, and L2a
- * uses the 'sql' backend, which writes the isolation predicate into the
- * statement where a caller cannot reach it.
- */
 var RAG_BLOCKED_SCHEMAS = ['mysql', 'sys', 'information_schema', 'performance_schema'];
 
 function rag_store_blocked(spec) {
@@ -973,17 +663,14 @@ function rag_store_blocked(spec) {
   if (!s) return false;
   var dot = s.indexOf('.');
   if (dot <= 0) {
-    /* Unqualified: ML_RAG resolves it against the session's own database, so
-     * an agent table named without a schema is still a way to reach one. */
+
     return /^agent_/i.test(s);
   }
   var schema = s.substring(0, dot).toLowerCase();
   return RAG_BLOCKED_SCHEMAS.indexOf(schema) !== -1;
 }
 
-/* Splits a caller-supplied vector_store into what may be searched and what
- * may not.  Returns allowed:[] / blocked:[]; a non-array input is returned
- * unchanged as allowed so the ML_RAG default path is untouched. */
+// Splits a caller-supplied vector_store into what may be searched and what may not.
 function rag_filter_vector_store(list) {
   if (!Array.isArray(list)) return { allowed: list, blocked: [] };
   var allowed = [], blocked = [];
@@ -994,8 +681,6 @@ function rag_filter_vector_store(list) {
   return { allowed: allowed, blocked: blocked };
 }
 
-/* Same rule for the {schema_name, table_name} shape @chat_options.tables and
- * discover_vector_tables() use. */
 function rag_table_blocked(tb) {
   if (!tb) return false;
   if (typeof tb === 'string') return rag_store_blocked(tb);
@@ -1010,23 +695,21 @@ function rag_blocked_message(blocked) {
            'this way bypasses the isolation key.');
 }
 
-/* Note: get_embed_model_id is defined in lib_schema.js, but it can be called directly here——
- * After the entire script is concatenated, function declarations are hoisted in their entirety,
- * so cross-file calls do not depend on include order. */
 function get_rag_options(chat_opt) {
   var user_rag = (chat_opt && chat_opt.rag_options &&
                   typeof chat_opt.rag_options === 'object') ? chat_opt.rag_options : {};
 
+  chat_opt=chat_opt || {};
   var legacy = {};
-  if (!chat_opt.rag_options) {
-    if (chat_opt.retrieve_top_k)    legacy.n_citations = chat_opt.retrieve_top_k;
-    if (chat_opt.retrieval_options) legacy.retrieval_options = chat_opt.retrieval_options;
-    if (chat_opt.embed_model_id)    legacy.embed_model_id = chat_opt.embed_model_id;
-    if (Array.isArray(chat_opt.tables) && chat_opt.tables.length) {
-      legacy.vector_store = chat_opt.tables.map(function(tb) {
-        return tb.schema_name + '.' + tb.table_name;
-      });
-    }
+  if (chat_opt.retrieve_top_k !== undefined) legacy.n_citations = chat_opt.retrieve_top_k;
+  if (chat_opt.retrieval_options) legacy.retrieval_options = chat_opt.retrieval_options;
+  if (chat_opt.vector_store_columns) legacy.vector_store_columns = chat_opt.vector_store_columns;
+  if (chat_opt.embed_model_id) legacy.embed_model_id = chat_opt.embed_model_id;
+  if (chat_opt.schema_name) legacy.schema = [String(chat_opt.schema_name)];
+  if (Array.isArray(chat_opt.tables) && chat_opt.tables.length) {
+    legacy.vector_store=chat_opt.tables.map(function(tb) {
+      return typeof tb==='string' ? tb : String(tb.schema_name)+'.'+String(tb.table_name);
+    });
   }
 
   var defaults = { n_citations: 6, distance_metric: 'COSINE', skip_generate: 1 };

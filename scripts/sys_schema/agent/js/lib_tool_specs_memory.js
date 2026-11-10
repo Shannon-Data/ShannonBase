@@ -1,20 +1,12 @@
 //@include lib_tool_registry.js
 //@include lib_memory_registry.js
-
-/* Memory as tools.
- *
- * scope:'memory' marks these as writing only to mysql.agent_* — never to user
- * data — and requiresTx:false says they have no transaction to join.
- * evaluate_step_policy() uses that pair to let remember_fact through
- * require_approval_for_write, which exists to protect user tables.
- * forget_memory keeps risk:'high', so it still lands in the approval gate. */
-
+// Memory as tools.
 var MEMORY_TOOLS_GROUP = {
   zh: '【记忆工具】跨会话的长期事实，按 SQL principal 隔离。',
   en: '[Memory Tools] Cross-session long-term facts, isolated per SQL principal.'
 };
 
-/* ----------------------------------------------------------- remember_fact */
+/*  remember_fact */
 register_tool({
   name: 'remember_fact', order: 200, category: 'memory', group: MEMORY_TOOLS_GROUP,
   scope: 'memory', requiresTx: false,
@@ -30,22 +22,7 @@ register_tool({
              'one-off query result' },
   example: { zh: { statement: '用户偏好中文回答' },
              en: { statement: 'the user prefers concise answers' } },
-  /* subject/predicate/object are optional structure alongside the sentence,
-   * not a replacement for it.  The columns, and the idx_principal_pred index
-   * over them, have existed since the table was created, and forget_memory
-   * has always offered a `predicate` filter -- but no caller ever supplied
-   * the values, so every one of those rows was NULL and that filter could
-   * only ever match nothing.
-   *
-   * Dedup deliberately stays on the statement: uk_fact is
-   * (principal_prefix, statement(191)) and mem_long_write_fact()'s ON
-   * DUPLICATE KEY UPDATE is what turns a repeat write into a use_count bump.
-   * Adding a second unique key over (principal_prefix, subject, predicate)
-   * would give one INSERT two keys to violate, and ON DUPLICATE KEY UPDATE
-   * acts on whichever it hits first -- so "same subject+predicate replaces"
-   * and "same sentence dedups" would silently fight.  Picking between them
-   * is a schema decision with a migration attached, not a passenger on this
-   * change. */
+  // subject/predicate/object are optional structure alongside the sentence, not a replacement for it.
   args: { type: 'object', required: ['statement'],
           properties: { statement:  { type: 'string', minLength: 4, maxLength: 512 },
                         scope:      { type: 'string', maxLength: 64 },
@@ -77,8 +54,7 @@ function impl_remember_fact(args, ctx) {
                                   subject:    args.subject,
                                   predicate:  args.predicate,
                                   object:     args.object,
-                                  confidence: args.confidence },
-                                get_memory_options(ctx.chat_opt));
+                                  confidence: args.confidence });
   if (!res.ok)
     return { ok: false, error: res.error || 'remember_fact_failed',
              response: t('记忆写入失败：', 'Failed to persist the fact: ') + (res.error || '') };
@@ -89,7 +65,7 @@ function impl_remember_fact(args, ctx) {
            memory_degraded: !!res.degraded };
 }
 
-/* ----------------------------------------------------------- recall_memory */
+/*  recall_memory */
 register_tool({
   name: 'recall_memory', order: 201, category: 'memory',
   scope: 'memory', requiresTx: false,
@@ -111,34 +87,24 @@ register_tool({
   handler: impl_recall_memory
 });
 
-function impl_recall_memory(args, ctx) {
-  var mo = get_memory_options(ctx.chat_opt);
-  var q  = String(args.question || '');
-  if (args.top_k) {
-    mo = mem_merge_defaults(mo, { long_term: { episodic_top_k: Number(args.top_k),
-                                               semantic_top_k: Number(args.top_k) } });
-  }
+function impl_recall_memory(args) {
+  // One memory-layer call: tier selection, top_k and degradation are its business.
+  var rec = MEM.long.recall(String(args.question || ''), null,
+                            args.top_k ? { top_k: Number(args.top_k) } : null);
   var lines = [];
 
-  var facts = MEM.long.recall_facts(q, mo);
-  for (var i = 0; i < facts.length; i++)
-    lines.push(t('事实：', 'Fact: ') + facts[i].statement +
-               ' (confidence ' + facts[i].confidence + ')');
+  if (rec.facts_text)
+    lines.push(rec.facts_text);
 
-  var ep = MEM.long.recall_turns(q, mo);
-  if (ep && ep.ok && ep.text && String(ep.text).trim())
-    lines.push(t('历史片段：\n', 'Past turns:\n') + compress(String(ep.text), 1200));
+  if (String(rec.episodic_text || '').trim())
+    lines.push(t('历史片段：\n', 'Past turns:\n') + compress(rec.episodic_text, 1200));
 
   if (!lines.length)
     return { ok: true, response: t('没有检索到相关的长期记忆。', 'No relevant long-term memory found.'),
-             memory_degraded: !!A.memory_degraded };
-  return { ok: true, response: lines.join('\n'), memory_degraded: !!A.memory_degraded };
+             memory_degraded: !!rec.degraded };
+  return { ok: true, response: lines.join('\n'), memory_degraded: !!rec.degraded };
 }
 
-/* ------------------------------------------------------------ forget_memory
- * hidden:true — deleting memory is an operator action, not something the
- * model should volunteer.  It stays registered (and validated, and gated by
- * risk:'high') so an explicit call still works and still needs approval. */
 register_tool({
   name: 'forget_memory', order: 202, category: 'memory', hidden: true,
   scope: 'memory', requiresTx: false,
@@ -157,36 +123,17 @@ register_tool({
   handler: impl_forget_memory
 });
 
-/* Approval previews.  These tools take a sentence and a filter, not SQL, so
- * without a rendering the review prompt would show an empty "SQL:" line for
- * the one memory operation that is destructive. */
+// Approval previews: one builder in the memory layer, so preview and execution agree.
 function display_remember_fact(args) {
-  var cols = ['principal_prefix', 'scope', 'statement'];
-  var vals = ['<this principal>',
-              "'" + String(args.scope || '') + "'",
-              "'" + String(args.statement || '').substring(0, 200) + "'"];
-  var trip = ['subject', 'predicate', 'object'];
-  for (var i = 0; i < trip.length; i++) {
-    if (args[trip[i]] === undefined || args[trip[i]] === null || args[trip[i]] === '') continue;
-    cols.push(trip[i]);
-    vals.push("'" + String(args[trip[i]]).substring(0, 128) + "'");
-  }
-  return "INSERT INTO mysql.agent_semantic_fact(" + cols.join(', ') + ") " +
-         "VALUES (" + vals.join(', ') + ")";
+  return MEM.long.preview_write_fact(args || {});
 }
 
 function display_forget_memory(args) {
-  var conds = ['principal_prefix = <this principal>'];
-  if (args.fact_id)   conds.push('fact_id = ' + Number(args.fact_id));
-  if (args.scope)     conds.push("scope = '" + String(args.scope) + "'");
-  if (args.predicate) conds.push("predicate = '" + String(args.predicate) + "'");
-  if (args.contains)  conds.push("statement LIKE '%" + String(args.contains) + "%'");
-  if (args.all)       conds.push('<all facts for this principal>');
-  return 'DELETE FROM mysql.agent_semantic_fact WHERE ' + conds.join(' AND ');
+  return MEM.long.preview_forget(args || {});
 }
 
 function impl_forget_memory(args, ctx) {
-  var res = MEM.long.forget(args || {}, get_memory_options(ctx.chat_opt));
+  var res = MEM.long.forget(args || {});
   if (!res.ok) {
     if (res.error === 'forget_requires_filter')
       return { ok: false, error: res.error,

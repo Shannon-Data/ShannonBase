@@ -12518,10 +12518,17 @@ bool mysqld_get_one_option(int optid,
       test_flags = argument ? (uint)atoi(argument) : 0;
       opt_endinfo = true;
       break;
-    case (int) OPT_LLM_DIR:
+    case (int) OPT_LLM_DIR: {
       strmake(mysql_llm_home, argument, sizeof(mysql_llm_home) - 1);
+      size_t llm_dir_len = strlen(mysql_llm_home);
+      if (llm_dir_len && mysql_llm_home[llm_dir_len - 1] != '/' &&
+          llm_dir_len + 1 < sizeof(mysql_llm_home)) {
+        mysql_llm_home[llm_dir_len] = '/';
+        mysql_llm_home[llm_dir_len + 1] = '\0';
+      }
       mysql_llm_home_ptr = mysql_llm_home;
       break;
+    }
     case (int)OPT_ISAM_LOG:
       opt_myisam_log = true;
       break;

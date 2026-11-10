@@ -12,6 +12,7 @@ def	mysql	uk_artifact_hash	mysql	agent_artifact	UNIQUE	YES
 def	mysql	PRIMARY	mysql	agent_conversation_summary	PRIMARY KEY	YES
 def	mysql	PRIMARY	mysql	agent_derive_queue	PRIMARY KEY	YES
 def	mysql	uk_task	mysql	agent_derive_queue	UNIQUE	YES
+def	mysql	PRIMARY	mysql	agent_execution	PRIMARY KEY	YES
 def	mysql	PRIMARY	mysql	agent_memory	PRIMARY KEY	YES
 def	mysql	uk_conv_seq	mysql	agent_memory	UNIQUE	YES
 def	mysql	PRIMARY	mysql	agent_memory_audit	PRIMARY KEY	YES

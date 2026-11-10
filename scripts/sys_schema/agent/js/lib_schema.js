@@ -1,5 +1,4 @@
 //@include lib_ml.js
-
 function get_embed_model_id(opts) {
   if (opts && opts.embed_model_id) return opts.embed_model_id;
   var co = get_chat_options();
@@ -19,10 +18,7 @@ function check_schema_embeddings_ready(db) {
 }
 
 function call_schema_metadata(user_msg, db, n_results, extra_opts) {
-  /* ML_RETRIEVE_SCHEMA_METADATA returns relevance-ranked abridged CREATE
-   * TABLE statements.  Its documented options are schemas/tables and
-   * include_comments; sample rows are added by our second-stage enrichment
-   * below rather than passed as unsupported retrieval options. */
+  // ML_RETRIEVE_SCHEMA_METADATA returns relevance-ranked abridged CREATE TABLE statements.
   var opts = { include_comments: true };
   extra_opts = extra_opts || {};
   if (Array.isArray(extra_opts.tables) && extra_opts.tables.length) {
@@ -34,8 +30,8 @@ function call_schema_metadata(user_msg, db, n_results, extra_opts) {
   }
 
   try {
-    sys.exec_sql("SET @_sm_out = NULL");
-    sys.exec_sql(
+    exec_sql("SET @_sm_out = NULL");
+    exec_sql(
       "CALL sys.ML_RETRIEVE_SCHEMA_METADATA(" +
       "'" + esc(user_msg) + "'," +
       "@_sm_out," +
@@ -49,16 +45,7 @@ function call_schema_metadata(user_msg, db, n_results, extra_opts) {
   } catch(e) { return ''; }
 }
 
-/* Total schema context, in characters.
- *
- * Was a flat 4000 -- about 1.3k tokens, which on a model with a 64k window
- * meant the schema ran out of room roughly fifty times sooner than the
- * model did. A wide star schema then arrived truncated and the failure
- * presented as the model not knowing a column existed, which is a hard
- * thing to recognise from the outside.
- *
- * Now derived from the model's context window and bounded by the engine
- * heap; see schema_char_budget() in lib_ml.js. 4000 remains the floor. */
+// Total schema context, in characters.
 var MAX_SCHEMA_CHARS_DEFAULT = 4000;
 
 function max_schema_chars() {
@@ -70,24 +57,6 @@ var MIN_COLS           = 4;    // Never show fewer than this many columns for a 
 var MAX_CANDIDATE_DDL  = 10;   // Max tables for which we output full column DDL
 var SCHEMA_CACHE_TTL_MS = 5 * 60 * 1000; // 5 min: catalog cache freshness window
 
-/**
- * Column names that are near-universal in transactional schemas (audit
- * timestamps, soft-delete flags, row-version counters, free-text scratch
- * fields) and carry almost no signal for text-to-SQL / analytics — they're
- * structurally necessary in the table but rarely part of what the user is
- * actually asking to SELECT/WHERE/JOIN on. Matched against the *whole*
- * column name (case-insensitive) so it never misfires on a business column
- * that merely contains one of these words as a substring (e.g. a genuine
- * `deleted_reason` column is left alone).
- *
- * This is only used to push such columns toward the *tail* of the non-key
- * ordering within a table (see cols.sort in build_schema_context_fallback),
- * so that when the per-table column budget (dyn_max_cols) is tight, a
- * business column doesn't get silently truncated to make room for
- * `updated_at`. It never overrides key priority: a column that happens to
- * be both indexed/PK and named e.g. `deleted_at` keeps its structural
- * priority regardless of this list.
- */
 var LOW_VALUE_COLUMN_PATTERN = new RegExp(
   '^(created_at|create_time|gmt_create|inserted_at|create_by|created_by|' +
   'updated_at|update_time|gmt_modified|gmt_update|last_modified|modified_at|updated_by|update_by|' +
@@ -99,23 +68,19 @@ function is_low_value_column(name) {
   return LOW_VALUE_COLUMN_PATTERN.test(String(name || '').trim());
 }
 
-/**
- * Backtick-quote an identifier (table/column/schema name), doubling any
- * embedded backticks. Table/column names used here always originate from
- * information_schema (i.e. they name real existing objects), but this is
- * cheap insurance against exotic names containing a backtick.
- */
+// Backtick-quote an identifier, reusing the shared escaping.
 function ident(s) {
-  return '`' + String(s || '').replace(/`/g, '``') + '`';
+  return '`' + esc_ident(s) + '`';
 }
 
-/**
- * Fetch a small sample of real row values for a table, limited to the
- * columns actually being shown in the Tier1 DDL line (not SELECT *) to
- * keep both the query and the resulting text cheap. Best-effort: any
- * failure (missing table, permission issue, etc.) yields null rather than
- * surfacing an error into schema context.
- */
+// "schema.table" → { schema, table }; the table part is everything after the first dot.
+function split_table_ref(name) {
+  var s   = String(name == null ? '' : name).trim();
+  var dot = s.indexOf('.');
+  if (dot < 0) return { schema: '', table: s, qualified: false };
+  return { schema: s.substring(0, dot), table: s.substring(dot + 1), qualified: true };
+}
+
 function get_sample_rows(db, table, col_names, limit) {
   limit = limit || 2;
   if (!db || !table || !col_names || !col_names.length) return null;
@@ -129,12 +94,7 @@ function get_sample_rows(db, table, col_names, limit) {
   } catch (e) { return null; }
 }
 
-/**
- * Render sample rows as a compact `(v1, v2, v3) | (v1, v2, v3)` string.
- * Long values (free text, JSON blobs) are truncated hard so one wide TEXT
- * column can't blow up the schema-context budget on its own; NULL is
- * rendered explicitly since it's often meaningful (e.g. optional FK).
- */
+// Render sample rows as a compact `(v1, v2, v3) | (v1, v2, v3)` string.
 function format_sample_rows(rows, col_names, max_val_len) {
   max_val_len = max_val_len || 20;
   var lines = [];
@@ -150,12 +110,7 @@ function format_sample_rows(rows, col_names, max_val_len) {
   return lines.join(' | ');
 }
 
-/**
- * Whether to attach sample rows to Tier1 tables at all. Read directly from
- * chat_opt (not via cfg()) because cfg() treats 0 as "unset" and falls back
- * to its default — an operator explicitly opting out with
- * `schema_sample_rows_enabled: false` must actually disable it.
- */
+// Whether to attach sample rows to Tier1 tables at all.
 function sample_rows_enabled() {
   var co = get_chat_options();
   return !(co && co.schema_sample_rows_enabled === false);
@@ -171,8 +126,6 @@ function is_opaque_identifier(name, kind) {
   if (/^[tc][_-]?\d+$/.test(low)) return true;
   if (/^(?:tmp|data|item|value|val)[_-]?\d+$/.test(low)) return true;
 
-  /* Very short generated identifiers such as a1/b2 are weak evidence, but
-   * do not classify ordinary names like id as opaque. */
   if (n.length <= 3 && /[0-9]/.test(n) && /^[a-zA-Z][a-zA-Z0-9_]*$/.test(n))
     return true;
   return false;
@@ -228,9 +181,7 @@ function build_semantic_sample_context(db, preferred_tables, char_budget) {
   }
   (preferred_tables || []).forEach(add_table);
 
-  /* If retrieval has little lexical signal (table1/col1-style schema), add
-   * opaque tables too.  For small schemas this means every opaque table;
-   * large schemas remain capped to avoid N extra round-trips/token blowup. */
+  // If retrieval has little lexical signal (table1/col1-style schema), add opaque tables too.
   var opaque_cap = Math.max(1, Number(cfg('schema_opaque_sample_max_tables', 12)));
   var opaque_all_threshold = Math.max(1, Number(cfg('schema_opaque_sample_all_tables_threshold', 16)));
   if (tbl_rows.length <= opaque_all_threshold) opaque_cap = Math.min(tbl_rows.length, 16);
@@ -281,21 +232,6 @@ function get_table_count(db) {
   } catch (e) { return 0; }
 }
 
-/**
- * Fetch (and session-cache) the raw catalog for a schema: table list, the
- * full column map, and FK edges.  information_schema.COLUMNS scans get
- * expensive once a schema has hundreds of wide tables, and this was
- * previously re-run on *every single turn* of every conversation touching
- * that schema.
- *
- * Cache key is the schema name; invalidation is TTL-based plus a cheap
- * fingerprint check (COUNT(*) of tables + COUNT(*) of columns) so a DDL
- * change (table/column added or dropped) invalidates the cache well before
- * the TTL expires, without paying the cost of a full COLUMNS scan just to
- * validate the cache. Stored in a session user variable, same pattern as
- * @chat_options / @_rag_out elsewhere in this codebase — persists for the
- * connection's lifetime, rebuilt on demand when stale.
- */
 function get_schema_catalog(db) {
   if (!db) return { tables: [], col_map: {}, fk_str: '' };
 
@@ -355,11 +291,9 @@ function get_schema_catalog(db) {
 
   try {
     var serialized = JSON.stringify({ db: db, fp: fingerprint, ts: Date.now(), data: data });
-    /* Guard against blowing max_allowed_packet on pathologically wide schemas
-     * (tens of thousands of columns). Caching is a pure optimization — if it's
-     * too big to cache cheaply, just skip it and eat the full scan next turn. */
+
     if (serialized.length < 2 * 1024 * 1024) {
-      sys.exec_sql("SET " + cache_var + " = '" + esc(serialized) + "'");
+      exec_sql("SET " + cache_var + " = '" + esc(serialized) + "'");
     }
   } catch (e) { /* caching is best-effort; ignore failures */ }
 
@@ -372,39 +306,7 @@ function fmt_row_count(nr) {
          nr >= 1000    ? (nr/1000).toFixed(1)+'K'    : String(nr);
 }
 
-/**
- * Tiered schema context builder.
- *
- * Strategy: accuracy requires that the LLM knows (a) which tables exist and
- * (b) full column details for the most relevant ones.  Dumping full DDL for
- * hundreds of tables blows up the prompt, but showing only names loses
- * precision.  The compromise:
- *
- *   Tier 1 [Full DDL] — candidate tables (matched by user-message keywords
- *     against column names or table names) get full column DDL so the LLM
- *     can write accurate SQL for the likely-relevant tables.
- *
- *   Tier 2 [Compact]  — all *other* tables are listed as
- *     `table_name -- comment` so the LLM knows they exist and can use
- *     `list_tables` / `describe_table` to pull details on demand.
- *
- * Within Tier 1, non-key columns are additionally sorted so that low-signal
- * audit/system columns (created_at, is_deleted, version, ...) sit at the
- * tail — see is_low_value_column — so they're the first ones dropped when
- * dyn_max_cols truncates, instead of a business column losing its slot to
- * `updated_at` purely by scan-order luck. The top-ranked table(s) also get
- * a couple of real sample rows appended (see get_sample_rows) for the exact
- * columns being shown, since column name/type/comment often doesn't convey
- * what the actual values look like (encoded status ints, date formats,
- * free-text categories) — this is bounded to a handful of tables since each
- * one is an extra query round trip.
- *
- * Note: this whole function is only reached for schemas at or below
- * cfg('schema_stuff_table_threshold', ...) tables — see build_schema_context.
- * Past that size, schema context is never inlined into the system prompt at
- * all; the model is pointed at the list_tables/describe_table tools instead
- * (build_catalog_pointer below).
- */
+// Tiered schema context builder.
 function build_schema_context_fallback(db, budget, candidate_tables) {
   if (!db) return '';
   budget = Math.min(budget || 1200, max_schema_chars());
@@ -426,10 +328,6 @@ function build_schema_context_fallback(db, budget, candidate_tables) {
                .toUpperCase();
     }
 
-    /* --- candidate_tables is now a score-ranked list of {table, score, name_hit}
-     * from infer_candidate_tables (IDF-weighted). Build a lookup by lowercased
-     * name; tables not in this map fall to Tier2 regardless of any weak
-     * substring coincidence — the scoring pass already absorbed that logic. */
     var score_map = {};
     if (Array.isArray(candidate_tables) && candidate_tables.length > 0) {
       for (var ct = 0; ct < candidate_tables.length; ct++) {
@@ -440,11 +338,6 @@ function build_schema_context_fallback(db, budget, candidate_tables) {
       }
     }
 
-    /* Generated/legacy schemas such as table1(col1,col2,...) have almost no
-     * lexical signal, so IDF candidate inference may return nothing. Promote
-     * opaque tables into Tier1 so their column definitions + real samples can
-     * supply semantic evidence. For small schemas this naturally covers every
-     * opaque table; large schemas are capped. */
     var opaque_promote_cap = Math.max(1, Number(cfg('schema_opaque_sample_max_tables', 12)));
     var opaque_all_threshold = Math.max(1, Number(cfg('schema_opaque_sample_all_tables_threshold', 16)));
     if (tbl_rows.length <= opaque_all_threshold) opaque_promote_cap = Math.min(tbl_rows.length, 16);
@@ -473,9 +366,7 @@ function build_schema_context_fallback(db, budget, candidate_tables) {
         tier2.push(tbl_rows[ti3]);
       }
     }
-    /* Highest-relevance tables first, so if budget/MAX_CANDIDATE_DDL forces a
-     * cutoff, we drop the *least* relevant candidates rather than whichever
-     * happened to sort last alphabetically. */
+
     tier1.sort(function(a, b) { return b.score - a.score; });
 
     var lines = [t('【Schema: ', '[Schema: ') + db +
@@ -486,36 +377,12 @@ function build_schema_context_fallback(db, budget, candidate_tables) {
                    'or SHOW TABLES LIKE \'%keyword%\' to search by name.)')];
     var total = 0;
 
-    /* ---- Tier 1: Full column DDL for candidate tables, score-ranked ----
-     * Per-table column budget is now proportional to that table's relevance
-     * score rather than a flat MAX_COLS=10 for every candidate: a table that
-     * matched on its own name (name_hit / high score) gets more room than one
-     * that only scraped in on a single low-idf column match. */
     var ddl_count = 0;
     var ddl_budget = Math.floor(budget * 0.7); // 70% of budget for DDL
-    /* Normalize against the *highest* score in Tier1, not the score sum.
-     * The previous formula (share * tier1.length, where share = score /
-     * score_sum) averages to ~1 for an average-relevance table regardless
-     * of how many candidates there are — Σshare is 1 by construction, so
-     * share * length averages to 1 — which meant any table at or above
-     * average relevance saturated at MAX_COLS after clamping. In practice
-     * that collapsed the "proportional budget" into a near-binary
-     * above/below-average cutoff instead of a smooth curve. Scaling by
-     * relative distance from the top score instead gives an actual
-     * proportional spread: the top-ranked table gets MAX_COLS, and lower-
-     * ranked tables scale down toward MIN_COLS in proportion to how far
-     * behind the leader they are — independent of how many candidates
-     * happen to be in Tier1. */
+    // Normalize against the *highest* score in Tier1, not the score sum.
     var max_score = 0.1;
     for (var si = 0; si < tier1.length; si++) max_score = Math.max(max_score, tier1[si].score);
 
-    /* Sample rows: attach `SELECT <shown cols> LIMIT n` output to only the
-     * top-ranked candidates (not every Tier1 table) — each one is an extra
-     * round trip, and the top 1-2 tables are almost always the ones the
-     * query is actually about. Column names/types alone often don't convey
-     * what a column's *values* look like (encoded status ints, date
-     * formats, free-text categories); a couple of real rows fixes that far
-     * more cheaply, token-wise, than prose explanation would. */
     var sample_max_tables = cfg('schema_sample_rows_max_tables', 2);
     var sample_row_limit  = cfg('schema_sample_rows_limit', 2);
     var opaque_row_limit  = cfg('schema_opaque_sample_rows_limit', 3);
@@ -523,9 +390,7 @@ function build_schema_context_fallback(db, budget, candidate_tables) {
     if (tbl_rows.length <= opaque_all_threshold) opaque_sample_cap = Math.min(tbl_rows.length, 16);
     var opaque_sampled    = 0;
     var samples_on        = sample_rows_enabled();
-    /* For a small, fully opaque schema, honor the semantic-grounding contract
-     * and emit every opaque Tier1 table (up to the configured safety cap),
-     * rather than silently stopping at the generic candidate-DDL limit. */
+
     var candidate_ddl_limit = Math.max(
       MAX_CANDIDATE_DDL,
       Math.min(Math.max(1, Number(opaque_sample_cap)), 16)
@@ -538,10 +403,7 @@ function build_schema_context_fallback(db, budget, candidate_tables) {
       cols.sort(function(a,b){
         var pa = col_prio(a.COLUMN_KEY), pb = col_prio(b.COLUMN_KEY);
         if (pa !== pb) return pa - pb;
-        /* Within the non-key tier, push low-signal audit/system columns
-         * (created_at, is_deleted, version, ...) toward the tail so they're
-         * the first to fall off when dyn_max_cols truncates — a business
-         * column should never lose its slot to `updated_at`. */
+
         if (pa === 3) {
           var la = is_low_value_column(a.COLUMN_NAME) ? 1 : 0;
           var lb = is_low_value_column(b.COLUMN_NAME) ? 1 : 0;
@@ -569,15 +431,10 @@ function build_schema_context_fallback(db, budget, candidate_tables) {
       if (cols.length > dyn_max_cols) descs.push('…+' + (cols.length-dyn_max_cols) + 'cols');
       var line = tn + '(' + descs.join(',') + ')';
       if (tc && tc.length > 0) line += ' --' + tc.substring(0,40);
-      /* Append approximate row count so the LLM can decide JOIN order
-       * (small driving table first, large probe table second). */
+
       var rows_approx = Number(tier1[t1].row.TABLE_ROWS || 0);
       if (rows_approx > 0) line += ' ~' + fmt_row_count(rows_approx) + ' rows';
 
-      /* Only the top-ranked handful of tables get a sample-rows line, and
-       * only using the columns we're already showing (never a separate
-       * SELECT * — that would both cost more and could leak columns the
-       * budget deliberately left out). */
       var sample_line = '';
       var opaque_table = table_needs_semantic_sampling(tn, tc, cols);
       var should_sample = samples_on && show > 0 &&
@@ -606,11 +463,6 @@ function build_schema_context_fallback(db, budget, candidate_tables) {
                    'ask the agent to query_db them individually if needed)'));
     }
 
-    /* ---- Tier 2: Compact name list for all other tables ----
-     * Even when the full list can't fit, the truncation message always states
-     * the omitted count and explicitly names the escape hatch (query_db /
-     * SHOW TABLES LIKE), so a target table sorted late is never silently
-     * dropped with no trace it exists. */
     if (tier2.length > 0) {
       var other_budget = Math.floor((budget - total) * 0.8);
       if (other_budget < 60) other_budget = 60; // At least room for a few names
@@ -645,9 +497,7 @@ function build_schema_context_fallback(db, budget, candidate_tables) {
 }
 
 function build_schema_context(db, available_tokens, chat_opt, intent, user_msg, embeddings_ready) {
-  /* Embeddings-based retrieval: semantic search already filters to the most
-   * relevant tables, so we can be generous.  4–10 tables of full DDL is
-   * usually fine for LLM context. */
+
   var n = Math.min(10, Math.max(4, Math.floor((available_tokens || 800) / 200)));
   var extra = {};
   if (chat_opt && chat_opt.schema_name) extra.schemas = [chat_opt.schema_name];
@@ -691,9 +541,7 @@ function build_schema_context(db, available_tokens, chat_opt, intent, user_msg, 
     }
   }
 
-  /* Hard safety net: schema context must never exceed the budget.
-   * Even with the tiered approach above, edge cases (e.g. very wide tables,
-   * long comments, large candidate match) can still blow up the prompt. */
+  // Hard safety net: schema context must never exceed the budget.
   var schema_cap = max_schema_chars();
   if (result && result.length > schema_cap) {
     var cut = result.lastIndexOf('\n', schema_cap - 80);
@@ -768,16 +616,7 @@ function suggest_joins(graph, tables) {
     : '';
 }
 
-/**
- * Replaces the inline schema dump for large schemas (see build_schema_context).
- * Instead of trying to fit N hundred tables into the prompt at any level of
- * compression, this just states the table count, offers a short IDF-ranked
- * warm-start list (if the user message produced any candidates), and tells
- * the model to use list_tables / describe_table for everything else. This
- * is the "directory, not a phone book" approach — constant prompt cost
- * regardless of schema size, at the expense of 1-2 extra ReAct turns for
- * queries that need schema exploration.
- */
+// Replaces the inline schema dump for large schemas (see build_schema_context).
 function build_catalog_pointer(db, candidate_names, total_tables) {
   var lines = [
     t('【Schema: ', '[Schema: ') + db + t('】共 ', '] has ') + total_tables +
@@ -802,15 +641,7 @@ function build_catalog_pointer(db, candidate_names, total_tables) {
   return lines.join('\n');
 }
 
-/**
- * Tool: list_tables — the "directory" half of the on-demand schema tool
- * pair. With a keyword, reuses the same IDF-weighted scoring as the inline
- * Tier1 builder (infer_candidate_tables) so results are consistent whether
- * a table shows up via the warm-start hint or an explicit tool call.
- * Without a keyword, returns a capped slice of the full catalog and tells
- * the model to narrow down rather than silently truncating with no
- * explanation.
- */
+// Tool: list_tables — the "directory" half of the on-demand schema tool pair.
 function tool_list_tables(db, args) {
   if (!db) return { ok: false, response: t('未选择数据库。', 'No database selected.'), error: 'no_db' };
   var keyword = String((args && args.keyword) || '').trim();
@@ -862,18 +693,8 @@ function tool_list_tables(db, args) {
   return { ok: true, response: lines2.join('\n') };
 }
 
-/**
- * Tool: describe_table — the "detail" half of the pair. Explicitly
- * requested, so unlike the inline Tier1 DDL builder this does NOT apply
- * MAX_COLS/dyn_max_cols truncation: a single table's full column list is a
- * bounded, known-small cost, and truncating it would just force another
- * round trip. Accepts either a single table_name or a small table_names
- * batch (capped at 5) so the model can pull a couple of join partners in
- * one call instead of one tool call per table.
- */
+// Tool: describe_table — the "detail" half of the pair.
 function tool_describe_table(db, args) {
-  if (!db) return { ok: false, response: t('未选择数据库。', 'No database selected.'), error: 'no_db' };
-
   var names = [];
   if (Array.isArray(args && args.table_names)) names = args.table_names;
   else if (args && args.table_name) names = [args.table_name];
@@ -885,6 +706,13 @@ function tool_describe_table(db, args) {
   }
   if (names.length > 5) names = names.slice(0, 5);
 
+  /* A qualified name resolves without USE; only a bare one needs the session db. */
+  var needs_db = false;
+  for (var nb = 0; nb < names.length; nb++)
+    if (names[nb].indexOf('.') === -1) needs_db = true;
+  if (!db && needs_db)
+    return { ok: false, response: t('未选择数据库。', 'No database selected.'), error: 'no_db' };
+
   var catalog = get_schema_catalog(db);
   var by_name_lc = {};
   for (var i = 0; i < catalog.tables.length; i++)
@@ -892,18 +720,10 @@ function tool_describe_table(db, args) {
 
   var out = [];
   for (var ni = 0; ni < names.length; ni++) {
-    var want  = names[ni];
-    /* Parse "schema.table" format.  The catalog is scoped to the current
-     * database, so a cross-db reference (schema != db) needs a direct
-     * information_schema query instead of the in-memory catalog lookup. */
-    var schema_name = '';
-    var bare_name   = want;
-    var dot = want.indexOf('.');
-    if (dot !== -1) {
-      schema_name = want.substring(0, dot);
-      bare_name   = want.substring(dot + 1);
-    }
-    var lookup_key = bare_name.toLowerCase();
+    var ref          = split_table_ref(names[ni]);
+    var schema_name  = ref.schema;
+    var bare_name    = ref.table;
+    var lookup_key   = bare_name.toLowerCase();
 
     var match      = by_name_lc[lookup_key];
     var cross_cols = null;  // columns fetched on-demand for cross-db tables
@@ -927,14 +747,14 @@ function tool_describe_table(db, args) {
     }
 
     if (!match) {
-      var search_for = schema_name ? bare_name : want;
+      var search_for = schema_name ? bare_name : names[ni];
       var suggestions = [];
       for (var tk in by_name_lc) {
         if (!by_name_lc.hasOwnProperty(tk)) continue;
         if (tk.indexOf(search_for.toLowerCase()) !== -1 || search_for.toLowerCase().indexOf(tk) !== -1)
           suggestions.push(by_name_lc[tk].TABLE_NAME);
       }
-      var display = schema_name ? schema_name + '.' + bare_name : want;
+      var display = schema_name ? schema_name + '.' + bare_name : names[ni];
       out.push(
         t('表 "', 'Table "') + display + t('" 不存在。', '" does not exist.') +
         (suggestions.length
@@ -964,9 +784,7 @@ function tool_describe_table(db, args) {
       (Number(match.TABLE_ROWS || 0) > 0 ? ' (~' + fmt_row_count(Number(match.TABLE_ROWS)) + ' rows)' : '');
     var block = [header, descs.join('\n')];
 
-    /* FK edges touching this table specifically (either side).
-     * Only applicable when the table lives in the current database
-     * (cross-db FK edges are not tracked in this catalog). */
+    // FK edges touching this table specifically (either side).
     if (!cross_cols && catalog.fk_str) {
       var fk_lines = [];
       var edges = catalog.fk_str.split(' | ');
@@ -981,4 +799,44 @@ function tool_describe_table(db, args) {
   }
 
   return { ok: true, response: out.join('\n\n') };
+}
+
+// Tool: check_secondary_load — RAPID engine load state, qualified names only.
+function tool_check_secondary_load(args) {
+  var cs_name = String((args && args.table_name) || '').trim();
+  var ref     = split_table_ref(cs_name);
+  if (!ref.qualified || !ref.schema || !ref.table || ref.table.indexOf('.') !== -1)
+    return { ok: false,
+             response: t('table_name 必须是 schema.table 格式，例如 shannon_ml.census_train',
+                         'table_name must be schema.table format, e.g. shannon_ml.census_train'),
+             error: 'invalid_table_format' };
+
+  var cs_sql = "SELECT rt.LOAD_STATUS, rt.NROWS, rt.LOAD_PROGRESS, rt.SIZE_BYTES, " +
+               "rt.LOAD_START_TIMESTAMP, rt.LOAD_END_TIMESTAMP, rt.LOAD_TYPE " +
+               "FROM performance_schema.rpd_tables rt " +
+               "JOIN performance_schema.rpd_table_id rti ON rt.ID = rti.ID " +
+               "WHERE rti.SCHEMA_NAME = '" + esc(ref.schema) + "' " +
+               "AND rti.TABLE_NAME = '" + esc(ref.table) + "'";
+  try {
+    var cs_res = query_checked(cs_sql);
+    if (Array.isArray(cs_res) && cs_res.length > 0) {
+      return { ok: true, loaded: true,
+               response: t('✅ 表 ' + cs_name + ' 已加载到 RAPID 引擎：\n',
+                           '✅ Table ' + cs_name + ' is loaded into RAPID engine:\n') +
+                         compress(rows_to_text(cs_res), 1500),
+               sql: cs_sql };
+    }
+    return { ok: true, loaded: false,
+             response: t('❌ 表 ' + cs_name + ' 尚未加载到 RAPID 引擎。\n请先执行：\n' +
+                         '  ALTER TABLE ' + cs_name + ' SECONDARY_LOAD;\n' +
+                         '加载完成后再重试 ml_train。',
+                         '❌ Table ' + cs_name + ' is NOT loaded into RAPID engine.\nPlease run:\n' +
+                         '  ALTER TABLE ' + cs_name + ' SECONDARY_LOAD;\n' +
+                         'Then retry ml_train after loading completes.'),
+             sql: cs_sql };
+  } catch (e) {
+    return { ok: false,
+             response: t('check_secondary_load 执行失败：', 'check_secondary_load failed: ') + String(e),
+             error: 'check_secondary_load_failed' };
+  }
 }

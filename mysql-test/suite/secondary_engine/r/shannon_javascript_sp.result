@@ -212,6 +212,7 @@ sh_javascript_sp	js_proc_a	PROCEDURE	JAVASCRIPT	root@localhost	<modified>	<creat
 sh_javascript_sp	js_proc_b	PROCEDURE	JAVASCRIPT	root@localhost	<modified>	<created>	DEFINER		utf8mb4	utf8mb4_0900_ai_ci	utf8mb4_0900_ai_ci
 sh_javascript_sp	SELECT_DATA_PROC	PROCEDURE	JAVASCRIPT	root@localhost	<modified>	<created>	DEFINER		utf8mb4	utf8mb4_0900_ai_ci	utf8mb4_0900_ai_ci
 sh_javascript_sp	SELECT_EMPTY_DATA_PROC	PROCEDURE	JAVASCRIPT	root@localhost	<modified>	<created>	DEFINER		utf8mb4	utf8mb4_0900_ai_ci	utf8mb4_0900_ai_ci
+sys	shannon_agent_metrics	PROCEDURE	JAVASCRIPT	mysql.sys@localhost	<modified>	<created>	INVOKER		utf8mb4	utf8mb4_0900_ai_ci	utf8mb4_0900_ai_ci
 sys	shannon_chat	PROCEDURE	JAVASCRIPT	mysql.sys@localhost	<modified>	<created>	INVOKER	
 Description
 -----------

@@ -1,0 +1,90 @@
+SET @shannon_agent_selfcheck_allow_writes=1;
+CREATE DATABASE trusted_business;
+USE trusted_business;
+CREATE TABLE trusted_orders(id BIGINT PRIMARY KEY,status VARCHAR(16) NOT NULL,version BIGINT NOT NULL) ENGINE=InnoDB;
+INSERT INTO trusted_orders VALUES(1,'pending',0),(2,'pending',0),(3,'pending',0),(4,'pending',0),(5,'pending',0),(6,'pending',0),(7,'pending',0),(8,'pending',0);
+CREATE TRIGGER trusted_postcondition BEFORE UPDATE ON trusted_orders FOR EACH ROW SET NEW.status=IF(NEW.id=4,'review',NEW.status);
+CALL sys.shannon_agent_selfcheck('trusted','contracts','contracts');
+k	v
+requires_tx_without_transaction	true
+unknown_transaction_denied	true
+contradictory_contract_rejected	true
+caller_transaction_accepted	true
+extra_sql_argument_rejected	true
+unsafe_version_rejected	true
+trusted_approval_mandatory	true
+verification_contract_bound	true
+template_version_bound	true
+stale_plan_not_reapproved	true
+operator_target_bound	true
+hook_contract_change_refused	true
+hook_argument_change_refused	true
+operator_authorization_required	true
+session_only_tightens	true
+raw_writes_denied	true
+CALL sys.shannon_agent_selfcheck('trusted','flow','flow');
+k	v
+approval_shows_fixed_template	true
+one_contract_per_dispatch	true
+approved_once	true
+postcondition_verified	true
+repeated_approval_loses	true
+review_completed	true
+audit_correlated	true
+changed_version_refused	true
+changed_status_refused	true
+failed_verification_rolls_back	true
+mandatory_hook_no_write	true
+request_admitted	true
+request_replay	true
+CALL sys.shannon_agent_selfcheck('trusted','caller','caller');
+k	v
+caller_failure_rolled_back_only_tool	true
+caller_transaction_preserved	true
+caller_prior_write_rollback	true
+caller_success_pending_commit	true
+caller_success_can_rollback	true
+CALL sys.shannon_agent_selfcheck('trusted','loop','loop');
+k	v
+natural_language_pauses_for_approval	true
+fixed_tool_cannot_become_free_sql	true
+approval_contract_built_twice	true
+approved_short_transaction	true
+approval_request_replayed	true
+end_to_end_audit	true
+# A fixed business tool retains the invoker's SQL privilege boundary.
+CREATE USER trusted_reader@localhost;
+GRANT EXECUTE ON PROCEDURE sys.shannon_agent_selfcheck TO trusted_reader@localhost;
+GRANT SELECT ON trusted_business.trusted_orders TO trusted_reader@localhost;
+GRANT SELECT ON performance_schema.* TO trusted_reader@localhost;
+GRANT SELECT ON mysql.agent_policy TO trusted_reader@localhost;
+GRANT SELECT,INSERT,UPDATE,DELETE ON mysql.agent_review_plan TO trusted_reader@localhost;
+GRANT SELECT,INSERT,UPDATE,DELETE ON mysql.agent_review_plan_step TO trusted_reader@localhost;
+GRANT SELECT,INSERT,UPDATE,DELETE ON mysql.agent_tx_lease TO trusted_reader@localhost;
+GRANT SELECT,INSERT,UPDATE,DELETE ON mysql.agent_memory_audit TO trusted_reader@localhost;
+SET @shannon_agent_selfcheck_allow_writes=1;
+CALL sys.shannon_agent_selfcheck('trusted','permission','permission');
+k	v
+sql_privileges_preserved	true
+DROP USER trusted_reader@localhost;
+# Two approvals compete for the same version behind a real row lock.
+START TRANSACTION;
+SELECT id FROM trusted_orders WHERE id=7 FOR UPDATE;
+id
+7
+SET @shannon_agent_selfcheck_allow_writes=1;
+CALL sys.shannon_agent_selfcheck('trusted','race','race_a');
+SET @shannon_agent_selfcheck_allow_writes=1;
+CALL sys.shannon_agent_selfcheck('trusted','race','race_b');
+COMMIT;
+SELECT status,version FROM trusted_orders WHERE id=7;
+status	version
+approved	1
+SELECT status,COUNT(*) AS n FROM mysql.agent_review_plan_step WHERE plan_id IN ('trusted_race_a_race_race_a','trusted_race_b_race_race_b') GROUP BY status ORDER BY status;
+status	n
+completed	1
+failed	1
+DELETE FROM mysql.agent_review_plan_step WHERE plan_id IN ('trusted_race_a_race_race_a','trusted_race_b_race_race_b');
+DELETE FROM mysql.agent_review_plan WHERE plan_id IN ('trusted_race_a_race_race_a','trusted_race_b_race_race_b');
+DROP DATABASE trusted_business;
+USE test;

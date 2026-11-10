@@ -1796,8 +1796,9 @@ use test;
 --disable_result_log
 SELECT * FROM INFORMATION_SCHEMA.TABLES;
 --enable_result_log
+# Count only this connection: schema embedding may open tables concurrently.
 --disable_warnings
-SELECT VARIABLE_VALUE INTO @val1 FROM performance_schema.global_status WHERE
+SELECT VARIABLE_VALUE INTO @val1 FROM performance_schema.session_status WHERE
   VARIABLE_NAME LIKE 'Opened_tables';
 --enable_warnings
 --disable_result_log
@@ -1805,7 +1806,7 @@ SELECT ENGINE FROM INFORMATION_SCHEMA.TABLES;
 --enable_result_log
 --disable_warnings
 --echo # The below SELECT query should give same output as above SELECT query.
-SELECT VARIABLE_VALUE INTO @val2 FROM performance_schema.global_status WHERE
+SELECT VARIABLE_VALUE INTO @val2 FROM performance_schema.session_status WHERE
   VARIABLE_NAME LIKE 'Opened_tables';
 --enable_warnings
 --echo # The below select should return '1'

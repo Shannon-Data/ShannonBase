@@ -93,6 +93,9 @@ def	mysql	agent_derive_queue	mysql	idx_lease
 def	mysql	agent_derive_queue	mysql	uk_task
 def	mysql	agent_derive_queue	mysql	uk_task
 def	mysql	agent_derive_queue	mysql	uk_task
+def	mysql	agent_execution	mysql	PRIMARY
+def	mysql	agent_execution	mysql	idx_principal_created
+def	mysql	agent_execution	mysql	idx_principal_created
 def	mysql	agent_memory	mysql	PRIMARY
 def	mysql	agent_memory	mysql	ftx_content
 def	mysql	agent_memory	mysql	idx_conv_id

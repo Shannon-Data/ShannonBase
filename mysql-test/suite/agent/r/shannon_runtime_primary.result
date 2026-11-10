@@ -1,0 +1,54 @@
+SET @shannon_agent_selfcheck_allow_writes=1;
+SET use_secondary_engine=OFF;
+CREATE TABLE test.agent_runtime_ryw(id INT PRIMARY KEY) SECONDARY_ENGINE=rapid;
+INSERT INTO test.agent_runtime_ryw VALUES(1);
+ALTER TABLE test.agent_runtime_ryw SECONDARY_LOAD;
+SET use_secondary_engine=FORCED;
+START TRANSACTION;
+INSERT INTO test.agent_runtime_ryw VALUES(2);
+# Agent reads its caller's uncommitted write and restores FORCED afterwards.
+CALL sys.shannon_agent_selfcheck('runtime','primary',NULL);
+k	v
+own_write_visible	true
+setting_preserved	true
+ROLLBACK;
+SET use_secondary_engine=OFF;
+SELECT COUNT(*) AS rows_after_rollback FROM test.agent_runtime_ryw;
+rows_after_rollback
+1
+# An error in the agent loop must not commit or roll back caller writes.
+START TRANSACTION;
+INSERT INTO test.agent_runtime_ryw VALUES(2);
+CALL sys.shannon_agent_loopcheck('model_unreachable');
+k	v
+result	OK
+SELECT COUNT(*) AS caller_write_preserved FROM test.agent_runtime_ryw WHERE id=2;
+caller_write_preserved
+1
+ROLLBACK;
+SELECT COUNT(*) AS caller_write_rolled_back FROM test.agent_runtime_ryw WHERE id=2;
+caller_write_rolled_back
+0
+# Reusing the connection for another conversation recovers the old agent transaction.
+CALL sys.shannon_agent_selfcheck('runtime','pool_open','old');
+k	v
+began	true
+CALL sys.shannon_agent_selfcheck('runtime','pool_recover','new');
+k	v
+recovered	true
+closed	true
+old_write_rolled_back	true
+# Agent transactions cannot survive the age bound or cross model inference.
+CALL sys.shannon_agent_selfcheck('runtime','tx_budget',NULL);
+k	v
+began	true
+expired_commit_blocked	true
+rolled_back	true
+no_write_survived	true
+CALL sys.shannon_agent_selfcheck('runtime','tx_model',NULL);
+k	v
+began	true
+inference_blocked	true
+rolled_back	true
+no_write_survived	true
+DROP TABLE test.agent_runtime_ryw;

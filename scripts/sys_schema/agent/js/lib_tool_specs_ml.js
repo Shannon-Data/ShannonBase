@@ -1,16 +1,5 @@
 //@include lib_tool_registry.js
-
-/* ML / AutoML tool family.
- *
- * The write/risk/table_arg metadata that used to live in the separate
- * ML_WRITE_TOOLS constant is now carried on each spec, so tool_review_meta()
- * derives it instead of a second table drifting out of sync.
- *
- * transactional:false on every one of these is deliberate and load-bearing:
- * sys.ML_* procedures own their own transaction boundaries, and wrapping them
- * in an explicit BEGIN/COMMIT from execute_review_step() risks the same THD
- * state mismatch the original comment on ML_WRITE_TOOLS warned about. */
-
+// ML / AutoML tool family.
 var ML_TOOLS_GROUP = {
   zh: '【ML/AutoML 工具】机器学习全生命周期，model_handle 为模型名称（字符串）。\n' +
       '  可通过 @chat_options.handle_model 预设模型句柄，后续调用 ml_train/ml_predict 等工具时可省略 model_handle 参数。',
@@ -18,18 +7,20 @@ var ML_TOOLS_GROUP = {
       '  @chat_options.handle_model can preset the handle so later ml_train/ml_predict calls may omit it.'
 };
 
-/* ---------------------------------------------------------------- ml_train */
-/* The ML family is sixteen of the agent's thirty-three tools and roughly half
- * the prompt's tool catalogue, and most conversations never touch it.  It is
- * therefore the one category that collapses to signatures until the message
- * looks like it is about machine learning.
- *
- * The pattern is deliberately loose -- it shares its vocabulary with
- * classify_request()'s 'ml' branch, plus the embedding and RAG terms, and it
- * over-matches on "explain", which is also a SQL verb.  Over-matching costs
- * prompt tokens on a turn that did not need them; under-matching costs the
- * model a capability it cannot see, and it has no way to discover that it
- * guessed wrong.  The asymmetry decides the tuning. */
+// Standard SQL execution and result handling for the ML tools. Special model
+// state (training handles and lifecycle) stays in the corresponding handlers.
+function ml_sql_result(name, statements, caption, max_chars) {
+  var sql = Array.isArray(statements) ? statements : [statements], rows;
+  try {
+    for (var i=0; i<sql.length; i++) rows=query_checked(sql[i]);
+    return {ok:true,response:caption+compress(rows_to_text(rows),max_chars || 2000),sql:sql.join(';\n')};
+  } catch(e) {
+    return {ok:false,response:name+t(' 失败：',' failed: ')+String(e),error:name.toLowerCase()+'_failed'};
+  }
+}
+
+/* ml_train */
+
 register_tool_category({
   name: 'ml', expand: 'ondemand',
   match: /训练|预测|模型|评分|评估|解释|导出|导入|嵌入|向量|回归|分类|异常检测|推荐|语义检索|train|predict|model|score|evaluate|explain|export|import|embed|vector|forecast|anomaly|recommend|classif|regression|rag|automl/i
@@ -61,7 +52,20 @@ register_tool({
                              enum: ['classification','regression','forecasting',
                                     'anomaly_detection','recommendation'] },
             model_handle:  { type: 'string' },
-            options:       { type: 'object' }
+            options:       { type: 'object' },
+            /* Documented shorthand for the common options below; declared so
+               the strict-args default does not refuse them. */
+            model_list:                 { type: 'array' },
+            exclude_model_list:         { type: 'array' },
+            optimization_metric:        { type: 'string' },
+            include_column_list:        { type: 'array' },
+            exclude_column_list:        { type: 'array' },
+            contamination:              { type: 'number' },
+            supervised_submodel_options:{ type: 'object' },
+            ensemble_score:             { type: 'string', enum: ['accuracy','precision','recall','f1'] },
+            datetime_index:             { type: 'string' },
+            endogenous_variables:       { type: 'array' },
+            exogenous_variables:        { type: 'array' }
           } },
   messages: {
     'table_name#required':    { zh: 'ml_train 缺少 table_name 参数（schema.table 格式）',
@@ -102,8 +106,6 @@ function impl_ml_train(args, ctx) {
   });
   var ml_opt = JSON.stringify(ml_opts);
 
-  /* ML_TRAIN requires model_handle as a SESSION VARIABLE — use a well-known
-     session variable and SET it from the resolved handle. */
   var ml_handle_var = '@_shannon_ml_handle';
   var ml_set_stmt = "SET " + ml_handle_var + " = " +
       (ml_handle ? "'" + esc(ml_handle) + "'" : "NULL");
@@ -131,7 +133,7 @@ function impl_ml_train(args, ctx) {
   }
 }
 
-/* ---------------------------------------------------------- ml_predict_row */
+/*  ml_predict_row */
 register_tool({
   name: 'ml_predict_row', order: 121, category: 'ml',
   readOnly: true, write: false, ddl: false, transactional: false,
@@ -161,17 +163,10 @@ function impl_ml_predict_row(args, ctx) {
     ? "CAST('" + esc(JSON.stringify(args.options)) + "' AS JSON)" : 'NULL';
   var pr_sql = "SELECT sys.ML_PREDICT_ROW(CAST('" + esc(pr_data) + "' AS JSON), '" +
                pr_handle + "', " + pr_opt + ") AS prediction";
-  try {
-    var pr_res = query_checked(pr_sql);
-    return { ok: true, response: t('预测结果：\n', 'Prediction result:\n') +
-             compress(rows_to_text(pr_res), 2000), sql: pr_sql };
-  } catch (e) {
-    return { ok: false, response: t('ML_PREDICT_ROW 失败：', 'ML_PREDICT_ROW failed: ') + String(e),
-             error: 'ml_predict_row_failed' };
-  }
+  return ml_sql_result('ML_PREDICT_ROW',pr_sql,t('预测结果：\n', 'Prediction result:\n'),2000);
 }
 
-/* -------------------------------------------------------- ml_predict_table */
+/*  ml_predict_table */
 register_tool({
   name: 'ml_predict_table', order: 122, category: 'ml',
   write: true, ddl: false, risk: 'medium',
@@ -213,19 +208,10 @@ function impl_ml_predict_table(args, ctx) {
   }
   var pt_sql = "CALL sys.ML_PREDICT_TABLE('" + pt_table + "', '" +
                pt_handle + "', '" + pt_out + "', " + pt_opt + ")";
-  try {
-    var pt_res = query_checked(pt_sql);
-    return { ok: true,
-             response: t('ML_PREDICT_TABLE 执行完成，结果写入 ',
-                         'ML_PREDICT_TABLE completed, output written to ') +
-                       pt_out + '\n' + compress(rows_to_text(pt_res), 2000), sql: pt_sql };
-  } catch (e) {
-    return { ok: false, response: t('ML_PREDICT_TABLE 失败：', 'ML_PREDICT_TABLE failed: ') + String(e),
-             error: 'ml_predict_table_failed' };
-  }
+  return ml_sql_result('ML_PREDICT_TABLE',pt_sql,t('ML_PREDICT_TABLE 执行完成，结果写入 ', 'ML_PREDICT_TABLE completed, output written to ')+pt_out+'\n',2000);
 }
 
-/* -------------------------------------------------------------- ml_explain */
+/*  ml_explain */
 register_tool({
   name: 'ml_explain', order: 123, category: 'ml',
   readOnly: true, write: false, ddl: false, transactional: false,
@@ -261,17 +247,10 @@ function impl_ml_explain(args, ctx) {
   var ex_opt    = args.options ? "CAST('" + esc(JSON.stringify(args.options)) + "' AS JSON)" : 'NULL';
   var ex_sql    = "CALL sys.ML_EXPLAIN('" + ex_table + "', '" + ex_target + "', '" +
                   ex_handle + "', " + ex_opt + ")";
-  try {
-    var ex_res = query_checked(ex_sql);
-    return { ok: true, response: t('ML_EXPLAIN 执行完成。\n', 'ML_EXPLAIN completed.\n') +
-             compress(rows_to_text(ex_res), 3000), sql: ex_sql };
-  } catch (e) {
-    return { ok: false, response: t('ML_EXPLAIN 失败：', 'ML_EXPLAIN failed: ') + String(e),
-             error: 'ml_explain_failed' };
-  }
+  return ml_sql_result('ML_EXPLAIN',ex_sql,t('ML_EXPLAIN 执行完成。\n', 'ML_EXPLAIN completed.\n'),3000);
 }
 
-/* ---------------------------------------------------------- ml_explain_row */
+/*  ml_explain_row */
 register_tool({
   name: 'ml_explain_row', order: 124, category: 'ml',
   readOnly: true, write: false, ddl: false, transactional: false,
@@ -297,17 +276,10 @@ function impl_ml_explain_row(args, ctx) {
   var er_opt    = args.options ? "CAST('" + esc(JSON.stringify(args.options)) + "' AS JSON)" : 'NULL';
   var er_sql    = "SELECT sys.ML_EXPLAIN_ROW(CAST('" + esc(er_data) + "' AS JSON), '" +
                   er_handle + "', " + er_opt + ") AS explanation";
-  try {
-    var er_res = query_checked(er_sql);
-    return { ok: true, response: t('预测解释结果：\n', 'Prediction explanation:\n') +
-             compress(rows_to_text(er_res), 3000), sql: er_sql };
-  } catch (e) {
-    return { ok: false, response: t('ML_EXPLAIN_ROW 失败：', 'ML_EXPLAIN_ROW failed: ') + String(e),
-             error: 'ml_explain_row_failed' };
-  }
+  return ml_sql_result('ML_EXPLAIN_ROW',er_sql,t('预测解释结果：\n', 'Prediction explanation:\n'),3000);
 }
 
-/* -------------------------------------------------------- ml_explain_table */
+/*  ml_explain_table */
 register_tool({
   name: 'ml_explain_table', order: 125, category: 'ml',
   write: true, ddl: false, risk: 'medium',
@@ -347,19 +319,10 @@ function impl_ml_explain_table(args, ctx) {
   }
   var et_sql = "CALL sys.ML_EXPLAIN_TABLE('" + et_table + "', '" +
                et_handle + "', '" + et_out + "', " + et_opt + ")";
-  try {
-    var et_res = query_checked(et_sql);
-    return { ok: true,
-             response: t('ML_EXPLAIN_TABLE 执行完成，结果写入 ',
-                         'ML_EXPLAIN_TABLE completed, output written to ') +
-                       et_out + '\n' + compress(rows_to_text(et_res), 2000), sql: et_sql };
-  } catch (e) {
-    return { ok: false, response: t('ML_EXPLAIN_TABLE 失败：', 'ML_EXPLAIN_TABLE failed: ') + String(e),
-             error: 'ml_explain_table_failed' };
-  }
+  return ml_sql_result('ML_EXPLAIN_TABLE',et_sql,t('ML_EXPLAIN_TABLE 执行完成，结果写入 ', 'ML_EXPLAIN_TABLE completed, output written to ')+et_out+'\n',2000);
 }
 
-/* ---------------------------------------------------------------- ml_score */
+/* ml_score */
 register_tool({
   name: 'ml_score', order: 126, category: 'ml',
   readOnly: true, write: false, ddl: false, transactional: false,
@@ -395,26 +358,15 @@ function impl_ml_score(args, ctx) {
   var sc_handle = esc(String(args.model_handle || ''));
   var sc_metric = esc(String(args.metric || 'balanced_accuracy'));
   var sc_opt    = args.options ? "CAST('" + esc(JSON.stringify(args.options)) + "' AS JSON)" : 'NULL';
-  /* Use a session variable for the OUT parameter.  Execute statements
-     separately — see ml_train for rationale. */
+  // Use a session variable for the OUT parameter.
   var sc_set_sql  = "SET @_ml_score_val = 0";
   var sc_call_sql = "CALL sys.ML_SCORE('" + sc_table + "', '" + sc_target + "', '" +
                     sc_handle + "', '" + sc_metric + "', @_ml_score_val, " + sc_opt + ")";
   var sc_sel_sql  = "SELECT @_ml_score_val AS score";
-  try {
-    query_checked(sc_set_sql);
-    query_checked(sc_call_sql);
-    var sc_res = query_checked(sc_sel_sql);
-    var sc_sql_log = sc_set_sql + ";\n" + sc_call_sql + ";\n" + sc_sel_sql;
-    return { ok: true, response: t('ML_SCORE 结果：\n', 'ML_SCORE result:\n') +
-             compress(rows_to_text(sc_res), 2000), sql: sc_sql_log };
-  } catch (e) {
-    return { ok: false, response: t('ML_SCORE 失败：', 'ML_SCORE failed: ') + String(e),
-             error: 'ml_score_failed' };
-  }
+  return ml_sql_result('ML_SCORE',[sc_set_sql,sc_call_sql,sc_sel_sql],t('ML_SCORE 结果：\n', 'ML_SCORE result:\n'),2000);
 }
 
-/* -------------------------------------------------------- ml_model_export */
+/*  ml_model_export */
 register_tool({
   name: 'ml_model_export', order: 127, category: 'ml',
   write: true, ddl: false, risk: 'medium',
@@ -437,19 +389,10 @@ function impl_ml_model_export(args, ctx) {
   var me_out    = args.output_table ? esc(String(args.output_table)) : '';
   if (!me_out) me_out = 'ml_export_' + String(Date.now() % 100000);
   var me_sql = "CALL sys.ML_MODEL_EXPORT('" + me_handle + "', '" + me_out + "')";
-  try {
-    var me_res = query_checked(me_sql);
-    return { ok: true,
-             response: t('ML_MODEL_EXPORT 完成，导出到 ',
-                         'ML_MODEL_EXPORT completed, exported to ') +
-                       me_out + '\n' + compress(rows_to_text(me_res), 2000), sql: me_sql };
-  } catch (e) {
-    return { ok: false, response: t('ML_MODEL_EXPORT 失败：', 'ML_MODEL_EXPORT failed: ') + String(e),
-             error: 'ml_model_export_failed' };
-  }
+  return ml_sql_result('ML_MODEL_EXPORT',me_sql,t('ML_MODEL_EXPORT 完成，导出到 ', 'ML_MODEL_EXPORT completed, exported to ')+me_out+'\n',2000);
 }
 
-/* -------------------------------------------------------- ml_model_import */
+/*  ml_model_import */
 register_tool({
   name: 'ml_model_import', order: 128, category: 'ml',
   write: true, ddl: false, risk: 'high',
@@ -490,20 +433,9 @@ function impl_ml_model_import(args, ctx) {
   }
   var mi_sql = "CALL sys.ML_MODEL_IMPORT((SELECT MODEL_OBJECT FROM " + mi_ident +
                " LIMIT 1), CAST('" + esc(mi_meta) + "' AS JSON), '" + mi_handle + "')";
-  try {
-    var mi_res = query_checked(mi_sql);
-    return { ok: true, response: t('ML_MODEL_IMPORT 完成。\n', 'ML_MODEL_IMPORT completed.\n') +
-             compress(rows_to_text(mi_res), 2000), sql: mi_sql };
-  } catch (e) {
-    return { ok: false, response: t('ML_MODEL_IMPORT 失败：', 'ML_MODEL_IMPORT failed: ') + String(e),
-             error: 'ml_model_import_failed' };
-  }
+  return ml_sql_result('ML_MODEL_IMPORT',mi_sql,t('ML_MODEL_IMPORT 完成。\n', 'ML_MODEL_IMPORT completed.\n'),2000);
 }
 
-/* ------------------------------------------ ml_model_load / ml_model_unload
- * ML_PREDICT_* / ML_EXPLAIN_* operate on a model that is resident in memory,
- * so a freshly trained-and-forgotten or re-imported handle has to be loaded
- * before it can serve predictions. */
 register_tool({
   name: 'ml_model_load', order: 129, category: 'ml',
   readOnly: true, write: false, ddl: false, transactional: false,
@@ -513,8 +445,7 @@ register_tool({
          en: 'Load a model into memory. ml_predict_* / ml_explain_* need a loaded model; ' +
              'if a prediction fails saying the model is not loaded, call this first and retry' },
   example: { model_handle: 'my_model' },
-  /* model_handle may be omitted when @chat_options.handle_model is set; the
-   * handler resolves it and fails there if neither is present. */
+
   args: { type: 'object',
           properties: { model_handle: { type: 'string' }, user: { type: 'string' } } },
   messages: {
@@ -570,7 +501,7 @@ function impl_ml_model_lifecycle(args, ctx) {
   }
 }
 
-/* -------------------------------------------------------- ml_model_active */
+/*  ml_model_active */
 register_tool({
   name: 'ml_model_active', order: 131, category: 'ml',
   readOnly: true, write: false, ddl: false, transactional: false,
@@ -579,8 +510,7 @@ register_tool({
          en: 'Show which models are resident in memory and how much they use. user: current (default) or all' },
   example: { user: 'current' },
   args: { type: 'object', properties: { user: { type: 'string' } } },
-  /* Case-insensitive on purpose: the old switch lower-cased before the
-   * membership test, so "Current" was accepted. */
+
   validate: function(args) {
     if (args.user !== undefined &&
         ['current', 'all'].indexOf(String(args.user).toLowerCase()) === -1)
@@ -596,22 +526,10 @@ function impl_ml_model_active(args, ctx) {
   var ac_set  = "SET @_ml_active_info = NULL";
   var ac_call = "CALL sys.ML_MODEL_ACTIVE('" + esc(ac_user) + "', @_ml_active_info)";
   var ac_sel  = "SELECT @_ml_active_info AS active_models";
-  try {
-    query_checked(ac_set);
-    query_checked(ac_call);
-    var ac_res = query_checked(ac_sel);
-    return { ok: true,
-             response: t('内存中已加载的模型：\n', 'Models currently loaded in memory:\n') +
-                       compress(rows_to_text(ac_res), 2000),
-             sql: ac_set + ";\n" + ac_call + ";\n" + ac_sel };
-  } catch (e) {
-    return { ok: false,
-             response: t('ML_MODEL_ACTIVE 失败：', 'ML_MODEL_ACTIVE failed: ') + String(e),
-             error: 'ml_model_active_failed' };
-  }
+  return ml_sql_result('ML_MODEL_ACTIVE',[ac_set,ac_call,ac_sel],t('内存中已加载的模型：\n', 'Models currently loaded in memory:\n'),2000);
 }
 
-/* --------------------------------------------------------- ml_list_models */
+/* - ml_list_models */
 register_tool({
   name: 'ml_list_models', order: 132, category: 'ml',
   readOnly: true, write: false, ddl: false, transactional: false,
@@ -625,16 +543,22 @@ register_tool({
 
 function impl_ml_list_models(args, ctx) {
   try {
-    var lm_db = String(ctx.db || '').replace(/@.*$/, '');
-    if (!valid_ident(lm_db)) {
+    /* The catalog lives in ML_SCHEMA_<user>, not ML_SCHEMA_<current db>. */
+    var lm_user = '';
+    try {
+      var lm_urows = query_checked(
+        "SELECT SUBSTRING_INDEX(CURRENT_USER(), '@', 1) AS u");
+      if (Array.isArray(lm_urows) && lm_urows.length) lm_user = String(lm_urows[0].u || '');
+    } catch (e) { lm_user = ''; }
+    if (!valid_ident(lm_user)) {
       return { ok: false,
-               response: t('无法列出模型：当前库名非法。', 'Cannot list models: invalid current database name.'),
-               error: 'ml_list_models_invalid_db' };
+               response: t('无法列出模型：无法确定当前用户。', 'Cannot list models: could not determine the current user.'),
+               error: 'ml_list_models_invalid_user' };
     }
     var lm_rows = query_checked(
       "SELECT MODEL_HANDLE, TASK, TARGET_COLUMN_NAME, TRAIN_TABLE_NAME, " +
       "MODEL_OBJECT_SIZE, BUILD_TIMESTAMP " +
-      "FROM `ML_SCHEMA_" + lm_db + "`.MODEL_CATALOG " +
+      "FROM `ML_SCHEMA_" + lm_user + "`.MODEL_CATALOG " +
       "ORDER BY BUILD_TIMESTAMP DESC LIMIT 20"
     );
     return { ok: true, response: t('已训练模型列表：\n', 'Trained models:\n') +
@@ -646,14 +570,6 @@ function impl_ml_list_models(args, ctx) {
   }
 }
 
-/* ------------------------ ml_embed_table / ml_generate_table / ml_rag_table
- * Batch routines over a whole table column.  ml_embed_table is what actually
- * builds the vector store the RAG route searches, so it is the entry point
- * for "index this text column as a knowledge base".
- *
- * They write their results into an output table column, so they must go
- * through the same approval gate as any other write rather than being
- * mistaken for read-only because args carries no `sql`. */
 function validate_batch_column_tool(args, policy, spec) {
   if (!valid_table_column_ref(args.input_column))
     return t(spec.name + ' 的 input_column 必须是 DBName.TableName.ColumnName 格式',
@@ -731,8 +647,6 @@ function impl_batch_column_tool(args, ctx) {
                          'input_column / output_column must be DBName.TableName.ColumnName.'),
              error: 'invalid_table_column_ref' };
 
-  /* Copy rather than mutate the caller's args — the same object is stored
-   * verbatim in the review plan's args_json. */
   var bt_opts = {};
   if (args.options && typeof args.options === 'object')
     Object.keys(args.options).forEach(function(k) { bt_opts[k] = args.options[k]; });
@@ -741,9 +655,7 @@ function impl_batch_column_tool(args, ctx) {
   if (tool === 'ml_embed_table') {
     bt_proc = 'sys.ML_EMBED_TABLE';
     if (!bt_opts.model_id) bt_opts.model_id = get_embed_model_id();
-    /* ML_EMBED_TABLE reads this as CAST(JSON_UNQUOTE(...) AS UNSIGNED), so a
-     * JSON boolean unquotes to 'true' and fails with ER_TRUNCATED_WRONG_VALUE.
-     * It wants 1/0.  (ML_EMBED_ROW, used elsewhere, does accept true.) */
+
     if (bt_opts.truncate === undefined) bt_opts.truncate = 1;
     else bt_opts.truncate = bt_opts.truncate ? 1 : 0;
   } else if (tool === 'ml_generate_table') {
@@ -760,31 +672,16 @@ function impl_batch_column_tool(args, ctx) {
     Object.keys(rag_defaults).forEach(function(k) {
       if (!(k in bt_opts)) bt_opts[k] = rag_defaults[k];
     });
-    /* args.options is model-written and reaches ML_RAG_TABLE verbatim, so it
-     * is a second way to name a vector store and needs the same filter. */
+    // Filter model-written RAG options before passing them to ML_RAG_TABLE.
     var bt_filtered = rag_filter_vector_store(bt_opts.vector_store);
     if (bt_filtered.blocked.length)
       return { ok: false, response: rag_blocked_message(bt_filtered.blocked),
                error: 'rag_store_forbidden' };
   }
 
-  /* The model wrote args.options, and ML_RAG_TABLE forwards the blob it is
-   * given down to ML_MODEL_GENERATE, so this is an egress path in its own
-   * right -- not one that inherits ml_generate()'s ceiling. */
   bt_opts = apply_egress_policy_nested(bt_opts);
 
   var bt_sql = "CALL " + bt_proc + "('" + esc(bt_in) + "','" + esc(bt_out) + "'," +
                "CAST('" + esc(JSON.stringify(bt_opts)) + "' AS JSON))";
-  try {
-    var bt_res = query_checked(bt_sql);
-    return { ok: true,
-             response: bt_proc.replace('sys.', '') +
-                       t(' 执行完成，结果写入 ', ' completed, output written to ') + bt_out +
-                       '\n' + compress(rows_to_text(bt_res), 2000),
-             sql: bt_sql };
-  } catch (e) {
-    return { ok: false,
-             response: bt_proc.replace('sys.', '') + t(' 失败：', ' failed: ') + String(e),
-             error: tool + '_failed' };
-  }
+  return ml_sql_result(bt_proc.replace('sys.', ''),bt_sql,bt_proc.replace('sys.', '')+t(' 执行完成，结果写入 ', ' completed, output written to ')+bt_out+'\n',2000);
 }

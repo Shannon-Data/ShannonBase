@@ -192,6 +192,23 @@ if [ "$READ_ONLY" -eq 1 ]; then
   exit
 fi
 
+# Runtime recovery and retries require the current native bridge.
+CURRENT="runtime/entry"
+kv_load <<< "$(call "CALL sys.shannon_agent_selfcheck('runtime','entry',NULL)" runtime/entry)"
+expect failed_recovery_blocked true
+expect no_new_work true
+expect unknown_owner_blocked true
+expect caller_preserved true
+section_ok "runtime/entry: uncertain recovery stops new work"
+
+CURRENT="runtime/retry"
+kv_load <<< "$(call "CALL sys.shannon_agent_selfcheck('runtime','retry','$MEM_LABEL')" runtime/retry)"
+expect admitted true
+expect pending_blocked true
+expect changed_blocked true
+expect replayed true
+section_ok "runtime/retry: keyed retries are suppressed or replay saved results"
+
 # 5. memory: ordering, dedup, redaction, isolation
 CURRENT="memory/seed"
 kv_load <<< "$(call "CALL sys.shannon_agent_selfcheck('memory','seed','$MEM_LABEL')" memory/seed)"

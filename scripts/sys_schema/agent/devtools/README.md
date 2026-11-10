@@ -32,11 +32,12 @@ with `make -j5 jerry`. `run_checks.sh` needs the `mysql` client and a server.
 | step | proves |
 |---|---|
 | `check_syntax.sh` | every source file and every generated routine body parses in the same engine the server uses |
-| `tools` | tool registry, JSON schema, approval metadata and rendered prompt agree |
+| `tools` | registry/schema/prompt agree; transaction fault injection retains ownership on unknown state or SQL errors and protects caller transactions |
 | `sqlmode` | the SQL-mode gate accepts a default session |
 | `memory/seed`, `memory/verify` | turns are complete, ordered, deduplicated, redacted and scoped to the principal |
 | `review/*` | approvals are compare-and-set; a refused or abandoned step never executes |
 | `loop` | read ceiling, repeat detector, error budget, compaction, deadline and stop reasons fire as specified |
+| `runtime/*` | uncertain recovery stops new work; keyed retries reject uncertain/conflicting requests and replay completed responses |
 | `recall` (opt-in, `--with-recall`) | lexical retrieval baseline |
 
 `run_checks.sh` exits non-zero if any of them fails. It mirrors the value-level
@@ -59,3 +60,11 @@ replacement: the MTR suite is still what gates a merge.
 (`make gen_agent_devtools`). It is only embedded in the `sys` schema when
 `-DSHANNON_AGENT_DEVTOOLS=ON`, which defaults to ON for `WITH_DEBUG` and
 `CMAKE_BUILD_TYPE=Debug` builds.
+
+`agent.shannon_trusted` is the MTR integration test for fixed business tools.
+It creates an isolated InnoDB business fixture, a postcondition-breaking trigger,
+a restricted SQL user and two competing connections. Its `trusted` selfcheck
+operations require these fixtures and write opt-in; they are not included in
+the generic `run_checks.sh` sequence. It covers approval, template binding,
+transaction ownership, version/status CAS, verification rollback, replay,
+permission checks and correlated audit.

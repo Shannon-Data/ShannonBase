@@ -1,23 +1,7 @@
 //@include lib_tool_registry.js
 //@include lib_artifact.js
-
-/* Core SQL / transaction / generation tools.
- *
- * Each register_tool() call below is the single source of truth for one tool:
- * its argument schema, the bilingual error text the old validate_tool_call()
- * switch produced, its approval metadata, its Prompt documentation, and its
- * execution body.
- *
- * Semantic checks stay where they were.  "Is this SQL read-only?" remains
- * inside impl_query_db, because the agent loop distinguishes a *validation*
- * failure (the model is told to fix its call, no error_count bump path) from
- * an *execution* failure ({ok:false, error:...}, which does feed error_count
- * and failed_tool_sigs).  Moving those checks into spec.validate would
- * silently change which of the two a rejected DELETE counts as.  run_ddl and
- * plan_sql keep their checks in spec.validate because that is exactly where
- * validate_tool_call() already had them. */
-
-/* ---------------------------------------------------------------- query_db */
+// Core SQL / transaction / generation tools.
+/* ----- query_db */
 register_tool({
   name: 'query_db', order: 1, category: 'core',
   readOnly: true, write: false, ddl: false, transactional: false,
@@ -51,23 +35,24 @@ function impl_query_db(args, ctx) {
              response: t('拒绝：query_db 只允许单条只读语句（SELECT/SHOW/DESC/EXPLAIN/WITH）。',
                          'Rejected: query_db only allows one read-only statement (SELECT/SHOW/DESC/EXPLAIN/WITH).'),
              error: 'invalid_read_only_sql' };
-  /* The read ceiling. Returned as a normal tool failure rather than a
-   * validation failure, deliberately: the model should see it in the tool
-   * log, count it against error_count, and rewrite the query -- which is
-   * exactly what the error text asks for. See guard_read_sql(). */
+  // The read ceiling.
   sql = apply_read_ceiling(sql, stmt2);
   var read_guard = guard_read_sql(sql, stmt2);
   if (read_guard) { read_guard.sql = sql; return read_guard; }
+  var plan_guard = read_plan_guard(sql, stmt2);
+  if (plan_guard) return plan_guard;
   try {
     var qrows = query_checked(with_read_timeout(sql, stmt2, read_timeout_ms()));
-    /* Not compress(..., 1200) any more: a result too big to say is stored and
-     * handed back as a preview plus an artifact_id the model can page through
-     * with read_artifact.  See lib_artifact.js -- the previous behaviour cut
-     * the text off mid-row and discarded the rest, and rows_to_table had
-     * already dropped everything past row 150 before that. */
-    return { ok: true,
+
+    var reference = read_result_reference(qrows, sql);
+    if (!reference.consistency.ok)
+      return { ok: false, error: 'result_inconsistent', result: reference, sql: sql,
+        response: 'Aggregate result failed consistency checks: ' + JSON.stringify(reference.consistency.errors) };
+    var rendered = artifact_render_result(qrows, sql, null, reference);
+    return { ok: true, result: reference,
+             citations: reference.artifact_id ? [reference] : [],
              response: (rows_truncated(qrows) ? truncation_note(qrows) : '') +
-                       artifact_render_result(qrows, sql),
+                       (reference.limit_reached ? 'LIMIT page reached; this result does not establish full-data totals.\n' : '') + rendered,
              sql: sql };
   } catch (e) {
     var qerr = String(e);
@@ -75,12 +60,18 @@ function impl_query_db(args, ctx) {
     if (recovery2) {
       try {
         var rec_stmt = classify_statement(recovery2.sql);
+        recovery2.sql = apply_read_ceiling(recovery2.sql, rec_stmt);
+        var rec_guard = guard_read_sql(recovery2.sql, rec_stmt) || read_plan_guard(recovery2.sql, rec_stmt);
+        if (rec_guard) return rec_guard;
         var rec_rows = query_checked(
             with_read_timeout(recovery2.sql, rec_stmt, read_timeout_ms()));
-        return { ok: true,
+        var rec_ref = read_result_reference(rec_rows, recovery2.sql);
+        if (!rec_ref.consistency.ok) return { ok: false, error: 'result_inconsistent', result: rec_ref,
+          response: 'Recovered query failed aggregate consistency checks.' };
+        return { ok: true, result: rec_ref,
                  response: recovery2.desc + '\n' +
                            (rows_truncated(rec_rows) ? truncation_note(rec_rows) : '') +
-                           artifact_render_result(rec_rows, recovery2.sql),
+                           artifact_render_result(rec_rows, recovery2.sql, null, rec_ref),
                  sql: recovery2.sql };
       } catch (e2) {
         qerr = String(e2);
@@ -92,7 +83,7 @@ function impl_query_db(args, ctx) {
   }
 }
 
-/* ------------------------------------------------------------- explain_sql */
+/* -- explain_sql */
 register_tool({
   name: 'explain_sql', order: 2, category: 'core',
   readOnly: true, write: false, ddl: false, transactional: false,
@@ -132,7 +123,7 @@ function impl_explain_sql(args, ctx) {
   }
 }
 
-/* ---------------------------------------------------------------- plan_sql */
+/* ----- plan_sql */
 register_tool({
   name: 'plan_sql', order: 3, category: 'core',
   readOnly: true, write: false, ddl: false, transactional: false,
@@ -162,8 +153,7 @@ register_tool({
 
 function validate_plan_sql(args, policy) {
   var steps = args.steps || [];
-  /* Element-level "missing sql" keeps its indexed message: the schema's
-   * generic items error would lose the step number the model needs. */
+
   for (var vi = 0; vi < steps.length; vi++) {
     if (!steps[vi] || !steps[vi].sql || typeof steps[vi].sql !== 'string')
       return t('plan_sql steps[', 'plan_sql steps[') + vi +
@@ -180,13 +170,7 @@ function validate_plan_sql(args, policy) {
       );
     }
   }
-  /* Cap how many steps a single plan_sql call may queue for individual
-   * step-by-step approval under review_mode.  Each step becomes its own
-   * awaiting_approval round trip (see build_review_steps); without a cap the
-   * model could submit dozens of steps in one shot with no natural
-   * checkpoint for the user to reconsider mid-stream.  Only relevant under
-   * review_mode -- the non-review execute_plan() path is independently
-   * capped by MAX_PLAN_STEPS and never executes writes. */
+
   if (policy && policy.review_mode === 'review') {
     var max_steps = policy.max_pending_steps || 3;
     if (steps.length > max_steps)
@@ -215,7 +199,7 @@ function impl_plan_sql(args, ctx) {
            sql: JSON.stringify(steps2) };
 }
 
-/* ---------------------------------------------------------------- begin_tx */
+/* ----- begin_tx */
 register_tool({
   name: 'begin_tx', order: 4, category: 'tx',
   readOnly: false, write: false, ddl: false, transactional: false,
@@ -240,8 +224,7 @@ function impl_begin_tx(args, ctx) {
 
   if (begin_ctx.active) {
     if (begin_ctx.owner === TX_OWNER_CALLER) {
-      /* Joining is logical only: do NOT issue START TRANSACTION.  The caller
-       * keeps the COMMIT/ROLLBACK boundary. */
+      // Joining is logical only: do NOT issue START TRANSACTION.
       return { ok: true,
                response: t('检测到调用者已有事务；Agent 将复用该事务，但不会 COMMIT/ROLLBACK。',
                            'Caller-owned transaction detected; the agent will join it but will not COMMIT/ROLLBACK it.'),
@@ -270,28 +253,54 @@ function impl_begin_tx(args, ctx) {
              error: 'lease_owned_by_other_session' };
   }
 
+  var started = false;
+  A.agent_tx_limit_ms = tx_max_open_ms();
   try {
-    /* query_checked, not sys.exec_sql: the latter reports a rejected
-     * statement by *returning* { error: ... } rather than throwing, so the
-     * catch below never fired and a transaction that was never started was
-     * reported as started. */
+    // query_checked, not sys.exec_sql: the latter reports a rejected statement by *returning* { error: ...
     query_checked('START TRANSACTION');
+    started = true;
+    A.agent_tx_started_at = Date.now();
     set_tx_active_for(A.conversation_id, true);
     var started_state = get_session_tx_state();
-    if (started_state.known && started_state.active && started_state.event_id)
-      set_agent_tx_event_marker(started_state.event_id);
+    if (!started_state.known || !started_state.active || !started_state.event_id ||
+        !set_agent_tx_event_marker(started_state.event_id)) {
+
+      var closed = false;
+      var saved_cleanup = A.runtime_cleanup;
+      A.runtime_cleanup = true;
+      try {
+        query_checked('ROLLBACK');
+        var state_after = get_session_tx_state();
+        closed = state_after.known && !state_after.active;
+      } catch (rollback_error) {
+        audit_tx_failure('begin_tx_rollback_failed', A.conversation_id, rollback_error);
+      } finally { A.runtime_cleanup = saved_cleanup; }
+      if (closed) {
+        A.agent_tx_started_at = 0;
+        set_agent_tx_event_marker(0);
+        set_tx_active_for(A.conversation_id, false);
+        clear_tx_lease(A.conversation_id);
+      }
+      return { ok: false, error: 'begin_tx_unverified',
+               response: t('START TRANSACTION 后无法确认事务标识，拒绝继续执行。',
+                           'Could not verify transaction identity after START TRANSACTION.') };
+    }
     return { ok: true, response: t('Agent 事务已开启', 'Agent transaction started'),
              tx_owner: TX_OWNER_AGENT };
   } catch (e) {
-    clear_tx_lease(A.conversation_id);
-    set_agent_tx_event_marker(0);
-    set_tx_active_for(A.conversation_id, false);
+    if (!started) {
+      clear_tx_lease(A.conversation_id);
+      set_agent_tx_event_marker(0);
+      set_tx_active_for(A.conversation_id, false);
+    } else {
+      audit_tx_failure('begin_tx_unverified', A.conversation_id, e);
+    }
     return { ok: false, response: t('开启事务失败：', 'Failed to start transaction: ') + String(e),
              error: 'begin_tx_failed' };
   }
 }
 
-/* ------------------------------------------------------------- update_data */
+/* update_data */
 register_tool({
   name: 'update_data', order: 5, category: 'core',
   readOnly: false, write: true, ddl: false, risk: 'medium', transactional: true,
@@ -315,16 +324,13 @@ function impl_update_data(args, ctx) {
   var stmt3 = classify_statement(sql);
   var first = stmt3.dml_keyword || stmt3.first_keyword;
 
-  /* Statement-shape checks first: they depend only on the SQL, so the model
-   * gets the actionable message ("use run_ddl") regardless of whether a
-   * transaction happens to be open. */
   if (stmt3.multiple_statements)
     return { ok: false,
              response: t('拒绝：update_data 仅允许单条 DML 语句。',
                          'Rejected: update_data accepts exactly one DML statement.'),
              error: 'multi_statement_rejected' };
 
-  if (!stmt3.is_write)
+  if (!stmt3.dml_keyword || stmt3.external_side_effects)
     return { ok: false,
              response: t('拒绝：update_data 仅允许 INSERT/UPDATE/DELETE/REPLACE；DDL 请改用 run_ddl。',
                          'Rejected: update_data only allows INSERT/UPDATE/DELETE/REPLACE; use run_ddl for DDL.'),
@@ -336,11 +342,6 @@ function impl_update_data(args, ctx) {
                        t(' 必须含顶层 WHERE 条件。', ' must contain a top-level WHERE clause.'),
              error: 'missing_where' };
 
-  /* Checked here, in the handler, rather than only in a spec.validate hook:
-   * the approval path reaches execute_tool() directly, so a step whose SQL
-   * was rewritten by "Modify: ..." after validation would otherwise arrive
-   * ungated.  For a gate over the grant tables that is the wrong place to
-   * economise. */
   var sys_denied = check_system_schema_policy(sql, ctx.policy, ctx.db);
   if (sys_denied)
     return { ok: false, response: sys_denied.message, error: sys_denied.reason };
@@ -353,10 +354,7 @@ function impl_update_data(args, ctx) {
              error: 'transaction_required' };
 
   try {
-    /* query_checked, not sys.exec_sql: a denied or rejected DML comes back as
-     * a { error: ... } return value, not an exception, so this used to fall
-     * through and report 'Success' with affected_rows = -1 for a write that
-     * never happened. */
+    // query_checked, not sys.exec_sql: a denied or rejected DML comes back as a { error: ...
     var raw_result = query_checked(sql);
     var affected = -1;
     if (raw_result && typeof raw_result.affected_rows !== 'undefined')
@@ -369,7 +367,7 @@ function impl_update_data(args, ctx) {
   }
 }
 
-/* --------------------------------------------------------------- commit_tx */
+/* commit_tx */
 register_tool({
   name: 'commit_tx', order: 6, category: 'tx',
   readOnly: false, write: false, ddl: false, transactional: false,
@@ -394,6 +392,7 @@ function impl_commit_tx(args, ctx) {
 
   try {
     query_checked('COMMIT');
+    A.agent_tx_started_at = 0;
     set_tx_active_for(A.conversation_id, false);
     clear_tx_lease(A.conversation_id);
     set_agent_tx_event_marker(0);
@@ -405,7 +404,7 @@ function impl_commit_tx(args, ctx) {
   }
 }
 
-/* ------------------------------------------------------------- rollback_tx */
+/* rollback_tx */
 register_tool({
   name: 'rollback_tx', order: 7, category: 'tx',
   readOnly: false, write: false, ddl: false, transactional: false,
@@ -425,19 +424,25 @@ function impl_rollback_tx(args, ctx) {
              response: t('拒绝：当前事务属于调用者，Agent 无权 ROLLBACK；请由外层调用者回滚。',
                          'Rejected: the current transaction is caller-owned; the agent cannot ROLLBACK it.'),
              error: 'caller_owned_transaction' };
-  try {
-    query_checked('ROLLBACK');
-    set_tx_active_for(A.conversation_id, false);
-    clear_tx_lease(A.conversation_id);
-    set_agent_tx_event_marker(0);
+
+  var rb = rollback_agent_transaction('tool');
+  if (rb.ok) {
+    if (rb.lease_retained)
+      return { ok: true,
+               response: t('Agent 事务已回滚，但事务租约清理失败。',
+                           'Agent transaction rolled back, but its lease could not be cleared.') };
     return { ok: true, response: t('Agent 事务已回滚', 'Agent transaction rolled back') };
-  } catch (e) {
-    return { ok: false, response: t('回滚事务失败：', 'Transaction rollback failed: ') + String(e),
-             error: 'rollback_failed' };
   }
+  if (rb.error === 'rollback_not_verified')
+    return { ok: false,
+             response: t('ROLLBACK 已发送，但无法确认事务结束；事务租约已保留。',
+                         'ROLLBACK was issued but transaction closure could not be verified; the lease is retained.'),
+             error: rb.error };
+  return { ok: false, response: t('回滚事务失败：', 'Transaction rollback failed: ') + String(rb.detail || ''),
+           error: 'rollback_failed' };
 }
 
-/* ----------------------------------------------------------------- run_ddl */
+/* run_ddl */
 register_tool({
   name: 'run_ddl', order: 8, category: 'ddl',
   readOnly: false, write: false, ddl: true, risk: 'high', transactional: false,
@@ -510,9 +515,7 @@ function impl_run_ddl(args, ctx) {
                          'Rejected: run_ddl only allows DDL statements.'),
              error: 'invalid_ddl_sql' };
 
-  /* DDL implicitly commits whatever transaction is open.  Refuse rather than
-   * silently committing the caller's -- or the agent's own -- work as a side
-   * effect of an ALTER. */
+  // DDL implicitly commits whatever transaction is open.
   var ddl_ctx = get_tx_context();
   if (ddl_ctx.active)
     return { ok: false,
@@ -521,12 +524,12 @@ function impl_run_ddl(args, ctx) {
                          'COMMIT or ROLLBACK first, then run the DDL.'),
              error: 'ddl_would_commit_transaction' };
 
-  /* See the same call in impl_update_data: the approval path does not
-   * re-validate, so the gate has to stand here too. */
   var ddl_sys_denied = check_system_schema_policy(sql, ctx.policy, ctx.db);
   if (ddl_sys_denied)
     return { ok: false, response: ddl_sys_denied.message, error: ddl_sys_denied.reason };
 
+  var ddl_guard = ddl_plan_guard(sql, ctx.db);
+  if (ddl_guard) return ddl_guard;
   try {
     query_checked(sql);
     return { ok: true,
@@ -539,7 +542,7 @@ function impl_run_ddl(args, ctx) {
   }
 }
 
-/* ----------------------------------------------------------- generate_text */
+/* generate_text */
 register_tool({
   name: 'generate_text', order: 9, category: 'core',
   readOnly: true, write: false, ddl: false, transactional: false,
@@ -560,14 +563,8 @@ function impl_generate_text(args, ctx) {
   return { ok: true, response: ml_generate(String(args.prompt || ''), args.options || {}) };
 }
 
-/* ----------------------------------------------------------- describe_tool */
-/* The other half of the collapsed catalogue.
- *
- * Collapsing a category to signatures is only safe if the full entry is still
- * reachable, otherwise the saving is paid for in tools the model calls wrong
- * or does not call at all.  This returns exactly what render_tool_docs()
- * would have emitted for one tool -- same text, same example -- so there is
- * one description of a tool, not a full one and a summarised one that drift. */
+/*  describe_tool */
+// The other half of the collapsed catalogue.
 register_tool({
   name: 'describe_tool', order: 16, category: 'core',
   readOnly: true, write: false, ddl: false, transactional: false,
@@ -591,11 +588,11 @@ register_tool({
 });
 
 function impl_describe_tool(args, ctx) {
+  A.expanded_tools = A.expanded_tools || {};
+  A.expanded_tools[String(args.tool || '')] = true;
   var name = String(args.tool || '').trim();
   var spec = get_tool_spec(name);
-  /* A hidden tool is hidden from the catalogue because the model should not
-   * be choosing it, so it stays hidden from this too -- otherwise the lookup
-   * becomes a way around the catalogue. */
+
   if (!spec || spec.hidden) {
     var names = tool_names(), visible = [];
     for (var i = 0; i < names.length; i++)
@@ -608,4 +605,71 @@ function impl_describe_tool(args, ctx) {
   return { ok: true,
            response: render_tool_docs(A.lang, { only: name }),
            tool: name };
+}
+
+/* Artifact paging */
+// read_artifact: read side of the artifact store.
+register_tool({
+  name: 'read_artifact', order: 15, category: 'core',
+  readOnly: true, write: false, ddl: false, transactional: false,
+  doc: {
+    zh: '读取此前工具结果被存档的完整内容（分页）\n' +
+        '当结果里出现 artifact_id=... 且需要看后续内容时使用；offset 用上一次返回的 next_offset\n' +
+        '⛔ 不要为了拿完整结果去重跑原查询 —— 结果已经存下来了，重跑既慢又可能读到不同的数据',
+    en: 'Page through the full content of a previously stored tool result\n' +
+        'Use it when a result carried artifact_id=... and you need what follows; pass the ' +
+        'next_offset returned by the previous call as offset\n' +
+        '⛔ Do not re-run the original query to get the rest — it is already stored, and a ' +
+        're-run is both slower and liable to see different data'
+  },
+  example: { artifact_id: 'art_...', offset: 0 },
+  args: { type: 'object', required: ['artifact_id'],
+          properties: { artifact_id: { type: 'string', minLength: 4, maxLength: 64 },
+                        offset:      { type: 'integer', minimum: 0 },
+                        length:      { type: 'integer', minimum: 1 } } },
+  messages: {
+    'artifact_id#required':  { zh: 'read_artifact 缺少 artifact_id 参数',
+                               en: 'read_artifact missing artifact_id argument' },
+    'artifact_id#type':      { zh: 'read_artifact 缺少 artifact_id 参数',
+                               en: 'read_artifact missing artifact_id argument' },
+    'artifact_id#minLength': { zh: 'read_artifact 的 artifact_id 不合法',
+                               en: 'read_artifact artifact_id is not valid' },
+    'offset#minimum':        { zh: 'read_artifact 的 offset 不能为负',
+                               en: 'read_artifact offset cannot be negative' }
+  },
+  handler: impl_read_artifact
+});
+
+function impl_read_artifact(args, ctx) {
+  var res = artifact_read(args.artifact_id, args.offset, args.length,
+                          get_memory_options(ctx.chat_opt));
+  if (!res.ok) {
+
+    var known = (res.error === 'artifact_not_found');
+    return { ok: false, error: res.error,
+             response: known
+               ? t('该存档不存在或已过期（存档默认保留 7 天）。如仍需要这份数据，请重新执行原查询。',
+                   'That artifact does not exist or has expired (artifacts are kept 7 days by ' +
+                   'default). Re-run the original query if you still need the data.')
+               : t('读取存档失败：', 'Failed to read the artifact: ') + String(res.error || '') };
+  }
+
+  var header = t(
+    '【存档 ' + res.artifact_id + '】字符 ' + res.offset + '-' +
+      (res.offset + res.length) + '，共 ' + res.size_bytes +
+      (res.row_count ? '（' + res.row_count + ' 行）' : '') +
+      (res.truncated ? '（原始结果更大，存档时已截断）' : ''),
+    '[Artifact ' + res.artifact_id + '] chars ' + res.offset + '-' +
+      (res.offset + res.length) + ' of ' + res.size_bytes +
+      (res.row_count ? ' (' + res.row_count + ' rows)' : '') +
+      (res.truncated ? ' (the original was larger and was stored truncated)' : ''));
+
+  var footer = res.eof
+    ? t('\n【已读完】', '\n[End of artifact]')
+    : t('\n【还有更多】下一次调用 read_artifact 时传 offset=' + res.next_offset,
+        '\n[More follows] call read_artifact again with offset=' + res.next_offset);
+
+  res.preview_only = !res.eof || res.offset > 0;
+  return { ok: true, result: res, citations: [res], response: header + '\n' + res.text + footer,
+           artifact_id: res.artifact_id, next_offset: res.next_offset, eof: res.eof };
 }

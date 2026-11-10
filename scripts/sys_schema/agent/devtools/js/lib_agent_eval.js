@@ -1,51 +1,11 @@
 //@include lib_tools.js
-/* The loop itself is the thing under test, and the self-check routine does
- * not otherwise carry it -- only shannon_agent_default and shannon_chat do. */
 //@include shannon_agent_run.js
-
-/* Loop evaluation: does the harness behave, given a model that behaves in a
- * stated way.
- *
- * Reached as sys.shannon_agent_loopcheck(<case>); <case> NULL
- * runs all of them.
- */
-
-/* ---------------------------------------------------------- the fake model
- *
- * A.eval_script is a queue of turns. Each turn is either:
- *   { text: '...' }                      plain completion
- *   { tool: 'name', args: {...} }        a text-protocol tool call
- *   { native: 'name', args: {...} }      a provider tool call, rendered as
- *                                        the provider's own JSON and parsed
- *                                        back through the real adapter
- *   { finish_reason: 'length', ... }     any of the above, with the
- *                                        provider's stop reason overridden
- *   { error: 'rate limit ...' }          a failed call
- *
- * Running out of turns is itself a behaviour worth scripting -- it is what
- * a model that will not stop looks like -- so the queue repeats its last
- * entry rather than ending the run.
- *
- * That repeat is why every case whose loop ends with need_summary scripts a
- * closing prose turn. final_summary() is a further model call, and if the
- * queue replays a tool call into it the caller reads the JSON as a leaked
- * tool call and retries final_summary twice more -- three rebuilds of the
- * system prompt plus a compressed transcript, each escaped into SQL, in a
- * heap that has ~146KB free. That is an out-of-memory caused by the script,
- * not by the loop under test. A real model asked to summarise answers in
- * prose, so the script does too. */
+// Loop evaluation: does the harness behave, given a model that behaves in a stated way.
 function eval_script_respond(prompt, dialect) {
   var sc = A.eval_script;
-  /* Counted, not kept. Retaining each prompt looked useful for diagnostics
-   * and cost about 4KB a turn in a 512KB heap -- across a multi-case run
-   * that alone exhausted the engine. Nothing asserts on prompt text. */
+  // Counted, not kept.
   sc.calls++;
-  /* A script that keeps being asked for turns is a loop that is not
-   * terminating. Left alone it fills the engine heap and the run dies with
-   * an out-of-memory that says nothing about which case or why, so the
-   * runaway is converted into a statement that names itself. The ceiling is
-   * well above any legitimate case: MAX_TURNS is 10, plus a final summary
-   * and a little slack. */
+  // A script that keeps being asked for turns is a loop that is not terminating.
   if (sc.calls > 16)
     throw new Error('eval script runaway: model called ' + sc.calls +
                     ' times (turns scripted: ' + sc.turns.length + ')');
@@ -65,9 +25,7 @@ function eval_script_respond(prompt, dialect) {
   var native_call = null;
 
   if (turn.native) {
-    /* Rendered as the wire format and parsed back by the real adapter, so
-     * the case exercises llm_parse_native_tool_call() rather than a
-     * stand-in for it. */
+
     var d = dialect || 'openai';
     var raw = (d === 'anthropic')
       ? JSON.stringify({ content: [ { type: 'text', text: turn.thought || '' },
@@ -95,74 +53,17 @@ function eval_script_respond(prompt, dialect) {
 }
 
 /* ------------------------------------------------------------- the cases */
-/* The cases.
- *
- * `why` used to be a field on each case. It is a comment now, and that is
- * not tidiness: the routine body is ~635KB of source, and JerryScript keeps
- * compiled bytecode and string literals in the same 512KB heap the running
- * code allocates from. Prose stored as a runtime string is heap the agent
- * then does not have for a transcript. Adding this file with the
- * descriptions inline was enough, on its own, to push a two-turn case into
- * an out-of-memory. Comments cost nothing at runtime.
- *
- *   finish_clean               a model that answers without calling a tool
- *                              ends the turn as complete, and the user is
- *                              told nothing extra
- *   one_tool_then_answer       the ordinary path: call, read, answer
- *   native_tool_call           a provider tool call is parsed by the real
- *                              adapter and reaches the registry as the same
- *                              call the text protocol would produce
- *   read_ceiling_then_recover  an unbounded SELECT is refused, and the
- *                              refusal is actionable enough that the next
- *                              turn succeeds -- a ceiling the model cannot
- *                              get past would be a denial of service
- *   repeat_detected            a model issuing the same call twice is
- *                              looping, and the loop stops
- *   error_budget               consecutive tool failures end the turn, and
- *                              the user is told the answer is partial
- *   max_turns                  a model that never stops hits the ceiling;
- *                              this is the failure most likely to be
- *                              mistaken for success, because it always
- *                              produces plausible-looking text
- *   truncated_answer           a reply cut off at the provider's token
- *                              ceiling contains no tool call and is
- *                              otherwise indistinguishable from a finished
- *                              one; finish_reason is the only separator
- *   model_unreachable          an unavailable model is an infrastructure
- *                              failure, not the agent having nothing to say
- *
- * Six cases carry manual:true and are skipped unless named. They assert on
- * what mysql.agent_policy says, so they are only meaningful with a
- * particular row present or absent, which is something a caller sets up --
- * see mysql-test/suite/agent/t/shannon_policy.test. They come in pairs on
- * purpose: the refusing half proves the operator's row was enforced, and
- * the permitting half, run with the row removed and the session asking for
- * exactly the same thing, proves the refusal came from that row rather than
- * from something else refusing it anyway.
- *
- *   policy_read_capped         with read_row_limit_max below what the model
- *                              asks for, every read is refused and the turn
- *                              ends on the error budget, saying so
- *   policy_read_uncapped       the same script with no operator row: the
- *                              reads run, so the ceiling above came from
- *                              the table and not from the default
- *   policy_ddl_refused         @chat_options asking for allow_destructive_ddl
- *                              does not override an operator who said no:
- *                              the DROP never reaches a handler
- *   policy_ddl_allowed         the same session option with no operator row
- *                              does run the DROP -- which is what makes the
- *                              refusal above evidence of anything
- *   policy_ddl_needs_approval  with the approval gates left at their
- *                              defaults the DROP pauses instead of running
- *   rag_store_forbidden        a caller-supplied rag_options.vector_store
- *                              naming mysql.agent_* is refused by the tool
- *                              rather than searched
- */
+// The cases.
 function eval_cases() {
   return [
     { name: 'finish_clean',
       turns: [ { text: 'The orders table has 3 rows.' } ],
       expect: { stop_reason: 'finish', tools: [], note: false } },
+
+    { name: 'cancelled_generation',
+      turns: [ { error: 'Query execution was interrupted' },
+               { tool: 'query_db', args: {sql:'SELECT 1'} } ],
+      expect: { stop_reason: 'cancelled', tools: [], note: true } },
 
     { name: 'one_tool_then_answer',
       turns: [ { tool: 'query_db', args: { sql: 'SELECT COUNT(*) FROM eval_orders' } },
@@ -215,9 +116,6 @@ function eval_cases() {
       turns: [ { error: 'HTTP 401 unauthorized: invalid api key' } ],
       expect: { stop_reason: 'llm_error', note: false } },
 
-    /* Three distinct statements rather than one repeated: the same call
-     * twice is a loop, and would end the turn through the repeat detector
-     * before the error budget ever ran out. */
     { name: 'policy_read_capped', manual: true,
       turns: [ { tool: 'query_db', args: { sql: 'SELECT * FROM eval_db.eval_orders LIMIT 100' } },
                { tool: 'query_db', args: { sql: 'SELECT * FROM eval_db.eval_orders LIMIT 99' } },
@@ -234,10 +132,7 @@ function eval_cases() {
       expect: { stop_reason: 'finish', tools: ['query_db','query_db','query_db'],
                 note: false } },
 
-    /* tools:[] is the assertion. A DDL the policy refuses is stopped at
-     * validation, before any handler runs, so an empty tool list is what
-     * "nothing was executed" looks like from here -- and the test that
-     * calls this one also checks the table is still there. */
+    // tools:[] is the assertion.
     { name: 'policy_ddl_refused', manual: true,
       turns: [ { tool: 'run_ddl', args: { sql: 'DROP TABLE eval_db.policy_victim' } },
                { text: 'Policy would not let me drop it.' } ],
@@ -248,23 +143,13 @@ function eval_cases() {
                { text: 'Dropped.' } ],
       expect: { stop_reason: 'finish', tools: ['run_ddl'], note: false } },
 
-    /* The shipped default, with nothing switched off. require_approval_for_ddl
-     * and require_approval_for_risky_sql both default on and are no longer
-     * gated behind review_mode, so the DROP stops for a human instead of
-     * running. Without this case the two cases above would still pass if the
-     * gates went back to being dead code. */
+    // The shipped default, with nothing switched off.
     { name: 'policy_ddl_needs_approval', manual: true,
       turns: [ { tool: 'run_ddl', args: { sql: 'DROP TABLE eval_db.policy_victim' } },
                { text: 'Dropped.' } ],
       expect: { stop_reason: 'awaiting_approval', tools: [], note: false } },
 
-    /* The caller has pointed @chat_options.rag_options.vector_store at the
-     * agent's own memory.  Unlike the DDL cases the tool is not stopped at
-     * validation -- ml_rag is a legal call and the target only becomes
-     * visible inside it -- so the handler runs and refuses, which is why
-     * this expects ml_rag in the tool list rather than an empty one.  What
-     * it proves is that the refusal is on the live path: the filter itself
-     * is unit-checked in sys.shannon_agent_selfcheck('tools'). */
+    // The caller has pointed @chat_options.rag_options.vector_store at the agent's own memory.
     { name: 'rag_store_forbidden', manual: true,
       turns: [ { tool: 'ml_rag', args: { question: 'what is data skew' } },
                { text: 'I could not use that knowledge base.' } ],
@@ -273,28 +158,14 @@ function eval_cases() {
 }
 
 /* ------------------------------------------------------------- the driver */
-/* The same write opt-in the memory and recall self-checks use.
- *
- * Its own copy rather than a call into lib_selfcheck.js: the two are separate
- * roots -- the self-check routine carries lib_selfcheck, this one carries this
- * file, and neither is expanded into the other -- and putting the helper
- * somewhere both could reach means lib_tools.js, which is also in the agent's
- * own body, so every production routine would pay bytecode for a test-only
- * check. The session variable is deliberately shared: one knob for "let the
- * self-checks write", not one per entry point. */
+// The same write opt-in the memory and recall self-checks use.
 function loopcheck_writes_allowed() {
   var rows = query("SELECT COALESCE(@shannon_agent_selfcheck_allow_writes, 0) AS v");
   return !!(Array.isArray(rows) && rows.length && Number(rows[0].v) === 1);
 }
 
 function shannon_loop_selfcheck(which) {
-  /* Every case runs a whole agent turn against the scripted model, which is a
-   * real run: it writes conversation rows, a SQL trace and usage counters, and
-   * the policy cases execute a real DROP TABLE through the real tool path to
-   * show the operator row is what stopped it. That is fine in a test and wrong
-   * as something the sys schema offers unconditionally to anyone who can call
-   * the agent -- particularly next to a sibling entry point that already
-   * refuses to write without being asked twice. */
+
   if (!loopcheck_writes_allowed())
     return ['loop self-check runs the agent for real and writes to mysql.agent_*, ' +
             'and its policy cases execute DDL; ' +
@@ -307,9 +178,7 @@ function shannon_loop_selfcheck(which) {
   for (var i = 0; i < cases.length; i++) {
     var c = cases[i];
     if (only && c.name !== only) continue;
-    /* A case that needs a particular mysql.agent_policy row would report a
-     * false regression in the sweep that runs everything, so it runs only
-     * when a caller asks for it by name. */
+
     if (!only && c.manual) continue;
     var problems = eval_run_case(c);
     for (var p = 0; p < problems.length; p++) out.push(c.name + ': ' + problems[p]);
@@ -331,10 +200,6 @@ function eval_run_case(c) {
   A.eval_script = { turns: c.turns, pos: 0, calls: 0 };
   A.eval_tools  = [];
 
-  /* Tool names are collected through the post-tool hook rather than by
-   * reading agent_sql_trace afterwards: the hook sees every call including
-   * the ones that fail validation, which is exactly the set the error
-   * budget counts. */
   var probe = function (tool, args, ctx, result) { A.eval_tools.push(tool); return result; };
   register_hook('post_tool_use', probe);
 
@@ -351,22 +216,13 @@ function eval_run_case(c) {
   var got_note  = !!stop_reason_note(got_stop) &&
                   answer.indexOf(stop_reason_note(got_stop).substring(0, 12)) !== -1;
 
-  /* Unregister by rebuilding the list: register_hook has no counterpart,
-   * and a probe left behind would follow every later case. */
   var kept = [];
   for (var h = 0; h < HOOKS.post_tool_use.length; h++)
     if (HOOKS.post_tool_use[h] !== probe) kept.push(HOOKS.post_tool_use[h]);
   HOOKS.post_tool_use = kept;
   A.eval_script = null;
 
-  /* Hand the engine back everything this case accumulated.
-   *
-   * Every case runs a whole agent turn, and all of them run inside one
-   * routine invocation -- so one 512KB heap holds the transcripts, tool
-   * logs, cached options and cost counters of every case at once unless
-   * they are dropped as each finishes. Running the full set without this
-   * exhausted the heap, which is now a clean error rather than a dead
-   * server, but is still a failed run. */
+  // Hand the engine back everything this case accumulated.
   A.eval_tools      = null;
   A.cost            = null;
   A.last_llm_status = null;

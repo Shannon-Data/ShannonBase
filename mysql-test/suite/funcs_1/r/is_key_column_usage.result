@@ -72,6 +72,7 @@ def	mysql	name	def	mysql	help_topic	name
 def	mysql	PRIMARY	def	mysql	agent_artifact	artifact_id
 def	mysql	PRIMARY	def	mysql	agent_conversation_summary	conversation_id
 def	mysql	PRIMARY	def	mysql	agent_derive_queue	task_id
+def	mysql	PRIMARY	def	mysql	agent_execution	execution_id
 def	mysql	PRIMARY	def	mysql	agent_memory	id
 def	mysql	PRIMARY	def	mysql	agent_memory_audit	id
 def	mysql	PRIMARY	def	mysql	agent_memory_edge	edge_id

@@ -1,24 +1,5 @@
 //@include lib_lang.js
-
-/* JSON Schema subset validator for ToolSpec.args.
- *
- * Deliberately a *subset*: type / enum / required / properties / items /
- * minLength / maxLength / pattern / minimum / maximum / minItems / maxItems /
- * anyOf.  That is everything the tool argument shapes in this agent actually
- * need, and nothing that would drag a full JSON Schema engine into a
- * JerryScript stored program.
- *
- * Two deliberate omissions:
- *   - additionalProperties is never enforced.  LLMs routinely emit extra keys
- *     (top_k, desc, ...) that the old hand-written switch silently ignored;
- *     turning those into hard validation failures would change the agent
- *     loop's retry/error_count semantics, not just the message text.
- *   - Semantic checks (is this SQL read-only? is the table loaded?) stay in
- *     the tool handler or in spec.validate, never here.
- *
- * Fail-fast, single-error return, matching the old validate_tool_call()
- * behaviour of returning the first problem it found.
- */
+// JSON Schema subset validator for ToolSpec.args.
 function ts_type_of(v) {
   if (v === null || v === undefined) return 'null';
   if (Array.isArray(v)) return 'array';
@@ -87,9 +68,7 @@ function ts_validate(schema, value, path) {
     var req = schema.required || [];
     for (var r = 0; r < req.length; r++) {
       var rv = value[req[r]];
-      /* An empty string is "missing" for our purposes: every required string
-       * argument here is a SQL statement, a table name or a question, and the
-       * old switch treated '' exactly the same as absent. */
+
       if (rv === undefined || rv === null ||
           (typeof rv === 'string' && rv.trim().length === 0))
         return { path: (path ? path + '.' : '') + req[r],
@@ -102,7 +81,17 @@ function ts_validate(schema, value, path) {
       var prop_err = ts_validate(props[k], value[k], path ? path + '.' + k : k);
       if (prop_err) return prop_err;
     }
-    /* additionalProperties intentionally not enforced -- see header. */
+    for (var extra in value) {
+      if (!Object.prototype.hasOwnProperty.call(value, extra) ||
+          Object.prototype.hasOwnProperty.call(props, extra)) continue;
+      var extra_path = path ? path + '.' + extra : extra;
+      if (schema.additionalProperties === false)
+        return { path: extra_path, keyword: 'additionalProperties', expected: 'declared property' };
+      if (schema.additionalProperties && typeof schema.additionalProperties === 'object') {
+        var extra_err = ts_validate(schema.additionalProperties, value[extra], extra_path);
+        if (extra_err) return extra_err;
+      }
+    }
   }
 
   if (schema.anyOf) {
@@ -116,10 +105,6 @@ function ts_validate(schema, value, path) {
   return null;
 }
 
-/* Bilingual message lookup: exact "path#keyword" > wildcard "*#keyword" >
- * path-only > generic fallback.  Every message the old hand-written switch
- * produced is carried over verbatim into the owning spec's `messages` map, so
- * user-visible validation text does not regress. */
 function ts_error_message(spec, err) {
   var m = null;
   if (err && spec && spec.messages) {
@@ -136,8 +121,6 @@ function ts_error_message(spec, err) {
              ' (' + kw + ')');
 }
 
-/* Derive a Prompt-ready args skeleton from a schema, used when a spec does
- * not supply a hand-written `example`. */
 function ts_sample(schema) {
   if (!schema) return {};
   if (schema.enum) return schema.enum[0];
