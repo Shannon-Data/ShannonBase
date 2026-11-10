@@ -73,9 +73,9 @@ bool is_between_range_pair(const Imcs::Predicate &between_pred, const Imcs::Pred
   if (!lower || !upper) return false;
   if (lower->m_oper == Imcs::PredicateOperator::LESS_EQUAL) std::swap(lower, upper);
 
-  return lower->m_oper == Imcs::PredicateOperator::GREATER_EQUAL && upper->m_oper == Imcs::PredicateOperator::LESS_EQUAL &&
-         lower->column_id == between->column_id && upper->column_id == between->column_id &&
-         lower->value == between->value && upper->value == between->value2;
+  return lower->m_oper == Imcs::PredicateOperator::GREATER_EQUAL &&
+         upper->m_oper == Imcs::PredicateOperator::LESS_EQUAL && lower->column_id == between->column_id &&
+         upper->column_id == between->column_id && lower->value == between->value && upper->value == between->value2;
 }
 
 /** Two predicates that qualify the same rows, however they were spelled. */

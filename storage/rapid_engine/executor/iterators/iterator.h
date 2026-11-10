@@ -122,10 +122,7 @@ inline size_t FilterCompareInt64(const int64_t *data, const uint8_t *null_mask, 
 }
 
 inline bool CompareUsesSimd(bool is_int32, Utils::SIMD::CompareOp op) {
-  const auto isa = RuntimeSimdType();
-  if (isa == Utils::SIMD::SIMDType::AVX2) return true;
-  return is_int32 && op == Utils::SIMD::CompareOp::EQ && isa != Utils::SIMD::SIMDType::NONE &&
-         isa != Utils::SIMD::SIMDType::NEON;
+  return Utils::SIMD::integer_compare_simd(is_int32, op);
 }
 }  // namespace Kernels
 

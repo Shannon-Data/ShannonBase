@@ -1268,7 +1268,7 @@ void VectorizedFilterIterator::CompileSimplePredicate() {
     }
   }
 
-  m_simple_predicate.m_oper = op;
+  m_simple_predicate.op = op;
   m_simple_predicate.field = field;
   m_simple_predicate.integer_constant = constant_value;
   m_simple_predicate.valid = true;
@@ -1285,7 +1285,7 @@ bool VectorizedFilterIterator::EvaluateSimplePredicateBatch(const std::pmr::vect
     return false;
   }
   Utils::SIMD::CompareOp op;
-  switch (m_simple_predicate.m_oper) {
+  switch (m_simple_predicate.op) {
     case SimplePredicateOp::EQ:
       op = Utils::SIMD::CompareOp::EQ;
       break;
