@@ -96,6 +96,9 @@
 #include "sql/sp_pcontext.h"
 #include "sql/sp_rcontext.h"
 #include "sql/sql_base.h"  // close_thread_tables
+#include <cmath>
+#include "scope_guard.h"
+#include "sql/sql_timer.h"
 #include "sql/sql_class.h"
 #include "sql/sql_const.h"
 #include "sql/sql_db.h"  // mysql_opt_change_db, mysql_change_db
@@ -2460,6 +2463,28 @@ void sp_extra_compiler_java::register_native_functions() {
   jerry_value_t key_heap = jerry_string_sz("engine_heap_bytes");
   jerry_value_free(jerry_object_set(sys_obj, key_heap, func_heap));
 
+  jerry_value_t tx_state = jerry_function_external(
+      [](const jerry_call_info_t *, const jerry_value_t[], jerry_length_t) {
+        THD *thd = current_thd;
+        jerry_value_t result = jerry_object();
+        auto put = [&](const char *name, bool value) {
+          jerry_value_t key = jerry_string_sz(name);
+          jerry_value_t val = jerry_boolean(value);
+          jerry_value_free(jerry_object_set(result, key, val));
+          jerry_value_free(key);
+          jerry_value_free(val);
+        };
+        put("known", thd != nullptr);
+        put("active", thd && thd->in_active_multi_stmt_transaction());
+        put("autocommit", thd && !(thd->variables.option_bits & OPTION_NOT_AUTOCOMMIT));
+        put("multi_statement", thd && thd->in_multi_stmt_transaction_mode());
+        return result;
+      });
+  jerry_value_t tx_key = jerry_string_sz("transaction_state");
+  jerry_value_free(jerry_object_set(sys_obj, tx_key, tx_state));
+  jerry_value_free(tx_key);
+  jerry_value_free(tx_state);
+
   jerry_value_free(jerry_object_set(global, key_sys, sys_obj));
 
   jerry_value_free(key_exec);
@@ -2509,7 +2534,34 @@ jerry_value_t sp_extra_compiler_java::native_exec_sql(
   jerry_string_to_buffer(args_p[0], JERRY_ENCODING_UTF8,
                          reinterpret_cast<jerry_char_t *>(&sql[0]), sz);
 
-  return execute_sql_internal(compiler->m_thd, sql);
+  THD *thd = compiler->m_thd;
+  const ulong saved_secondary = thd->variables.use_secondary_engine;
+  if (args_cnt > 2 && jerry_value_is_true(args_p[2]) &&
+      thd->in_multi_stmt_transaction_mode())
+    thd->variables.use_secondary_engine = SECONDARY_ENGINE_OFF;
+  auto restore_secondary = create_scope_guard([&] {
+    thd->variables.use_secondary_engine = saved_secondary;
+  });
+
+  THD_timer_info *timer = nullptr;
+  THD_timer_info *saved_timer = thd->timer;
+  if (args_cnt > 1 && jerry_value_is_number(args_p[1])) {
+    const double ms = jerry_value_as_number(args_p[1]);
+    if (std::isfinite(ms) && ms > 0 && ms <= 3600000) {
+      timer = thd_timer_set(thd, nullptr, static_cast<ulong>(std::max(1.0, ms)));
+      if (!timer)
+        return jerry_throw_sz(JERRY_ERROR_COMMON, "Could not arm SQL deadline");
+      thd->timer = timer;
+    }
+  }
+  auto reset_timer = create_scope_guard([&] {
+    if (timer) {
+      THD_timer_info *cached = thd_timer_reset(timer);
+      if (cached) thd_timer_destroy(cached);
+      thd->timer = saved_timer;
+    }
+  });
+  return execute_sql_internal(thd, sql);
 }
 
 jerry_value_t sp_extra_compiler_java::native_send_result_set(

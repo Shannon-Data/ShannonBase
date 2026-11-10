@@ -280,6 +280,7 @@ has_importance	yes
 has_usage	yes
 absent_signal_absent	yes
 inner_list	fact_id, statement, confidence, scope, use_count, last_used_at, created_at
+candidate_pool_bounded	yes
 pure_relevance_2nd	total revenue by region for last quarter!
 diversified_2nd	how many employees joined in March
 top_hit_kept	yes

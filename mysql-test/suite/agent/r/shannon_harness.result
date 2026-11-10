@@ -1,0 +1,68 @@
+SET @shannon_agent_selfcheck_allow_writes=1;
+USE test;
+# Approval is bound to the displayed payload, database and exact approval token.
+CALL sys.shannon_agent_selfcheck('harness','approval','digest');
+k	v
+saved	true
+digest_shown	true
+token_bound	true
+tamper_rejected	true
+bare_approval_rejected	true
+wrong_database_rejected	true
+# Execution-match checks compare actual tool results with independent SQL oracles.
+CREATE TABLE harness_customers(id INT PRIMARY KEY);
+CREATE TABLE harness_orders(id INT PRIMARY KEY,customer_id INT,amount DECIMAL(12,2),note VARCHAR(128));
+INSERT INTO harness_customers VALUES(1),(2),(3);
+INSERT INTO harness_orders VALUES(1,1,10.25,'ordinary'),(2,1,5.25,'special requests'),(3,2,NULL,NULL);
+CALL sys.shannon_agent_selfcheck('harness','execution_match',NULL);
+k	v
+execution_match_1	true
+execution_match_2	true
+execution_match_3	true
+execution_match_4	true
+execution_match_5	true
+execution_match_6	true
+CALL sys.shannon_agent_selfcheck('harness','result_contract',NULL);
+k	v
+structured_content	true
+inline_citation	true
+aggregate_identities_checked	true
+bad_aggregate_refused	true
+empty_aggregate_checked	true
+limit_page_marked	true
+hook_result_normalized	true
+ensemble_score_string	true
+ensemble_score_number_rejected	true
+cancel_is_not_retried	true
+cancelled_envelope_discarded	true
+CALL sys.shannon_agent_selfcheck('harness','shared_execution','dedup');
+k	v
+ml_sequence_preserved	true
+ml_failure_stops_sequence	true
+forget_literal_percent	true
+forget_literal_underscore	true
+forget_preview_escaped	true
+CALL sys.shannon_agent_selfcheck('harness','trace_enqueue','p2');
+k	v
+derive_disabled_no_enqueue	true
+sweep_only_successful	true
+writer_enqueues_exact_row	true
+failed_insert_no_enqueue	true
+orphan_and_ineligible_done	true
+CALL sys.shannon_agent_selfcheck('harness','metrics','p95');
+k	v
+percentiles_and_tokens	true
+CALL sys.shannon_agent_metrics(1);
+CALL sys.shannon_agent_selfcheck('harness','guards_and_budgets',NULL);
+k	v
+expensive_read_blocked	true
+large_blocking_ddl_blocked	true
+online_ddl_allowed	true
+step_budget_operator_ceiling	true
+ml_session_budget	true
+ml_operator_ceiling	true
+per_tool_timeout_bounded	true
+tool_deadline_restored	true
+timeout_result_structured	true
+provider_tokens_calibrate	true
+DROP TABLE harness_orders,harness_customers;

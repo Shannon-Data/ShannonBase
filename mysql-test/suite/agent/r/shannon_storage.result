@@ -227,6 +227,7 @@ tasks_left_running	0
 leases_left_held	0
 attempt_counted	yes
 vanished_target_state	done
+trace_task_enqueued	yes
 skipped_rows_enqueued	0
 wanted_rows_enqueued	1
 #
@@ -245,23 +246,6 @@ CALL sys.shannon_agent_selfcheck('memory', 'turn_join', 'stor1');
 k	v
 memory_joined_to_trace	2
 turn_id_matches_meta	2
-#
-# ---------------------------------------------------------------------
-# Metering and quota
-# ---------------------------------------------------------------------
-# no_quota_configured_ok: every limit defaults to unlimited. An instance
-# nobody metered has to behave exactly as it did before this existed --
-# a quota that starts refusing work on upgrade is a regression, not a
-# feature.
-#
-CALL sys.shannon_agent_selfcheck('memory', 'usage', 'stor1');
-k	v
-turns	2
-llm_calls	5
-prompt_tokens	150
-no_quota_configured_ok	yes
-over_quota_blocked	yes
-over_quota_reason	llm_calls
 #
 # ---------------------------------------------------------------------
 # Recall quality

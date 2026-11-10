@@ -1,0 +1,54 @@
+SET @shannon_agent_selfcheck_allow_writes=1;
+# Entry recovery refuses uncertain ownership and preserves caller transactions.
+CALL sys.shannon_agent_selfcheck('runtime','entry',NULL);
+k	v
+failed_recovery_blocked	true
+no_new_work	true
+unknown_owner_blocked	true
+caller_preserved	true
+SET SESSION sql_mode='NO_BACKSLASH_ESCAPES';
+CALL sys.shannon_agent_selfcheck('runtime','mode',NULL);
+k	v
+mode_rejected_before_work	true
+SET SESSION sql_mode=DEFAULT;
+# Keyed requests reject concurrent/uncertain retries and replay completed results.
+CALL sys.shannon_agent_selfcheck('runtime','retry','runtime_retry');
+k	v
+admitted	true
+pending_blocked	true
+changed_blocked	true
+replayed	true
+# Kernel transaction state remains usable when the P_S consumer is disabled.
+CALL sys.shannon_agent_selfcheck('runtime','state',NULL);
+k	v
+known	true
+active	false
+owner	none
+START TRANSACTION;
+CALL sys.shannon_agent_selfcheck('runtime','state',NULL);
+k	v
+known	true
+active	true
+owner	caller
+UPDATE performance_schema.setup_consumers SET ENABLED='NO' WHERE NAME='events_transactions_current';
+CALL sys.shannon_agent_selfcheck('runtime','state',NULL);
+k	v
+known	true
+active	true
+owner	caller
+ROLLBACK;
+Warnings:
+Warning	1196	Some non-transactional changed tables couldn't be rolled back
+CALL sys.shannon_agent_selfcheck('runtime','state',NULL);
+k	v
+known	true
+active	false
+owner	none
+UPDATE performance_schema.setup_consumers SET ENABLED='YES' WHERE NAME='events_transactions_current';
+# The native statement deadline bounds an in-flight SQL call.
+CALL sys.shannon_agent_selfcheck('runtime','timeout',NULL);
+k	v
+bounded	true
+SELECT 1 AS connection_usable;
+connection_usable
+1

@@ -168,7 +168,24 @@ AS $$
   query("SET @chat_options = JSON_SET(COALESCE(@chat_options, JSON_OBJECT())," +
         " '$.conversation_id', '" + esc(resolved_id) + "')");
   var __answer = dispatcher(user_message, resolved_id);
-  sys.send_result_set({columns: ["response"], rows: [[__answer]]});
+  var final_options = get_chat_options();
+  if (final_options.return_metadata === true)
+    sys.send_result_set({columns: ["response", "trace_id", "citations"],
+      rows: [[__answer, current_turn_id(), JSON.stringify(A.result_citations || [])]]});
+  else
+    sys.send_result_set({columns: ["response"], rows: [[__answer]]});
+$$;
+
+DELIMITER ;
+
+-- Per-principal nearest-rank percentiles over retained raw turn samples.
+DROP PROCEDURE IF EXISTS sys.shannon_agent_metrics;
+CREATE DEFINER='mysql.sys'@'localhost' PROCEDURE sys.shannon_agent_metrics(
+  IN days INT
+) SQL SECURITY INVOKER LANGUAGE JAVASCRIPT
+AS $$
+  //@include lib_metrics.js
+  sys.send_result_set(exec_sql(runtime_metrics_sql(days)));
 $$;
 
 DELIMITER ;

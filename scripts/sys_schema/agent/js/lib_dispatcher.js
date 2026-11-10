@@ -1,6 +1,5 @@
 //@include lib_lang.js
 //@include shannon_agent_run.js
-
 function resolve_conversation_id(explicit_conv_id) {
   if (explicit_conv_id) return explicit_conv_id;
 
@@ -72,11 +71,6 @@ function dispatcher(user_message, conversation_id) {
 
   A.request_intent = analyze_intent(user_message);
 
-  /*
-   * L1: session variable  @shannon_agent_plugin
-   *     format: 'schema_name.function_name'
-   *     SET @shannon_agent_plugin = 'mydb.my_agent';
-   */
   var l1_rows = query("SELECT @shannon_agent_plugin AS plugin");
   var l1_val  = scalar(l1_rows, 'plugin');
 
@@ -117,22 +111,7 @@ function dispatcher(user_message, conversation_id) {
     if (l3_res.ok) return l3_res.result;
   }
 
-  /*
-   * L4: the built-in agent (default fallback).
-   *
-   * Invoked in-process rather than through SELECT sys.shannon_agent_default(),
-   * because sys.shannon_chat is a PROCEDURE and a procedure is not a
-   * sub-statement.  The agent can therefore own a real transaction here --
-   * begin_tx / update_data / commit_tx work, and finalize_tx_safety_net() can
-   * actually roll one back.  Inside the stored FUNCTION none of that is
-   * possible: THD::restore_sub_statement_state() restores option_bits
-   * wholesale when a function returns, so a transaction opened there could
-   * never survive (see the note in sql/sp_head.cc).
-   *
-   * sys.shannon_agent_default is still published, both for callers that
-   * invoke it directly and as the signature plugins mirror; it simply is no
-   * longer how this dispatcher reaches the built-in agent.
-   */
+  // L4: the built-in agent (default fallback).
   try {
     var l4_answer = shannon_agent_run(user_message, conversation_id);
     if (l4_answer !== undefined && l4_answer !== null && String(l4_answer).length > 0)

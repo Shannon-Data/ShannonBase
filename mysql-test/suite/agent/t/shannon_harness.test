@@ -1,0 +1,21 @@
+--source ../include/agent_dev_routines.inc
+SET @shannon_agent_selfcheck_allow_writes=1;
+USE test;
+--echo # Approval is bound to the displayed payload, database and exact approval token.
+CALL sys.shannon_agent_selfcheck('harness','approval','digest');
+--echo # Execution-match checks compare actual tool results with independent SQL oracles.
+CREATE TABLE harness_customers(id INT PRIMARY KEY);
+CREATE TABLE harness_orders(id INT PRIMARY KEY,customer_id INT,amount DECIMAL(12,2),note VARCHAR(128));
+INSERT INTO harness_customers VALUES(1),(2),(3);
+INSERT INTO harness_orders VALUES(1,1,10.25,'ordinary'),(2,1,5.25,'special requests'),(3,2,NULL,NULL);
+CALL sys.shannon_agent_selfcheck('harness','execution_match',NULL);
+CALL sys.shannon_agent_selfcheck('harness','result_contract',NULL);
+CALL sys.shannon_agent_selfcheck('harness','shared_execution','dedup');
+CALL sys.shannon_agent_selfcheck('harness','trace_enqueue','p2');
+CALL sys.shannon_agent_selfcheck('harness','metrics','p95');
+--disable_result_log
+CALL sys.shannon_agent_metrics(1);
+--enable_result_log
+CALL sys.shannon_agent_selfcheck('harness','guards_and_budgets',NULL);
+DROP TABLE harness_orders,harness_customers;
+--source ../include/agent_dev_routines_cleanup.inc

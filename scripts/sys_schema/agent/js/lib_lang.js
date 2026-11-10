@@ -1,14 +1,13 @@
 //@include lib_state.js
-
+// Agent runtime common utilities.
+/* 1. Language & localization */
 function detect_lang(text) {
   return /[\u4e00-\u9fff\u3400-\u4dbf]/.test(String(text || '')) ? 'zh' : 'en';
 }
 
-var TABLE_LIST_PATTERN_SRC =
-  '有哪些表|所有表|列出.*表|show.?tables|list.*tables|what.*tables';
-
 function t(zh, en) { return A.lang === 'zh' ? zh : en; }
 
+/* 2. SQL & identifier utilities */
 var ESC_MAP = {
   '\\': '\\\\', '\u0000': '\\0', '\n': '\\n',
   '\r': '\\r', '\x1a': '\\Z', "'": "''"
@@ -42,9 +41,7 @@ function esc_qualified_ident(s) {
   return parts.map(function(p) { return '`' + p + '`'; }).join('.');
 }
 
-/* Validate a "DBName.TableName.ColumnName" reference, the argument shape the
- * batch ML routines (ML_EMBED_TABLE / ML_GENERATE_TABLE / ML_RAG_TABLE) take
- * for their input and output columns. */
+/* Validate a "DBName.TableName.ColumnName" reference (the ML batch routines). */
 function valid_table_column_ref(s) {
   var parts = String(s || '').split('.');
   if (parts.length !== 3) return false;
@@ -54,23 +51,15 @@ function valid_table_column_ref(s) {
   return true;
 }
 
-/* A structural change, recognised before the introspection branch below.
- *
- * That branch matches bare nouns -- 索引, 字段, 表 -- so "add an index on
- * approver" classified as 'schema', and build_task_header() then told the
- * model to confirm the columns and *generate a query*. It did exactly that:
- * it printed the CREATE INDEX for the user to run, instead of proposing it
- * through run_ddl where the approval gate lives. A noun does not say what the
- * user wants done with it; the verb does, so both have to be present. */
+/* 3. Request classification (routing only, never authorisation) */
+var TABLE_LIST_PATTERN_SRC =
+  '有哪些表|所有表|列出.*表|show.?tables|list.*tables|what.*tables';
+
+/* Verb plus noun: a bare noun used to classify "add an index" as 'schema'. */
 var _STRUCT_CHANGE_RE =
   /(创建|新建|建立|新增|添加|增加|删除|删掉|去掉|移除|清空|修改|更改|改名|重命名|重建)\s*(一个|一条|一列|个)?\s*(索引|主键|外键|字段|列|表|视图|分区|约束)|加\s*(一个|一条|个)?\s*(索引|主键|外键|字段|列|分区|约束)|\b(create|add|drop|alter|rename|modify)\s+(index|table|column|key|view|partition|constraint)\b/;
 
-/* Does this reply hand the user a statement to run, rather than running it?
- *
- * Deliberately narrow: a fenced block (or a line that starts with one) whose
- * first keyword changes something. Prose that merely mentions ALTER, or a
- * SELECT shown to explain a result, is not this -- the point is a change the
- * user asked for that was described instead of proposed. */
+/* Narrow on purpose: a fenced block whose first keyword changes something. */
 function looks_like_handed_back_sql(text) {
   var s = String(text || '');
   var m = s.match(/```(?:sql)?\s*([\s\S]*?)```/i);
@@ -78,50 +67,38 @@ function looks_like_handed_back_sql(text) {
   return /(^|\n)\s*(ALTER|CREATE|DROP|RENAME|TRUNCATE|INSERT|UPDATE|DELETE|REPLACE)\s+/i.test(body);
 }
 
+/* One copy each, shared with analyze_intent(). */
+var RE_SCHEMA_INTENT    = new RegExp(
+  TABLE_LIST_PATTERN_SRC + '|字段|列信息|结构|describe.*table|索引|外键|schema', 'i');
+var RE_DIAGNOSE_INTENT  = /锁|死锁|线程|慢查询|事务|进程|连接|buffer|redo|表空间|变量|状态/;
+var RE_ANALYTICS_INTENT = /group\s+by|统计|汇总|排名|占比|趋势|同比|环比|sum\(|avg\(|count\(/;
+/* 改成/改为/删掉: how the write request usually arrives in Chinese. */
+var RE_WRITE_INTENT     = /insert|update|delete|drop|alter|truncate|rename|创建|新建|删除|删掉|移除|清空|修改|更改|改成|改为|新增|添加|增加|写入/;
+var RE_ML_INTENT        = /训练|预测|模型|评分|评估|解释|导出|导入|train|predict|model|score|evaluate|explain|export|import|回归|分类|异常检测|推荐|forecast|anomaly|recommend|classif|regression/i;
+
 function classify_request(text) {
-  var t = String(text || '').toLowerCase();
-  if (_STRUCT_CHANGE_RE.test(t))
-    return 'write';
-  if (/有哪些表|所有表|列出.*表|show.?tables|list.*tables|字段|列信息|结构|describe.*table|索引|外键|schema/.test(t))
-    return 'schema';
-  if (/锁|死锁|线程|慢查询|事务|进程|连接|buffer|redo|表空间|变量|状态/.test(t))
-    return 'diagnose';
-  if (/group\s+by|统计|汇总|排名|占比|趋势|同比|环比|sum\(|avg\(|count\(/.test(t))
-    return 'analytics';
-  /* 改成/改为/删掉 are how the request usually arrives in Chinese; the
-   * original list only had their formal equivalents. Safety never depended on
-   * this -- the approval gate classifies the statement, not the sentence --
-   * but the task header does. */
-  if (/insert|update|delete|drop|alter|truncate|rename|创建|新建|删除|删掉|移除|清空|修改|更改|改成|改为|新增|添加|增加|写入/.test(t))
-    return 'write';
-  if (/训练|预测|模型|评分|评估|解释|导出|导入|train|predict|model|score|evaluate|explain|export|import|回归|分类|异常检测|推荐|forecast|anomaly|recommend|classif|regression/i.test(t))
-    return 'ml';
+  var s = String(text || '').toLowerCase();
+  if (_STRUCT_CHANGE_RE.test(s))    return 'write';
+  if (RE_SCHEMA_INTENT.test(s))     return 'schema';
+  if (RE_DIAGNOSE_INTENT.test(s))   return 'diagnose';
+  if (RE_ANALYTICS_INTENT.test(s))  return 'analytics';
+  if (RE_WRITE_INTENT.test(s))      return 'write';
+  if (RE_ML_INTENT.test(s))         return 'ml';
   return 'general';
 }
 
 function analyze_intent(text) {
-  var kind = classify_request(text);
-  var t = String(text || '').toLowerCase();
+  var s = String(text || '').toLowerCase();
   return {
-    kind: kind,
-    need_join: /join|关联|多表|跨表|联合/.test(t),
-    need_time_filter: /最近|过去|今天|昨天|本月|上月|近\d+天|last\s+\d|过去\s*\d|within/.test(t),
-    need_agg: /group\s+by|统计|汇总|排名|占比|趋势|同比|环比|sum\(|avg\(|count\(/.test(t)
+    kind: classify_request(s),
+    need_join: /join|关联|多表|跨表|联合/.test(s),
+    need_time_filter: /最近|过去|今天|昨天|本月|上月|近\d+天|last\s+\d|过去\s*\d|within/.test(s),
+    need_agg: RE_ANALYTICS_INTENT.test(s)
   };
 }
 
-/* The engine heap, in bytes, as the host sizes it.
- *
- * Every ceiling in this file -- and the prompt's character budget in
- * lib_ml.js -- exists because of that heap, and each was written as a
- * constant chosen against a 512KB one. A build that raises the heap would
- * then leave the agent exactly as constrained as before, having paid the
- * memory for nothing, so the number is asked for rather than assumed.
- *
- * The fallback is the size the server shipped before the accessor existed.
- * A server built from an older tree must still run this script, and being
- * wrong in the conservative direction leaves it merely as restricted as it
- * used to be. */
+/* 4. SQL execution, result rendering & budgets */
+// The engine heap, in bytes, as the host sizes it.
 var ENGINE_HEAP_BYTES_FALLBACK = 512 * 1024;
 var _engine_heap_bytes = 0;
 
@@ -134,33 +111,25 @@ function engine_heap_bytes() {
   return h;
 }
 
-/* Ceilings every fetch is subject to.
- *
- * sys.fetch_all() materialises rows into the per-thread JerryScript heap,
- * whose size is a build-time decision (SHANNONBASE_JERRY_HEAP_KB; see
- * engine_heap_bytes() below, and kJerryHeapBytes in sql/sp_head.cc for what
- * the two sides have to agree on). Exhausting it used to terminate the whole
- * server, because jerry-core answers heap exhaustion with jerry_port_fatal()
- * and the port's default implementation calls exit() for out-of-memory. That
- * is now overridden to raise a SQL error instead, but an error is still a
- * failed turn, so the fetch is bounded here as well and comes back short
- * rather than failing.
- *
- * The byte ceiling is the one that matters: a hundred rows of LONGTEXT
- * overrun the heap just as surely as a million narrow ones, and no row count
- * can see that coming. FETCH_MAX_ROWS is a second, coarser net, set high
- * enough that schema introspection over a large information_schema still
- * fits under it.
- *
- * The truncation is never silent: fetch_all marks a short result with
- * __truncated and reports __total_rows, and every caller that renders rows
- * for the model passes that on. */
+// Ceilings every fetch is subject to.
 var FETCH_MAX_ROWS = 5000;
 
-/* Three eighths of the heap -- 192KB of 512KB, which is what this was tuned
- * to -- and it follows the heap from there. */
 function fetch_max_bytes() {
   return Math.floor(engine_heap_bytes() * 3 / 8);
+}
+
+function exec_sql(sql) {
+  var timeout = 0;
+  if (A.runtime_active) {
+    timeout = runtime_sql_timeout();
+    if (timeout <= 0) return { error: 'agent_deadline_exceeded' };
+  }
+  var result = sys.exec_sql(sql, timeout, !!A.runtime_active || !!A.force_primary_sql);
+  if (A.runtime_active && result && result.error &&
+      /cancelled|canceled|kill query|query execution was interrupted/i.test(String(result.error)) &&
+      !/maximum statement execution time exceeded/i.test(String(result.error)) && runtime_sql_timeout() > 0)
+    A.cancelled = true;
+  return result;
 }
 
 function query(sql, caps) {
@@ -173,7 +142,7 @@ function query(sql, caps) {
   var max_rows  = (caps && caps.max_rows  !== undefined) ? caps.max_rows  : FETCH_MAX_ROWS;
   var max_bytes = (caps && caps.max_bytes !== undefined) ? caps.max_bytes : fetch_max_bytes();
   try {
-    var rs = sys.exec_sql(sql);
+    var rs = exec_sql(sql);
     if (typeof rs.__cursor_id === 'number') {
       return sys.fetch_all(rs, max_rows, max_bytes);
     }
@@ -181,8 +150,7 @@ function query(sql, caps) {
   } catch (e) { return { error: String(e) }; }
 }
 
-/* True when the last fetch stopped at a ceiling rather than at the end of
- * the result. Callers use it to tell the model it is looking at a prefix. */
+// True when the last fetch stopped at a ceiling rather than at the end of the result.
 function rows_truncated(rows) {
   return !!(rows && rows.__truncated);
 }
@@ -193,21 +161,7 @@ function rows_total(rows) {
                                            : (Array.isArray(rows) ? rows.length : 0);
 }
 
-/* Strict variant for execution paths whose success/failure affects the
- * agent state machine. Best-effort metadata helpers may keep using query(),
- * but tools must never translate a SQL exception into {ok:true}.
- *
- * IMPORTANT -- sys.exec_sql() does NOT throw on a SQL error.  It returns
- * { error: "<message>" }.  A bare
- *
- *     try { sys.exec_sql(dml); } catch (e) { ...handle failure... }
- *
- * therefore never runs its catch block for access-denied, syntax errors,
- * constraint violations or anything else the server rejects: the write
- * silently does nothing and the caller reports success.  Any statement whose
- * outcome matters must go through query_checked(), which turns that error
- * value back into a throw.  For DML it still returns { affected_rows: N } on
- * success, so it is a drop-in replacement for sys.exec_sql(). */
+// Strict variant for execution paths whose success/failure affects the agent state machine.
 function query_checked(sql, caps) {
   var rows = query(sql, caps);
   if (rows && !Array.isArray(rows) && rows.error) {
@@ -216,8 +170,7 @@ function query_checked(sql, caps) {
   return rows;
 }
 
-function rows_to_text(rows, limit) {
-  limit = limit || 150;
+function rows_status_text(rows) {
   if (!Array.isArray(rows)) {
     if (rows && rows.error)
       return t('执行出错：', 'Error: ') + rows.error;
@@ -230,6 +183,12 @@ function rows_to_text(rows, limit) {
     return JSON.stringify(rows);
   }
   if (rows.length === 0) return t('（查询结果为空）', '(No results)');
+
+}
+
+function rows_to_text(rows, limit) {
+  limit = limit || 150;
+  if (!Array.isArray(rows) || !rows.length) return rows_status_text(rows);
 
   var cols = Object.keys(rows[0]);
   var cap  = Math.min(rows.length, limit);
@@ -255,25 +214,9 @@ function compress(text, max_chars) {
          t(' 字符]', ' chars]');
 }
 
-/**
- *   Total N rows:
- *   col1 | col2 | col3
- *   ---- | ---- | ----
- *   val1 | val2 | val3
- */
 function rows_to_table(rows, limit) {
   limit = limit || 150;
-  if (!Array.isArray(rows)) {
-    if (rows && rows.error)
-      return t('执行出错：', 'Error: ') + rows.error;
-    if (rows && rows.affected_rows !== undefined) {
-      if (rows.columns)
-        return t('（查询结果为空）', '(No results)');
-      return t('执行成功，影响行数：', 'Success, rows affected: ') + rows.affected_rows;
-    }
-    return JSON.stringify(rows);
-  }
-  if (rows.length === 0) return t('（查询结果为空）', '(No results)');
+  if (!Array.isArray(rows) || !rows.length) return rows_status_text(rows);
 
   var cols = Object.keys(rows[0]);
   var cap  = Math.min(rows.length, limit);
@@ -332,22 +275,17 @@ function repeat_str(ch, n) {
   return new Array(n + 1).join(ch);
 }
 
+/* 5. Runtime helpers */
 function think_suffix() {
   return A.last_think ? '\n[think]\n' + A.last_think : '';
 }
 
-function strip_think_tags(text) {
-  if (!text) return text;
-  return text.replace(/<think>[\s\S]*?<\/think>\s*/gi, '').trim();
-}
-
-function est_tok(s) {
+function est_tok_raw(s) {
   s = String(s || '');
   if (!s.length) return 0;
 
   var cjk_count = 0;
-  /* \u3000-\u303f: CJK \u3400-\u9fff: CJK Unified Ideographs Extension A
-  \uff00-\uffef: Fullwidth and Halfwidth Forms */
+
   var re = /[\u3000-\u303f\u3400-\u9fff\uff00-\uffef]/g;
   var m = s.match(re);
   if (m) cjk_count = m.length;
@@ -356,6 +294,8 @@ function est_tok(s) {
 
   return Math.ceil(cjk_count / 1.5 + other_count / 3);
 }
+
+function est_tok(s) { return Math.ceil(est_tok_raw(s) * Math.max(1, Number(A.token_ratio || 1))); }
 
 function gen_query_id() { return Math.random().toString(36).substring(2, 10); }
 
@@ -370,10 +310,7 @@ function current_principal_prefix() {
   return '';
 }
 
-/* Keep the external conversation UUID separate from the internal persistence
- * key. A 16-hex principal prefix + ':' + 47-hex conversation hash fits the
- * existing VARCHAR(64) key while preventing one SQL principal from opening
- * another principal's memory/review state by guessing conversation_id. */
+// Keep the external conversation UUID separate from the internal persistence key.
 function principal_scope_conversation_id(raw_id) {
   var raw = String(raw_id || '');
   var prefix = current_principal_prefix();
@@ -401,4 +338,10 @@ function principal_scope_conversation_id(raw_id) {
 function scoped_principal_prefix(scoped_id) {
   var m = String(scoped_id || '').match(/^([0-9a-f]{16}):/i);
   return m ? String(m[1]).toLowerCase() : '';
+}
+
+function mem_principal_prefix() {
+  var p = scoped_principal_prefix(A.conversation_id);
+  if (p) return p;
+  return current_principal_prefix();
 }

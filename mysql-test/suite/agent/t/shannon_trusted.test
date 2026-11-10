@@ -1,0 +1,56 @@
+--source ../include/agent_dev_routines.inc
+SET @shannon_agent_selfcheck_allow_writes=1;
+CREATE DATABASE trusted_business;
+USE trusted_business;
+CREATE TABLE trusted_orders(id BIGINT PRIMARY KEY,status VARCHAR(16) NOT NULL,version BIGINT NOT NULL) ENGINE=InnoDB;
+INSERT INTO trusted_orders VALUES(1,'pending',0),(2,'pending',0),(3,'pending',0),(4,'pending',0),(5,'pending',0),(6,'pending',0),(7,'pending',0),(8,'pending',0);
+CREATE TRIGGER trusted_postcondition BEFORE UPDATE ON trusted_orders FOR EACH ROW SET NEW.status=IF(NEW.id=4,'review',NEW.status);
+CALL sys.shannon_agent_selfcheck('trusted','contracts','contracts');
+CALL sys.shannon_agent_selfcheck('trusted','flow','flow');
+CALL sys.shannon_agent_selfcheck('trusted','caller','caller');
+CALL sys.shannon_agent_selfcheck('trusted','loop','loop');
+--echo # A fixed business tool retains the invoker's SQL privilege boundary.
+CREATE USER trusted_reader@localhost;
+GRANT EXECUTE ON PROCEDURE sys.shannon_agent_selfcheck TO trusted_reader@localhost;
+GRANT SELECT ON trusted_business.trusted_orders TO trusted_reader@localhost;
+GRANT SELECT ON performance_schema.* TO trusted_reader@localhost;
+GRANT SELECT ON mysql.agent_policy TO trusted_reader@localhost;
+GRANT SELECT,INSERT,UPDATE,DELETE ON mysql.agent_review_plan TO trusted_reader@localhost;
+GRANT SELECT,INSERT,UPDATE,DELETE ON mysql.agent_review_plan_step TO trusted_reader@localhost;
+GRANT SELECT,INSERT,UPDATE,DELETE ON mysql.agent_tx_lease TO trusted_reader@localhost;
+GRANT SELECT,INSERT,UPDATE,DELETE ON mysql.agent_memory_audit TO trusted_reader@localhost;
+connect (reader,localhost,trusted_reader,,trusted_business);
+SET @shannon_agent_selfcheck_allow_writes=1;
+CALL sys.shannon_agent_selfcheck('trusted','permission','permission');
+disconnect reader;
+connection default;
+DROP USER trusted_reader@localhost;
+--echo # Two approvals compete for the same version behind a real row lock.
+START TRANSACTION;
+SELECT id FROM trusted_orders WHERE id=7 FOR UPDATE;
+connect (racer_a,localhost,root,,trusted_business);
+SET @shannon_agent_selfcheck_allow_writes=1;
+--send CALL sys.shannon_agent_selfcheck('trusted','race','race_a')
+connect (racer_b,localhost,root,,trusted_business);
+SET @shannon_agent_selfcheck_allow_writes=1;
+--send CALL sys.shannon_agent_selfcheck('trusted','race','race_b')
+connection default;
+--let $wait_condition = SELECT COUNT(*)>=2 FROM performance_schema.data_lock_waits w JOIN performance_schema.data_locks l ON w.REQUESTING_ENGINE_LOCK_ID=l.ENGINE_LOCK_ID WHERE l.OBJECT_SCHEMA='trusted_business' AND l.OBJECT_NAME='trusted_orders' AND l.INDEX_NAME='PRIMARY'
+--source include/wait_condition.inc
+COMMIT;
+--disable_result_log
+connection racer_a;
+--reap
+connection racer_b;
+--reap
+--enable_result_log
+connection default;
+SELECT status,version FROM trusted_orders WHERE id=7;
+SELECT status,COUNT(*) AS n FROM mysql.agent_review_plan_step WHERE plan_id IN ('trusted_race_a_race_race_a','trusted_race_b_race_race_b') GROUP BY status ORDER BY status;
+DELETE FROM mysql.agent_review_plan_step WHERE plan_id IN ('trusted_race_a_race_race_a','trusted_race_b_race_race_b');
+DELETE FROM mysql.agent_review_plan WHERE plan_id IN ('trusted_race_a_race_race_a','trusted_race_b_race_race_b');
+disconnect racer_a;
+disconnect racer_b;
+DROP DATABASE trusted_business;
+USE test;
+--source ../include/agent_dev_routines_cleanup.inc

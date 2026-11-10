@@ -37,15 +37,10 @@ DELETE FROM mysql.agent_usage    WHERE principal_prefix = @prefix;
 DELETE FROM mysql.agent_tx_lease;
 
 --echo #
---echo # 1. A finished turn is counted once.
---echo #
---echo # `turns` is now claimed on entry rather than written on the way out,
---echo # so that a second turn arriving while the first is still running can
---echo # see it. The thing that would break silently is double counting, so
---echo # that is what is asserted.
+--echo # 1. Agent execution does not write daily user usage counters.
 --echo #
 CALL sys.shannon_agent_loopcheck('finish_clean');
-SELECT turns FROM mysql.agent_usage
+SELECT COUNT(*) AS daily_usage_rows FROM mysql.agent_usage
  WHERE principal_prefix = @prefix AND usage_date = CURDATE();
 
 --echo #

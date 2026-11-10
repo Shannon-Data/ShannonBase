@@ -1,0 +1,22 @@
+--source ../include/agent_dev_routines.inc
+SET @shannon_agent_selfcheck_allow_writes=1;
+--echo # Entry recovery refuses uncertain ownership and preserves caller transactions.
+CALL sys.shannon_agent_selfcheck('runtime','entry',NULL);
+SET SESSION sql_mode='NO_BACKSLASH_ESCAPES';
+CALL sys.shannon_agent_selfcheck('runtime','mode',NULL);
+SET SESSION sql_mode=DEFAULT;
+--echo # Keyed requests reject concurrent/uncertain retries and replay completed results.
+CALL sys.shannon_agent_selfcheck('runtime','retry','runtime_retry');
+--echo # Kernel transaction state remains usable when the P_S consumer is disabled.
+CALL sys.shannon_agent_selfcheck('runtime','state',NULL);
+START TRANSACTION;
+CALL sys.shannon_agent_selfcheck('runtime','state',NULL);
+UPDATE performance_schema.setup_consumers SET ENABLED='NO' WHERE NAME='events_transactions_current';
+CALL sys.shannon_agent_selfcheck('runtime','state',NULL);
+ROLLBACK;
+CALL sys.shannon_agent_selfcheck('runtime','state',NULL);
+UPDATE performance_schema.setup_consumers SET ENABLED='YES' WHERE NAME='events_transactions_current';
+--echo # The native statement deadline bounds an in-flight SQL call.
+CALL sys.shannon_agent_selfcheck('runtime','timeout',NULL);
+SELECT 1 AS connection_usable;
+--source ../include/agent_dev_routines_cleanup.inc

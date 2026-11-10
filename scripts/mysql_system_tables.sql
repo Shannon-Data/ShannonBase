@@ -898,6 +898,25 @@ EXECUTE stmt;
 DROP PREPARE stmt;
 
 -- ---------------------------------------------------------------------------
+SET @cmd = "CREATE TABLE IF NOT EXISTS agent_execution (
+    execution_id CHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    principal_prefix CHAR(16) NOT NULL,
+    conversation_id VARCHAR(64) NOT NULL,
+    request_hash CHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    run_token CHAR(36) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    status VARCHAR(24) NOT NULL,
+    response MEDIUMTEXT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (execution_id),
+    KEY idx_principal_created (principal_prefix, created_at)
+) ENGINE=InnoDB CHARACTER SET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci STATS_PERSISTENT=0
+  ROW_FORMAT=DYNAMIC TABLESPACE=innodb_system COMMENT='Agent keyed execution outcomes; uncertain runs are never replayed'";
+SET @str = CONCAT(@cmd, " ENCRYPTION='", @is_mysql_encrypted, "'");
+PREPARE stmt FROM @str;
+EXECUTE stmt;
+DROP PREPARE stmt;
+
 -- agent_usage: per-principal, per-day metering.
 --
 -- The only quota that existed was a row cap on long-term facts. Nothing
@@ -948,11 +967,9 @@ DROP PREPARE stmt;
 -- populates the table behaves exactly as before, and an upgrade does not
 -- start refusing work that used to succeed.
 --
--- Most keys name an @chat_options switch. Four have no session counterpart
--- and are settable only here, because they are resource ceilings rather than
--- intentions: read_row_limit_max and read_timeout_ms bound a single read,
--- and max_turns and turn_deadline_ms bound one agent turn -- the two numbers
--- that decide whether an answer comes back complete or partial.
+-- Most keys name an @chat_options switch. read_row_limit_max, read_timeout_ms
+-- and turn_deadline_ms are operator-only resource ceilings. max_turns and the
+-- tool timeout keys also accept session values, bounded by the operator ceiling.
 --
 -- Three more govern egress, which is the one thing the agent does that leaves
 -- the instance. The prompt carries query results, schema and recalled memory,
@@ -988,6 +1005,7 @@ SET @cmd = "CREATE TABLE IF NOT EXISTS agent_sql_trace  (
     result_preview  TEXT         COMMENT 'Truncated result preview',
     is_write        TINYINT(1)   DEFAULT 0 COMMENT 'Distinguish read-only vs write operations for auditing',
     embedding       VECTOR(384)  DEFAULT NULL COMMENT 'embedding of desc_text for few-shot retrieval, model: multilingual-e5-small',
+    embed_eligible  TINYINT(1) NOT NULL DEFAULT 0 COMMENT 'Only successful read traces selected by the writer may be derived or recalled',
     turn_id         VARCHAR(64)  DEFAULT NULL COMMENT 'Conversation turn this step belongs to. turn_no above is the agent loop iteration, which is a different thing and was the only join key this ledger had; turn_id is what agent_memory.turn_id joins to',
     created_at      TIMESTAMP    DEFAULT CURRENT_TIMESTAMP COMMENT 'Creation timestamp',
     INDEX idx_conv (conversation_id, turn_no, step_no),
@@ -1040,6 +1058,8 @@ SET @cmd = "CREATE TABLE IF NOT EXISTS agent_review_plan_step (
     tool           VARCHAR(32) COMMENT 'Tool name or action for this step',
     sql_text       TEXT      COMMENT 'SQL to execute for this step',
     args_json      TEXT      COMMENT 'Serialized tool args',
+    execution_db   VARCHAR(64) NOT NULL DEFAULT '',
+    approval_digest CHAR(64) CHARACTER SET ascii COLLATE ascii_bin DEFAULT NULL,
     affected_tables TEXT     COMMENT 'Comma-separated affected tables',
     writes         TINYINT(1) DEFAULT 0 COMMENT 'Whether the step writes data',
     ddl            TINYINT(1) DEFAULT 0 COMMENT 'Whether the step changes schema',

@@ -1,10 +1,6 @@
 //@include lib_tool_registry.js
-
-/* Schema-introspection and retrieval tools.
- * list_tables / describe_table already had proper implementations in
- * lib_schema.js; here they only need a spec plus a thin (args, ctx) adapter. */
-
-/* ------------------------------------------------------------- list_tables */
+// Schema-introspection and retrieval tools.
+/* list_tables */
 register_tool({
   name: 'list_tables', order: 10, category: 'schema',
   readOnly: true, write: false, ddl: false, transactional: false,
@@ -17,8 +13,7 @@ register_tool({
              'only appears in a name-only list' },
   example: { zh: { keyword: '可选，按关键词检索表名' },
              en: { keyword: 'optional, search table names by keyword' } },
-  /* keyword and top_k are both optional -- the old switch had an explicit
-   * empty `case 'list_tables': break;` for exactly this reason. */
+
   args: { type: 'object',
           properties: { keyword: { type: 'string' },
                         top_k:   { type: 'integer', minimum: 1, maximum: 50 } } },
@@ -29,7 +24,7 @@ function impl_list_tables(args, ctx) {
   return tool_list_tables(ctx.db, args || {});
 }
 
-/* ---------------------------------------------------------- describe_table */
+/*  describe_table */
 register_tool({
   name: 'describe_table', order: 11, category: 'schema',
   readOnly: true, write: false, ddl: false, transactional: false,
@@ -39,8 +34,7 @@ register_tool({
              'table_names array\n' +
              'Always call this before writing SQL against an unfamiliar table — never guess column names' },
   example: { table_name: '...' },
-  /* Either table_name or table_names must be present -- anyOf, because the
-   * old switch accepted both spellings. */
+
   args: { type: 'object',
           properties: { table_name:  { type: 'string' },
                         table_names: { type: 'array', items: { type: 'string' } } },
@@ -57,7 +51,7 @@ function impl_describe_table(args, ctx) {
   return tool_describe_table(ctx.db, args || {});
 }
 
-/* --------------------------------------------------- check_secondary_load */
+/*  check_secondary_load */
 register_tool({
   name: 'check_secondary_load', order: 12, category: 'schema',
   readOnly: true, write: false, ddl: false, transactional: false,
@@ -81,46 +75,10 @@ register_tool({
 });
 
 function impl_check_secondary_load(args, ctx) {
-  var cs_name  = String(args.table_name || '');
-  var cs_parts = cs_name.split('.');
-  if (cs_parts.length !== 2)
-    return { ok: false,
-             response: t('table_name 必须是 schema.table 格式，例如 shannon_ml.census_train',
-                         'table_name must be schema.table format, e.g. shannon_ml.census_train'),
-             error: 'invalid_table_format' };
-  var cs_schema = esc(cs_parts[0]);
-  var cs_table  = esc(cs_parts[1]);
-  var cs_sql = "SELECT rt.LOAD_STATUS, rt.NROWS, rt.LOAD_PROGRESS, rt.SIZE_BYTES, " +
-               "rt.LOAD_START_TIMESTAMP, rt.LOAD_END_TIMESTAMP, rt.LOAD_TYPE " +
-               "FROM performance_schema.rpd_tables rt " +
-               "JOIN performance_schema.rpd_table_id rti ON rt.ID = rti.ID " +
-               "WHERE rti.SCHEMA_NAME = '" + cs_schema + "' " +
-               "AND rti.TABLE_NAME = '" + cs_table + "'";
-  try {
-    var cs_res = query_checked(cs_sql);
-    if (Array.isArray(cs_res) && cs_res.length > 0) {
-      return { ok: true, loaded: true,
-               response: t('✅ 表 ' + cs_name + ' 已加载到 RAPID 引擎：\n',
-                           '✅ Table ' + cs_name + ' is loaded into RAPID engine:\n') +
-                         compress(rows_to_text(cs_res), 1500),
-               sql: cs_sql };
-    }
-    return { ok: true, loaded: false,
-             response: t('❌ 表 ' + cs_name + ' 尚未加载到 RAPID 引擎。\n请先执行：\n' +
-                         '  ALTER TABLE ' + cs_name + ' SECONDARY_LOAD;\n' +
-                         '加载完成后再重试 ml_train。',
-                         '❌ Table ' + cs_name + ' is NOT loaded into RAPID engine.\nPlease run:\n' +
-                         '  ALTER TABLE ' + cs_name + ' SECONDARY_LOAD;\n' +
-                         'Then retry ml_train after loading completes.'),
-             sql: cs_sql };
-  } catch (e) {
-    return { ok: false,
-             response: t('check_secondary_load 执行失败：', 'check_secondary_load failed: ') + String(e),
-             error: 'check_secondary_load_failed' };
-  }
+  return tool_check_secondary_load(args || {});
 }
 
-/* ------------------------------------------------------------------ ml_rag */
+/* ml_rag */
 register_tool({
   name: 'ml_rag', order: 13, category: 'schema',
   readOnly: true, write: false, ddl: false, transactional: false,
@@ -130,7 +88,8 @@ register_tool({
   example: { question: '...', top_k: 6 },
   args: { type: 'object', required: ['question'],
           properties: { question: { type: 'string' },
-                        top_k:    { type: 'integer', minimum: 1, maximum: 50 } } },
+                        top_k:    { type: 'integer', minimum: 1, maximum: 50 },
+                        retrieve_only: { type: 'boolean' } } },
   messages: {
     'question#required': { zh: 'ml_rag 缺少 question 参数', en: 'ml_rag missing question argument' },
     'question#type':     { zh: 'ml_rag 缺少 question 参数', en: 'ml_rag missing question argument' }
@@ -139,17 +98,8 @@ register_tool({
 });
 
 function impl_ml_rag(args, ctx) {
-  var rag_opt_for_tool = get_rag_options(ctx.chat_opt);
-  /* Refused rather than silently retargeted: the model did not choose this
-   * target, the caller did, and a quiet fallback would hide the attempt. */
-  if (rag_opt_for_tool.blocked_stores && rag_opt_for_tool.blocked_stores.length)
-    return { ok: false, response: rag_blocked_message(rag_opt_for_tool.blocked_stores),
-             error: 'rag_store_forbidden' };
-  var rag_res = ml_rag(String(args.question || A.user_message),
-                       args.top_k || rag_opt_for_tool.n_citations || 6,
-                       rag_opt_for_tool);
-  if (!rag_res || !rag_res.ok)
-    return { ok: false, response: t('ml_rag 执行失败', 'ml_rag execution failed'),
-             error: 'ml_rag_failed' };
-  return { ok: true, response: rag_res.text || '', raw: rag_res.raw, rag_meta: rag_res };
+  var rag_res=rag_retrieve(String(args.question || A.user_message),args.top_k,ctx.chat_opt,args.retrieve_only);
+  if(!rag_res.ok)
+    return {ok:false,error:rag_res.error || 'ml_rag_failed',response:rag_res.text || t('ml_rag 执行失败','ml_rag execution failed'),rag_meta:rag_res};
+  return {ok:true,response:rag_res.text || '',rag_meta:rag_res};
 }

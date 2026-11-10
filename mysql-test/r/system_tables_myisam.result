@@ -54,6 +54,8 @@ mysql.agent_conversation_summary
 @table_name
 mysql.agent_derive_queue
 @table_name
+mysql.agent_execution
+@table_name
 mysql.agent_memory
 @table_name
 mysql.agent_memory_audit
@@ -614,6 +616,7 @@ TABLE_SCHEMA	TABLE_NAME	ENGINE
 mysql	agent_artifact	MyISAM
 mysql	agent_conversation_summary	MyISAM
 mysql	agent_derive_queue	MyISAM
+mysql	agent_execution	MyISAM
 mysql	agent_memory	MyISAM
 mysql	agent_memory_audit	MyISAM
 mysql	agent_memory_edge	MyISAM
@@ -646,6 +649,7 @@ TABLE_SCHEMA	TABLE_NAME	ENGINE
 mysql	agent_artifact	MyISAM
 mysql	agent_conversation_summary	MyISAM
 mysql	agent_derive_queue	MyISAM
+mysql	agent_execution	MyISAM
 mysql	agent_memory	MyISAM
 mysql	agent_memory_audit	MyISAM
 mysql	agent_memory_edge	MyISAM

@@ -61,6 +61,7 @@ def	mysql	uk_artifact_hash	mysql	agent_artifact
 def	mysql	PRIMARY	mysql	agent_conversation_summary
 def	mysql	PRIMARY	mysql	agent_derive_queue
 def	mysql	uk_task	mysql	agent_derive_queue
+def	mysql	PRIMARY	mysql	agent_execution
 def	mysql	PRIMARY	mysql	agent_memory
 def	mysql	uk_conv_seq	mysql	agent_memory
 def	mysql	PRIMARY	mysql	agent_memory_audit

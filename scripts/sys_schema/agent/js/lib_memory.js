@@ -1,5 +1,4 @@
 //@include lib_ml.js
-
 function save_chat_options(chat_opt) {
   A.cached_chat_opt = chat_opt;
   try {
@@ -10,7 +9,7 @@ function save_chat_options(chat_opt) {
     var safe = JSON.parse(JSON.stringify(chat_opt));
     if (safe.model_options && safe.model_options.api_key)
       safe.model_options.api_key = '***';
-    sys.exec_sql("SET @chat_options = '" + esc(JSON.stringify(safe)) + "'");
+    exec_sql("SET @chat_options = '" + esc(JSON.stringify(safe)) + "'");
   } catch(e) {}
 }
 
@@ -24,14 +23,10 @@ function update_chat_history(chat_opt, user_msg, bot_msg) {
     chat_opt.chat_history[chat_opt.chat_history.length - 1] = entry;
   else
     chat_opt.chat_history.push(entry);
-  /* Single authority for the window size: get_memory_options() folds the
-   * legacy history_length knob into short_term.recent_turns, so the default
-   * is no longer spelled independently in three files. */
+
   var max_len = Number(get_memory_options(chat_opt).short_term.recent_turns);
   if (!isFinite(max_len) || max_len < 0) max_len = 3;
-  /* slice(-0) is slice(0), i.e. the whole array — so history_length:0
-   * ("keep no history") silently let chat_history grow without bound.
-   * Slice from an absolute offset instead. */
+
   if (chat_opt.chat_history.length > max_len)
     chat_opt.chat_history =
       chat_opt.chat_history.slice(chat_opt.chat_history.length - max_len);
@@ -48,13 +43,7 @@ function chat_history_to_text(chat_opt) {
   }).join('\n');
 }
 
-/* Legacy accessor, kept because plugins and older call sites use it.
- *
- * Two fixes over the original: it orders by `seq`, not `created_at` (a
- * TIMESTAMP resolves to whole seconds, so several turns inside one second
- * came back in arbitrary order), and a read failure is no longer indis-
- * tinguishable from an empty conversation -- MEM.short.load() records the
- * failure in mysql.agent_memory_audit and flags A.memory_degraded. */
+// Legacy accessor, kept because plugins and older call sites use it.
 function get_history(conv_id, n) {
   var mo = get_memory_options(get_chat_options());
   if (n) {
@@ -64,22 +53,11 @@ function get_history(conv_id, n) {
   return mem_turns_to_text(loaded.turns);
 }
 
-/* Rebuild @chat_options.chat_history from the server-side store.
- *
- * Pairing is by turn_no now.  The original walked the rows in order and
- * paired each `user` row with whatever happened to follow it, so a turn whose
- * assistant row was never written -- the exact orphan the old two-INSERT
- * persist_turn could leave behind -- silently mis-paired that user message
- * with the *next* turn's answer.  Turns are written atomically now, but
- * pairing by turn_no also makes the recovery correct for rows written by an
- * older server. */
+// Rebuild @chat_options.chat_history from the server-side store.
 function recover_chat_history_from_memory(conv_id, max_turns) {
   max_turns = max_turns || 3;
   try {
-    /* Select the last max_turns *turns*, not the last max_turns*2 rows: a
-     * turn is two rows only when both legs were written, and a legacy orphan
-     * row (the pre-atomic persist_turn could leave one) would otherwise eat
-     * the budget of a whole turn and recover one fewer than asked for. */
+
     var rows = query(
       "SELECT role, content, turn_no, seq FROM mysql.agent_memory" +
       " WHERE conversation_id='" + esc(conv_id) + "'" +
@@ -92,14 +70,7 @@ function recover_chat_history_from_memory(conv_id, max_turns) {
     );
     if (!Array.isArray(rows) || !rows.length) return [];
 
-    /* Grouped by turn_no, but a group only ever holds one row per role.
-     * turn_no is allocated as MAX(turn_no)+1 inside the INSERT and is not
-     * covered by a unique key -- uk_conv_seq is what serialises concurrent
-     * writers, and it does so by making the loser retry, which re-reads
-     * turn_no too.  So a duplicate should not arise; if one ever did, the
-     * old grouping would have silently overwritten one turn's message with
-     * another's.  Starting a new group instead keeps both, in seq order,
-     * and costs nothing in the normal case. */
+    // Grouped by turn_no, but a group only ever holds one row per role.
     var by_turn = {}, order = [], groups = {};
     for (var i = 0; i < rows.length; i++) {
       var tn  = String(rows[i].turn_no || 0);
@@ -124,33 +95,15 @@ function recover_chat_history_from_memory(conv_id, max_turns) {
   } catch(e) { return []; }
 }
 
-/* Persist one turn.
- *
- * Delegates to MEM.short.append_turn(), which writes the user and assistant
- * rows in a single INSERT under one monotonic `seq`.  The previous
- * implementation issued two independent INSERTs wrapped in bare
- * `try{...}catch(e){}`, so a failure between them left an orphan user row and
- * a failure of either left no trace at all.
- *
- * `thought` still carries a route marker at most call sites ('review:approve',
- * 'catalog:<sql>', 'hw_mode:<mode>'), so when no explicit route is passed we
- * derive it from that prefix rather than editing a dozen call sites.  The
- * route decides whether the turn is worth embedding: approval prompts are UI
- * chatter, and embedding them doubled ML_EMBED_ROW cost for no recall value. */
-/* One id per invocation, minted on first use.  It is what joins this turn's
- * rows in mysql.agent_memory to its cost row in mysql.agent_memory_audit.
- * mysql.agent_sql_trace is still joined by (conversation_id, turn_no), and
- * its turn_no is the loop iteration rather than the conversation turn --
- * closing that last gap needs a column on the trace table, which is bootstrap
- * schema and a separate decision. */
+// Persist one turn.
+// One id per invocation, minted on first use.
 function current_turn_id() {
+  if (A.execution && A.execution.id) return A.execution.id;
   if (!A.turn_id) A.turn_id = gen_query_id() + gen_query_id();
   return A.turn_id;
 }
 
-/* What did this turn cost?  Written once per turn rather than per audit row,
- * so "tokens, latency and model calls for turn X" is one row to read and no
- * existing audit row changes shape. */
+// What did this turn cost?
 function log_turn_cost(route) {
   var c = A.cost;
   if (!c || !c.llm_calls) return;
@@ -160,27 +113,6 @@ function log_turn_cost(route) {
                 ' completion_tokens=' + c.completion_tokens +
                 ' mem_block_tokens=' + Number(A.mem_block_tokens || 0),
                 c.llm_calls, c.llm_ms, '');
-
-  /* Metered where it is audited, and for every route.
-   *
-   * Settlement used to happen only at the agent loop's exit, so the model
-   * calls made by the rule planner (up to five), by Route C, and by every
-   * approval turn were written to the audit trail and never reached
-   * mysql.agent_usage -- which made max_llm_calls_per_day and
-   * max_prompt_tokens_per_day silently inapplicable to most of the routes
-   * that spend money. Provider spend is the one cost the server has no
-   * counterpart for, and therefore the only thing those ceilings are for,
-   * so it is settled here: persist_turn() is what every finished turn goes
-   * through, whichever route produced it, and A.cost is per-invocation
-   * (see lib_state.js) so this runs once per turn.
-   *
-   * typeof-guarded for the same reason mem_diversify() is below: each
-   * generated root has its own global scope. */
-  if (typeof usage_add === 'function')
-    usage_add({ llm_calls:         Number(c.llm_calls || 0),
-                prompt_tokens:     Number(c.prompt_tokens || 0),
-                completion_tokens: Number(c.completion_tokens || 0),
-                llm_ms:            Number(c.llm_ms || 0) });
 }
 
 function persist_turn(conv_id, user_msg, bot_msg, thought, route) {
@@ -194,11 +126,9 @@ function persist_turn(conv_id, user_msg, bot_msg, thought, route) {
   MEM.short.append_turn(conv_id, user_msg, bot_msg, thought, { route: route });
   log_turn_cost(route);
 
-  /* Surface degradation to the caller regardless of whether this branch
-   * happened to call save_chat_options() before or after persisting. */
   if (A.memory_degraded) {
     try {
-      sys.exec_sql(
+      exec_sql(
         "SET @chat_options = JSON_SET(COALESCE(@chat_options, JSON_OBJECT())," +
         " '$.memory_degraded', TRUE," +
         " '$.memory_degraded_reason', '" + esc(A.memory_degraded_reason || '') + "')"
@@ -207,32 +137,7 @@ function persist_turn(conv_id, user_msg, bot_msg, thought, route) {
   }
 }
 
-/**
- * Persist one executed SQL step to mysql.agent_sql_trace, and — for
- * successful, read-only query_db steps only — also embed `desc` (the
- * model's stated reason/intent for that query, the closest thing we have
- * to "what question was this SQL answering") into a new `embedding` column
- * on this same row.
- *
- * This table (not mysql.agent_memory) is now the single source of truth
- * for retrieve_few_shot()'s vector search: agent_memory.thought never
- * actually contained the raw SQL text (see tool_log's `thought=<free text>`
- * format in shannon_agent_run.js), so a prior version of retrieve_few_shot
- * regex-matched against a field that could never contain what it was
- * looking for and silently always returned ''. Keeping (desc, sql) + their
- * embedding together on one row, in the one table that already stores the
- * real sql_text, removes that cross-table/format mismatch entirely.
- *
- * Embedding is intentionally gated to `tool === 'query_db' && !is_write`
- * with a non-empty desc and no visible error in `result`:
- *   - write/DDL/ML/tx-control steps aren't useful text-to-SQL examples and
- *     would just add embedding cost with no few-shot value;
- *   - a failed query is actively harmful as a "learned" example, since it
- *     would teach the model to reproduce SQL that didn't work.
- * This keeps embedding calls bounded to roughly the same steps the old
- * `thought LIKE '%query_db%'` filter was trying (and failing) to select.
- */
-function log_sql_trace(conv_id, turn_no, step_no, route, tool, sql, desc, result) {
+function log_sql_trace(conv_id, turn_no, step_no, route, tool, sql, desc, result, execution_ok) {
   try {
     var stmt = classify_statement(sql);
     var is_write = stmt.is_write ? 1 : 0;
@@ -243,109 +148,62 @@ function log_sql_trace(conv_id, turn_no, step_no, route, tool, sql, desc, result
       result_str.indexOf('Error: ')      !== -1 ||
       result_str.indexOf('Unknown table') !== -1;
 
+    /* The vector is derived by the queue, not here: an ONNX call per step put
+     * the embedding on the user's critical path for a retrieval that only reads
+     * *other* conversations. */
     var should_embed =
-      tool === 'query_db' && !is_write && !has_error &&
+      tool === 'query_db' && !is_write && execution_ok === true && !has_error &&
       String(desc || '').trim().length > 0;
 
-    var embed_col_sql = 'NULL';
-    if (should_embed) {
-      var safe_desc = String(desc).trim().substring(0, 1800);
-      embed_col_sql =
-        "sys.ML_EMBED_ROW('" + esc(safe_desc) + "'," +
-        "JSON_OBJECT('model_id','" + esc(get_embed_model_id()) + "','truncate',true))";
-    }
-
-    /* turn_id, not just turn_no.  The two count different things: turn_no
-     * here is the agent-loop iteration, while a conversation turn is one
-     * user message, so "which tools did this turn run" had no join key at
-     * all.  agent_memory.turn_id is generated from the same value, so the
-     * ledger and the memory rows now meet. */
-    sys.exec_sql(
+    // turn_id, not just turn_no.
+    var inserted = exec_sql(
       "INSERT INTO mysql.agent_sql_trace " +
-      "(conversation_id, turn_no, step_no, route, tool, sql_text, desc_text, result_preview, is_write, embedding, turn_id) " +
+      "(conversation_id, turn_no, step_no, route, tool, sql_text, desc_text, " +
+      " result_preview, is_write, embedding, embed_eligible, turn_id) " +
       "VALUES ('" + esc(conv_id) + "'," + Number(turn_no) + "," + Number(step_no) + "," +
       "'" + esc(route) + "','" + esc(tool || '') + "'," +
       "'" + esc(String(sql || '')) + "','" + esc(String(desc || '')) + "'," +
-      "'" + esc(result_str.substring(0, 1200)) + "'," + is_write + "," +
-      embed_col_sql + ",'" + esc(current_turn_id()) + "')"
+      "'" + esc(result_str.substring(0, 1200)) + "'," + is_write + ",NULL," + (should_embed ? 1 : 0) + ",'" +
+      esc(current_turn_id()) + "')"
     );
+    /* A rejected INSERT leaves LAST_INSERT_ID() pointing at some earlier row,
+       which would enqueue the wrong one to be embedded. */
+    if (!inserted || inserted.error) return;
+
+    var mo = get_memory_options(get_chat_options());
+    if (should_embed && mo.enabled !== false && mo.derive && mo.derive.enabled !== false) {
+      var id_rows = query("SELECT LAST_INSERT_ID() AS id");
+      var trace_id = (Array.isArray(id_rows) && id_rows.length) ? id_rows[0].id : null;
+      var prefix   = mem_principal_prefix();
+      if (trace_id && prefix) {
+        exec_sql(
+          "INSERT IGNORE INTO mysql.agent_derive_queue" +
+          " (principal_prefix, kind, target_table, target_id, payload)" +
+          " VALUES ('" + esc(prefix) + "','embed_trace','agent_sql_trace'," +
+          Number(trace_id) + ", JSON_OBJECT('source_column','desc_text'," +
+          "'target_column','embedding'))"
+        );
+      }
+    }
   } catch (e) {}
 }
 
-/**
- * Vector-retrieve a small number of past (intent -> working SQL) examples
- * to use as few-shot grounding for the current question.
- *
- * Queries mysql.agent_sql_trace directly (see log_sql_trace) rather than
- * mysql.agent_memory: sql_text/desc_text/embedding all live on the same row
- * there, for exactly the query_db steps that succeeded, so there is no
- * text-format assumption to keep in sync with how shannon_agent_run.js
- * happens to build tool_log/thought this month.
- */
-/* Materialise the question embedding once, into a session user variable, and
- * return the reference to splice into SQL.  Returns null when the embedding
- * could not be produced -- callers must treat that as a failed recall rather
- * than fall back to the inline form.
- *
- * Why this exists.  sys.ML_EMBED_ROW is a stored function, so it resolves to
- * Item_func_sp.  DETERMINISTIC earns it only INNER_TABLE_BIT from
- * get_initial_pseudo_tables() -- constant *for execution*, not a literal --
- * and Item_func_sp::execute() caches nothing, so the routine runs on every
- * call.  What would have rescued it is MySQL's constant-expression cache, and
- * JOIN::finalize_table_conditions() applies that to table conditions and the
- * HAVING clause only; it never reaches a select list or an ORDER BY.  So
- *
- *     ... DISTANCE(col, sys.ML_EMBED_ROW('<q>', ...), 'COSINE') AS distance
- *     ... ORDER BY DISTANCE(embedding, sys.ML_EMBED_ROW('<q>', ...), 'cosine')
- *
- * ran one ONNX embedding inference *per candidate row*, on the reply path of
- * every turn, against pools sized in the hundreds.  A user variable is
- * per-session, evaluated once by the SET, and read back as a plain value.
- *
- * The name is fixed and per-session: recalls within one turn run one after
- * another, never concurrently, so reusing the variable is safe and saves
- * nothing to make it unique. */
 var MEM_EMBED_VAR = '@shannon_mem_qvec';
 
 function mem_embed_question_var(question, varname) {
   var v    = varname || MEM_EMBED_VAR;
   var text = String(question == null ? '' : question).substring(0, 1800);
 
-  var set_res = query(
-    "SET " + v + " := sys.ML_EMBED_ROW('" + esc(text) + "'," +
-    "JSON_OBJECT('model_id','" + esc(get_embed_model_id()) + "','truncate',true))"
-  );
+  var set_res = query("SET " + v + " := " + mem_embed_expr(text));
   if (set_res && !Array.isArray(set_res) && set_res.error) return null;
 
-  /* A model that returns NULL would make every DISTANCE() NULL, and the recall
-   * would come back empty -- indistinguishable from "nothing matched".  One
-   * cheap statement turns that into a reportable failure.  It is still two
-   * statements per recall in place of N inferences. */
   var chk = query("SELECT " + v + " IS NULL AS embed_is_null");
   if (!Array.isArray(chk) || !chk.length || Number(chk[0].embed_is_null) === 1) return null;
 
   return v;
 }
 
-/* L2b procedural recall.
- *
- * Near-duplicate few-shots are the most visible redundancy in the whole
- * memory block: ask the same question on five days and the model is shown
- * essentially the same example five times, spending the budget of three
- * distinct examples to say one thing.  So this path takes the same MMR the
- * L2a/L3 recalls take.
- *
- * It does not take the score terms.  agent_sql_trace has no confidence or
- * use_count to read back, and this query -- unlike the two in
- * lib_memory_registry.js -- has no max_distance floor, so reordering on
- * anything other than distance could promote a genuinely unrelated example.
- *
- * mem_diversify() lives in lib_memory_registry.js, which includes this file
- * rather than the other way round.  Both generated roots happen to contain
- * it today (lib_tools.js -> lib_router.js -> lib_memory_registry.js), but a
- * root that took lib_memory.js alone would not, and JerryScript gives each
- * root its own global scope -- so this asks rather than assumes, and falls
- * back to plain distance order when it is absent. */
+// L2b procedural recall.
 function retrieve_few_shot(question, topK) {
   topK = topK || 3;
   try {
@@ -354,46 +212,26 @@ function retrieve_few_shot(question, topK) {
     /* Embed once, not once per trace row -- see mem_embed_question_var(). */
     var embed_expr = mem_embed_question_var(question);
     if (!embed_expr) return '';
-    var can_mmr = (typeof mem_diversify === 'function' &&
-                   typeof mem_ranking_options === 'function');
-    var lambda  = 1;
-    if (can_mmr) {
-      try { lambda = mem_ranking_options(get_memory_options(get_chat_options())).lambda; }
-      catch (e) { lambda = 1; can_mmr = false; }
-    }
-    var fetch_k = (can_mmr && lambda < 1) ? Math.min(topK * 3, 50) : topK;
+    var lambda = mem_ranking_options(get_memory_options(get_chat_options())).lambda;
+    var fetch_k = mem_candidate_limit(topK,lambda);
     var sim_rows = query(
       "SELECT desc_text, sql_text FROM mysql.agent_sql_trace" +
       " WHERE tool='query_db' AND is_write=0" +
       "   AND conversation_id LIKE '" + esc(principal_prefix) + ":%'" +
       "   AND conversation_id != '" + esc(A.conversation_id) + "'" +
-      "   AND embedding IS NOT NULL" +
+      "   AND embedding IS NOT NULL AND embed_eligible=1" +
       " ORDER BY DISTANCE(embedding, " + embed_expr + ", 'cosine') ASC LIMIT " + fetch_k
     );
     if (!Array.isArray(sim_rows) || !sim_rows.length) return '';
-    if (can_mmr && lambda < 1 && sim_rows.length > 1) {
-      /* The query returned them best-first and the rows carry no distance
-       * column, so rank position is the only relevance signal there is;
-       * 1/(1+i) makes it monotone decreasing within 0..1, which is the range
-       * MMR weighs the similarity penalty against.  Precomputed onto the row
-       * rather than derived inside the callback, because the callback would
-       * otherwise have to search the very array being replaced. */
-      for (var ri = 0; ri < sim_rows.length; ri++) sim_rows[ri].rank_rel = 1 / (1 + ri);
-      sim_rows = mem_diversify(
-        sim_rows,
-        /* Both halves matter: two traces can share a description and differ
-         * in SQL, or share SQL and differ in what they were asked for. */
-        function (r) { return String(r.desc_text || '') + ' ' + String(r.sql_text || ''); },
-        function (r) { return r.rank_rel; },
-        lambda, topK);
-    } else if (sim_rows.length > topK) {
-      sim_rows = sim_rows.slice(0, topK);
-    }
+    for (var ri = 0; ri < sim_rows.length; ri++) sim_rows[ri].rank_rel = 1 / (1 + ri);
+    sim_rows = mem_select_candidates(sim_rows,topK,lambda,
+      function(r) { return String(r.desc_text || '') + ' ' + String(r.sql_text || ''); },
+      function(r) { return r.rank_rel; });
     var lines = [t('【Few-Shot 参考（向量检索）】', '[Few-Shot References (vector search)]')];
     for (var i = 0; i < sim_rows.length; i++) {
       var desc = String(sim_rows[i].desc_text || '').trim();
       var sql  = String(sim_rows[i].sql_text  || '').trim();
-      if (!sql) continue; // defensive: should never happen given the WHERE/embedding gate, but never emit a bare Q with no SQL
+      if (!sql) continue;
       lines.push('Q' + (i+1) + ': ' + (desc || t('（无描述）', '(no description)')).substring(0, 80));
       lines.push('SQL: ' + sql.substring(0, 150));
     }

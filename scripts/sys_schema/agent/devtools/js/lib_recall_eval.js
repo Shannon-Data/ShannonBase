@@ -1,41 +1,6 @@
 //@include lib_memory_registry.js
-
-/* ===========================================================================
- * The recall-quality set.
- *
- * Four separate decisions were all blocked on the same missing artifact:
- *
- *   - the ranking weights in MEM_DEFAULTS.long_term.ranking, which are set to
- *     relevance-only because nothing said what recency or usage are worth;
- *   - retrieval.mode and the vector/lexical fusion weights;
- *   - retrieval.min_lex_ratio, the floor that makes the ngram parser usable;
- *   - whether a retrieval-backed skill store can ship at all, since a missed
- *     skill fails harder than a missed memory.
- *
- * None of them can be argued from taste, because every one of them changes
- * what the model is shown on every turn.  They need a set of questions with
- * known answers and a number.  This is that set.
- *
- * It is built to be discriminating rather than merely large.  Three kinds of
- * query, chosen so that a retriever that only does one thing scores badly:
- *
- *   lexical   a distinctive token -- a table name, a column, an error code,
- *             an id.  Embeddings carry almost no signal for these: fact_sales
- *             and fact_orders embed to nearly the same point.
- *   semantic  a paraphrase sharing no token with its answer.  Full-text
- *             search cannot reach these at all.
- *   mixed     both signals present, which is the ordinary case.
- *
- * A fusion that is worth its extra query has to beat both single retrievers
- * on the whole set, not just on the half that suits it.
- *
- * Runs lexical-only without an embedding model, which is the normal state of
- * a CI machine -- see the `modes` argument to recall_eval_score().
- * ======================================================================== */
-
-/* Documents.  `tag` is the identity the scorer matches on; it is stored in
- * the subject column rather than inside the statement, so it cannot itself
- * become a lexical match for a query. */
+// =========================================================================== The recall-quality set.
+// Documents.
 function recall_eval_docs() {
   return [
     /* --- distinctive identifiers: lexical should win ------------------- */
@@ -68,16 +33,7 @@ function recall_eval_docs() {
     { tag: 'r23', text: '财务季度从二月开始，和自然季度不一样' },
     { tag: 'r24', text: 'The embedding model used across this instance is multilingual-e5-small' },
 
-    /* --- near misses ---------------------------------------------------
-     * Distractors, not filler.  Each one is deliberately close to a real
-     * answer along exactly one axis, so a retriever that matches loosely is
-     * punished rather than rewarded:
-     *   r25 embeds almost identically to r01 (fact_orders / fact_sales) and
-     *       is lexically distinct -- the case for keeping a lexical leg;
-     *   r26 shares r02's shape and its *_sk vocabulary;
-     *   r27 shares r06's rollup vocabulary with a different schedule;
-     *   r28 makes "which tables are rebuilt nightly" genuinely have two
-     *       answers, so recall@k can distinguish finding one from both. */
+    // --- near misses --------------------------------------------------- Distractors, not filler.
     { tag: 'r25', text: '明细事实表 fact_orders 存放在 ops_db，和 fact_sales 不是同一张表' },
     { tag: 'r26', text: 'The dim_product dimension is keyed by product_sk, mirroring dim_customer' },
     { tag: 'r27', text: 'Report job weekly_rollup runs Monday morning and is unrelated to nightly_rollup' },
@@ -85,8 +41,6 @@ function recall_eval_docs() {
   ];
 }
 
-/* Queries.  `kind` records what the query is meant to exercise, so the report
- * can say *where* a retriever is losing rather than only that it is. */
 function recall_eval_queries() {
   return [
     { q: 'fact_sales',                              kind: 'lexical',  rel: ['r01'] },
@@ -136,10 +90,6 @@ function recall_eval_queries() {
 
 function recall_eval_scope(label) { return 'rqs:' + String(label || 'default'); }
 
-/* Seed the set as ordinary long-term facts, so retrieval sees exactly the
- * table shape it sees in production rather than a fixture that happens to be
- * easier.  scope carries the run label, which is also what confines scoring
- * and cleanup to this run's rows. */
 function recall_eval_seed(label, opt) {
   var mo    = opt || get_memory_options(get_chat_options());
   var scope = recall_eval_scope(label);
@@ -169,9 +119,7 @@ function recall_eval_cleanup(label) {
 function recall_eval_run_one(mode, question, scope, topK, mo) {
   var prefix = mem_principal_prefix();
   var opt = mem_merge_defaults(mo, { retrieval: { mode: mode },
-                                     /* The pool has to be at least topK or a
-                                      * mode is being scored on a shorter list
-                                      * than its rivals. */
+                                     // The pool has to be at least topK or a mode is being scored on a shorter list than its rivals.
                                      long_term: { semantic_top_k: topK } });
   var filters = {
     documents:        [prefix],
@@ -196,16 +144,7 @@ function recall_eval_run_one(mode, question, scope, topK, mo) {
   return { ok: !!(res && res.ok), tags: tags };
 }
 
-/* recall@k and MRR, macro-averaged over queries and reported per query kind.
- *
- * recall@k rather than precision: the memory block shows the model a handful
- * of facts, and the cost of one irrelevant fact among them is a few tokens,
- * while the cost of a missing one is a wrong answer.  MRR is reported
- * alongside because a relevant fact at rank 1 and at rank 3 are not equally
- * useful when the block is later trimmed to a token budget.
- *
- * `modes` is a comma-separated list. 'lexical' alone needs no embedding
- * model, which is what makes this runnable in CI. */
+// recall@k and MRR, macro-averaged over queries and reported per query kind.
 function recall_eval_score(label, modes, topK, opt) {
   var mo    = opt || get_memory_options(get_chat_options());
   var scope = recall_eval_scope(label);
@@ -258,9 +197,6 @@ function recall_eval_score(label, modes, topK, opt) {
   return out;
 }
 
-/* Two decimals, without toFixed: JerryScript has it, but rounding here keeps
- * the printed value identical across engines and makes the mysql-test result
- * file stable. */
 function recall_eval_round(x) {
   var v = Math.round(Number(x) * 100) / 100;
   var s = String(v);

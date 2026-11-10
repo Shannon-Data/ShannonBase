@@ -11,6 +11,7 @@ Tables_in_mysql
 agent_artifact
 agent_conversation_summary
 agent_derive_queue
+agent_execution
 agent_memory
 agent_memory_audit
 agent_memory_edge

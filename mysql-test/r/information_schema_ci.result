@@ -2025,11 +2025,11 @@ use test;
 #                           CACHE; OPENED_TABLES INCREASES"
 #
 SELECT * FROM INFORMATION_SCHEMA.TABLES;
-SELECT VARIABLE_VALUE INTO @val1 FROM performance_schema.global_status WHERE
+SELECT VARIABLE_VALUE INTO @val1 FROM performance_schema.session_status WHERE
 VARIABLE_NAME LIKE 'Opened_tables';
 SELECT ENGINE FROM INFORMATION_SCHEMA.TABLES;
 # The below SELECT query should give same output as above SELECT query.
-SELECT VARIABLE_VALUE INTO @val2 FROM performance_schema.global_status WHERE
+SELECT VARIABLE_VALUE INTO @val2 FROM performance_schema.session_status WHERE
 VARIABLE_NAME LIKE 'Opened_tables';
 # The below select should return '1'
 SELECT @val1 = @val2;

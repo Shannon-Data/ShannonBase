@@ -1,0 +1,156 @@
+# The self-check routines are dev tooling; install them before the first CALL.
+--source ../include/agent_dev_routines.inc
+
+# ShannonBase Agent: the embedding paths.
+#
+# Every other file in this suite runs without an ONNX model, and says so:
+# lexical recall and the ranking arithmetic are functions of their arguments.
+# This one is the other half. It covers what only runs when a model is
+# installed -- the vector column the memory layer writes, the vector and
+# hybrid recall legs that read it back, and the batch routine behind the
+# ml_embed_table tool -- so it needs llm-models/ to hold the model the agent
+# names by default:
+#
+#   ./mtr --mysqld=--llm-dir=/path/to/dir-containing-llm-models \
+#         agent.shannon_embedding
+#
+# The documented build fetches multilingual-e5-small into extra/llm-models/,
+# so the model is expected to be present rather than skipped on.
+#
+# Nothing prints a principal prefix: it is SHA2(CURRENT_USER()), so echoing
+# one would pin the recorded result to a single account name.
+
+--echo #
+--echo # ---------------------------------------------------------------------
+--echo # The model, and the row-level call every agent path is built on
+--echo # ---------------------------------------------------------------------
+SELECT JSON_CONTAINS(ML_MODEL_LIST(),
+                     JSON_OBJECT('name','multilingual-e5-small','status','ready'))
+       AS embed_model_ready;
+
+--echo #
+--echo # 384 dimensions is MEM_DEFAULTS.long_term.embed_dim. The agent sizes
+--echo # its vector columns for it, so a model whose width moved would fail
+--echo # here rather than at the first INSERT into agent_semantic_fact.
+--echo #
+SELECT LENGTH(sys.ML_EMBED_ROW('ShannonBase agent',
+                               JSON_OBJECT('model_id','multilingual-e5-small')))
+       AS vector_bytes;
+
+--echo #
+--echo # Booleans rather than distances: the exact cosine a model build
+--echo # produces is not this suite's contract, the ordering is. The same text
+--echo # embeds to the same point, and an unrelated sentence does not.
+--echo #
+SELECT DISTANCE(sys.ML_EMBED_ROW('ShannonBase agent',
+                                 JSON_OBJECT('model_id','multilingual-e5-small')),
+                sys.ML_EMBED_ROW('ShannonBase agent',
+                                 JSON_OBJECT('model_id','multilingual-e5-small')),
+                'COSINE') < 0.001 AS identical_is_same_point,
+       DISTANCE(sys.ML_EMBED_ROW('ShannonBase agent',
+                                 JSON_OBJECT('model_id','multilingual-e5-small')),
+                sys.ML_EMBED_ROW('quarterly revenue grew by twelve percent',
+                                 JSON_OBJECT('model_id','multilingual-e5-small')),
+                'COSINE') > 0.1 AS unrelated_is_far;
+
+--echo #
+--echo # A multilingual model has to place the two languages near each other,
+--echo # or "semantic recall" is English-only recall with extra steps.
+--echo #
+SELECT DISTANCE(sys.ML_EMBED_ROW('What is vector search',
+                                 JSON_OBJECT('model_id','multilingual-e5-small')),
+                sys.ML_EMBED_ROW('什么是向量检索',
+                                 JSON_OBJECT('model_id','multilingual-e5-small')),
+                'COSINE') < 0.2 AS cross_lingual_is_close;
+
+--echo #
+--echo # ---------------------------------------------------------------------
+--echo # Building a vector store: what the ml_embed_table tool calls
+--echo # ---------------------------------------------------------------------
+--echo # The tool's only own logic is option assembly (model_id from
+--echo # @chat_options, truncate as 1/0); the encoding itself is ML_EMBED_TABLE,
+--echo # and this is that routine against a real column. It creates the vector
+--echo # column itself, sized from the model.
+--echo #
+CREATE DATABASE sh_agent_emb;
+CREATE TABLE sh_agent_emb.docs (
+  id      INT PRIMARY KEY,
+  content TEXT
+) ENGINE=InnoDB;
+INSERT INTO sh_agent_emb.docs VALUES
+  (1, 'The vector store is built from this column'),
+  (2, 'Embeddings are written next to the text they came from'),
+  (3, '每一条记忆都带一个向量，用于按语义而不是按关键词检索');
+
+CALL sys.ML_EMBED_TABLE('sh_agent_emb.docs.content',
+                        'sh_agent_emb.docs.embedding',
+                        JSON_OBJECT('model_id','multilingual-e5-small',
+                                    'truncate', 1));
+
+SELECT COUNT(*) AS rows_total,
+       SUM(embedding IS NOT NULL) AS rows_embedded,
+       MIN(LENGTH(embedding)) AS min_vector_bytes
+  FROM sh_agent_emb.docs;
+
+--echo #
+--echo # ---------------------------------------------------------------------
+--echo # The memory layer's own vector write and read-back
+--echo # ---------------------------------------------------------------------
+--echo # Seeding writes each fact through mem_long_write_fact, the same path a
+--echo # remember_fact turn takes, and sets model_id from
+--echo # get_embed_model_id() rather than from anything in this file's setup --
+--echo # so this is the default-resolution path being exercised.
+--echo #
+--echo # The corpus is emptied first for the reason shannon_storage.test
+--echo # documents: lexical scores are IDF-weighted over the whole index, and
+--echo # hybrid fuses the lexical leg, so leftover rows from a sibling test
+--echo # would move every number below. TRUNCATE rather than DELETE: it drops
+--echo # the full-text index along with the rows, so a previous run's
+--echo # tombstones cannot go on counting towards the IDF.
+--echo #
+SET @shannon_agent_selfcheck_allow_writes = 1;
+SET @chat_options = JSON_OBJECT(
+  'memory_options', JSON_OBJECT(
+    'long_term', JSON_OBJECT('episodic_enabled', FALSE,
+                             'semantic_enabled', TRUE,
+                             'default_ttl_days', 0)));
+--disable_warnings
+TRUNCATE TABLE mysql.agent_semantic_fact;
+--enable_warnings
+
+CALL sys.shannon_agent_selfcheck('recall', 'seed',  'emb1');
+
+--echo #
+--echo # with_vector equal to documents is the assertion this file exists for:
+--echo # the write path embedded every fact through the model, so the vector
+--echo # legs below have something to search.
+--echo #
+CALL sys.shannon_agent_selfcheck('recall', 'stats', 'emb1');
+
+--echo #
+--echo # Per query kind, all three legs. Vector is expected to carry the
+--echo # paraphrases the lexical leg cannot reach, and hybrid to be at least as
+--echo # good as either on the whole set -- the numbers in the recorded result
+--echo # are the evidence for keeping both.
+--echo #
+--echo # The last printed digit is normalised away. The scorer reports two
+--echo # decimals, and a mean that lands on a rounding boundary moves by 0.01
+--echo # between runs without anything having changed -- the same corpus and
+--echo # the same ranked lists, differing only in the last bit of the
+--echo # accumulation. Everything the leg is here to assert (which kind of
+--echo # query a leg can answer, and that vector finds paraphrases lexical
+--echo # cannot) survives at one decimal.
+--echo #
+--replace_regex /recall@5=([01]\.[0-9])[0-9]/recall@5=\1x/ /mrr=([01]\.[0-9])[0-9]/mrr=\1x/
+CALL sys.shannon_agent_selfcheck('recall', 'score:lexical,vector,hybrid:5', 'emb1');
+
+CALL sys.shannon_agent_selfcheck('recall', 'cleanup', 'emb1');
+
+--echo #
+--echo # Cleanup
+--echo #
+CALL sys.shannon_agent_selfcheck('harness','trace_vector','emb1');
+DROP DATABASE sh_agent_emb;
+SET @chat_options = NULL;
+
+--source ../include/agent_dev_routines_cleanup.inc

@@ -1267,6 +1267,16 @@ int Utils::read_model_object_content(std::string &model_handle_name, std::string
 int Utils::ML_train(std::string &task_mode, uint data_type, const void *training_data, uint n_data,
                     const char **features_name, uint n_feature, uint label_data_type, const void *label_data,
                     std::string &model_content) {
+  THD *thd = current_thd;
+  auto interrupted = [thd]() {
+    if (!thd || !thd->killed) return false;
+    thd->send_kill_message();
+    return true;
+  };
+  // The agent's per-tool timer and KILL QUERY share the session flag. Poll at
+  // native phase boundaries and between boosting iterations; a single LightGBM
+  // kernel remains cooperative rather than being interrupted from another thread.
+  if (interrupted()) return HA_ERR_QUERY_INTERRUPTED;
   DatasetHandle train_dataset_handler{nullptr};
   BoosterHandle booster{nullptr};
   int finished{0};
@@ -1282,6 +1292,11 @@ int Utils::ML_train(std::string &task_mode, uint data_type, const void *training
                                        nullptr,            // ref.
                                        &train_dataset_handler);
   // clang-format on
+  if (ret) goto cleanup_dataset;
+  if (interrupted()) {
+    ret = HA_ERR_QUERY_INTERRUPTED;
+    goto cleanup_dataset;
+  }
   // to set label data
   if (label_data) {
     ret = LGBM_DatasetSetField(train_dataset_handler, "label", label_data, n_data, label_data_type);
@@ -1298,9 +1313,19 @@ int Utils::ML_train(std::string &task_mode, uint data_type, const void *training
   if (ret) goto cleanup_booster;
 
   for (auto iter = 0; iter < 100; ++iter) {
+    DBUG_EXECUTE_IF("ml_train_cancel_before_iteration", if (thd) thd->killed = THD::KILL_QUERY;);
+    if (interrupted()) {
+      ret = HA_ERR_QUERY_INTERRUPTED;
+      goto cleanup_booster;
+    }
     ret = LGBM_BoosterUpdateOneIter(booster, &finished);
     if (ret) goto cleanup_booster;
     if (finished) break;
+  }
+
+  if (interrupted()) {
+    ret = HA_ERR_QUERY_INTERRUPTED;
+    goto cleanup_booster;
   }
 
   /* to dump the model conent to a string in json fomrat. But on till now ver 4.6.0. it can
@@ -1353,7 +1378,7 @@ int Utils::ML_train(std::string &task_mode, uint data_type, const void *training
 cleanup_booster:
   LGBM_BoosterFree(booster);
 cleanup_dataset:
-  LGBM_DatasetFree(train_dataset_handler);
+  if (train_dataset_handler) LGBM_DatasetFree(train_dataset_handler);
   return ret;
 }
 

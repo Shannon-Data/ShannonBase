@@ -31,7 +31,7 @@ SET @shannon_agent_selfcheck_allow_writes = 1;
 Without it the entry point returns a one-row explanation and does nothing. That
 covers the memory self-check, the recall self-check, and `shannon_agent_loopcheck`
 — the last of which runs a whole agent turn for real, so it writes conversation
-rows, a SQL trace and usage counters, and its policy cases execute a real
+rows and a SQL trace, and its policy cases execute a real
 `DROP TABLE` through the real tool path. One knob for "let the self-checks write",
 not one per entry point.
 
@@ -85,7 +85,31 @@ CALL sys.shannon_agent_selfcheck('recall', 'score:lexical,vector,hybrid:5', 'run
 CALL sys.shannon_agent_selfcheck('recall', 'cleanup', 'run1');
 ```
 
-It reports `recall@k` and MRR per query kind, so a retriever that is strong on identifiers and weak on paraphrase shows up as exactly that rather than being averaged into one number. The lexical baseline recorded in `mysql-test/r/shannon_agent_storage.result` is `recall@3 = 1.00` on identifiers against `0.45` on paraphrase — that asymmetry is the evidence that the two legs are complementary, and it is what the `retrieval.*` and `long_term.ranking.*` weights should be chosen against.
+It reports `recall@k` and MRR per query kind, so a retriever that is strong on identifiers and weak on paraphrase shows up as exactly that rather than being averaged into one number. The lexical baseline recorded in `mysql-test/suite/agent/r/shannon_storage.result` is `recall@3 = 1.00` on identifiers against `0.45` on paraphrase — that asymmetry is the evidence that the two legs are complementary, and it is what the `retrieval.*` and `long_term.ranking.*` weights should be chosen against.
+
+The vector and hybrid legs need an ONNX model under `llm-models/`. `mysql-test/suite/agent/t/shannon_embedding.test` runs the whole seed/stats/score/cleanup sequence against `multilingual-e5-small` and is the run to compare a model or a fusion change against:
+
+```sh
+./mtr --mysqld=--llm-dir=/path/to/dir-containing-llm-models agent.shannon_embedding
+```
 
 Seeding writes real rows to `mysql.agent_semantic_fact` under the calling principal, scoped by `scope='rqs:<label>'`, so `cleanup` removes exactly what `seed` added.
 
+
+
+## Fixed business transaction integration
+
+`agent.shannon_trusted` creates its own `trusted_business` InnoDB fixtures and
+calls `shannon_agent_selfcheck('trusted', op, label)` with write opt-in. The
+operations are `contracts`, `flow`, `caller`, `loop`, `permission` and `race`.
+Run the MTR case to provision its tables, trigger, restricted user and concurrent
+connections; the generic selfcheck runner does not provision these fixtures.
+
+The case verifies required transaction admission, operator authorization,
+strict arguments, template/version/target/verification binding, mandatory
+approval, and denial of Modify-to-SQL. It checks version/status conflicts,
+actual affected rows, same-transaction InnoDB verification, rollback after a
+real trigger breaks the postcondition, caller-controlled durability, request
+replay and correlated audit. Two real connections compete for the same version:
+one completes and one fails the business precondition. The restricted user's
+SQL write is refused without changing the business row.

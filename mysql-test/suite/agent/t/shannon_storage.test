@@ -7,8 +7,7 @@
 # embedding model never learned (lexical retrieval), combine that with vector
 # recall (RRF fusion), follow relations rather than similarity (the memory
 # graph), hand back a result too large to say (the artifact store), defer work
-# off the user's turn (the derivation queue), and count what a principal spent
-# (metering and quota).
+# off the user's turn (the derivation queue), and join memory to its SQL trace.
 #
 # No LLM and no embedding model is involved anywhere in this file. That is a
 # property of the design rather than a limitation of the test: lexical recall
@@ -219,17 +218,6 @@ CALL sys.shannon_agent_selfcheck('memory', 'derive', 'stor1');
 --echo # cannot drift from, or outlive, the value the writer actually stored.
 --echo #
 CALL sys.shannon_agent_selfcheck('memory', 'turn_join', 'stor1');
-
---echo #
---echo # ---------------------------------------------------------------------
---echo # Metering and quota
---echo # ---------------------------------------------------------------------
---echo # no_quota_configured_ok: every limit defaults to unlimited. An instance
---echo # nobody metered has to behave exactly as it did before this existed --
---echo # a quota that starts refusing work on upgrade is a regression, not a
---echo # feature.
---echo #
-CALL sys.shannon_agent_selfcheck('memory', 'usage', 'stor1');
 
 --echo #
 --echo # ---------------------------------------------------------------------

@@ -10,20 +10,15 @@ SET @prefix = LOWER(SUBSTRING(SHA2(CURRENT_USER(),256),1,16));
 DELETE FROM mysql.agent_usage    WHERE principal_prefix = @prefix;
 DELETE FROM mysql.agent_tx_lease;
 #
-# 1. A finished turn is counted once.
-#
-# `turns` is now claimed on entry rather than written on the way out,
-# so that a second turn arriving while the first is still running can
-# see it. The thing that would break silently is double counting, so
-# that is what is asserted.
+# 1. Agent execution does not write daily user usage counters.
 #
 CALL sys.shannon_agent_loopcheck('finish_clean');
 k	v
 result	OK
-SELECT turns FROM mysql.agent_usage
+SELECT COUNT(*) AS daily_usage_rows FROM mysql.agent_usage
 WHERE principal_prefix = @prefix AND usage_date = CURDATE();
-turns
-1
+daily_usage_rows
+0
 #
 # 2. A transaction lease whose owner is gone is reclaimed.
 #
