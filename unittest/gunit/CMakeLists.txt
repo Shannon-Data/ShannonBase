@@ -281,10 +281,12 @@ SET(SERVER_TESTS
   rapid_resources
   rapid_columnar_join_work
   rapid_nested_loop
+  rapid_predicate_pushdown
   rapid_aggregate_order
   rapid_bloom_filter
   rapid_ml
   rapid_storage_index
+  rapid_fixed_key_sort
   autopilot_helpers
   bitpack
   regexp_engine
@@ -368,10 +370,12 @@ SET(RAPID_TESTS
   rapid_resources
   rapid_columnar_join_work
   rapid_nested_loop
+  rapid_predicate_pushdown
   rapid_aggregate_order
   rapid_bloom_filter
   rapid_ml
   rapid_storage_index
+  rapid_fixed_key_sort
   simd_kernels
   transaction_journal_purge
 )

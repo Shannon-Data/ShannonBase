@@ -1,0 +1,39 @@
+--source include/no_ps_protocol.inc
+--disable_query_log
+--disable_result_log
+SET use_secondary_engine=OFF;
+CREATE TABLE late_cost(id INT PRIMARY KEY,v BIGINT) SECONDARY_ENGINE=rapid;
+INSERT INTO late_cost WITH RECURSIVE n AS (SELECT 1 i UNION ALL SELECT i+1 FROM n WHERE i<1000)
+ SELECT (a.i-1)*10+b.i,(a.i-1)*10+b.i FROM n a JOIN n b ON b.i<=10;
+ALTER TABLE late_cost SECONDARY_LOAD;
+SET optimizer_switch='hypergraph_optimizer=on';
+SET use_secondary_engine=FORCED;
+SET optimizer_trace_max_mem_size=1048576;
+SET optimizer_trace='enabled=on';
+SELECT SUM(v) FROM late_cost WHERE MOD(id,10)<3;
+SET optimizer_trace='enabled=off';
+SET use_secondary_engine=OFF;
+--enable_result_log
+--enable_query_log
+# An 8-byte deferred column at 30% survival is below 8/(8+16),
+# so the measured decision must agree with the threshold reported in the trace.
+SELECT EXISTS(SELECT 1 FROM JSON_TABLE(TRACE,'$**.rapid_late_materialization'
+ COLUMNS(enabled BOOL PATH '$.enabled',decided BOOL PATH '$.decided',
+ width INT PATH '$.deferred_bytes_per_row',observed DOUBLE PATH '$.observed_selectivity',
+ threshold DOUBLE PATH '$.break_even_selectivity')) AS d
+ WHERE decided=1 AND enabled=1 AND width=8 AND observed<threshold) INTO @late_cost_agrees
+ FROM information_schema.optimizer_trace;
+SELECT @late_cost_agrees AS cost_and_trace_agree;
+--disable_query_log
+--let $cost_agrees = `SELECT @late_cost_agrees`
+if (!$cost_agrees) {
+ --die Late materialization decision disagrees with the reported cost threshold
+}
+SET use_secondary_engine=FORCED;
+--enable_query_log
+--let $assert_digest = SELECT SUM(v) FROM late_cost WHERE MOD(id,10)<3
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--disable_query_log
+SET use_secondary_engine=OFF;
+DROP TABLE late_cost;
+--enable_query_log

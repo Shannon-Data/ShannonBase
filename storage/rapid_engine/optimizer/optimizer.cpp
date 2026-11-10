@@ -3128,7 +3128,10 @@ Optimizer::ExtractedBound Optimizer::extract_bound(const THD *thd, const Item *i
 
 Imcs::PredicateValue Optimizer::extract_value_from_item(const THD *thd, const Item *item, enum_field_types target_type,
                                                         const Field *target_field) {
-  if (!item || target_type == MYSQL_TYPE_NULL || !item->const_item()) return Imcs::PredicateValue::null_value();
+  // Test SQL NULL before Field conversion: val_str(NULL) writes nothing and
+  // otherwise leaves the previous row's bytes looking like a valid bound.
+  if (!item || target_type == MYSQL_TYPE_NULL || !item->const_item() || const_cast<Item *>(item)->is_null())
+    return Imcs::PredicateValue::null_value();
 
   if (target_type != MYSQL_TYPE_NULL && target_field) {
     Field *mutable_target_field = const_cast<Field *>(target_field);

@@ -100,6 +100,10 @@ class CU : public MemoryObject {
   struct CUFieldDesc {
     Field *src_field{nullptr};  // mysql field which this CU is based on.
     enum_field_types type{MYSQL_TYPE_NULL};
+    // Runtime schema traits, refreshed when the source Field is reconstructed.
+    // Field::type() can differ from real_type() for ENUM/SET.
+    enum_field_types storage_type{MYSQL_TYPE_NULL};
+    bool nullable{false};
     size_t pack_length{0};
     size_t normalized_length{0};
     const CHARSET_INFO *charset{nullptr};
@@ -108,7 +112,7 @@ class CU : public MemoryObject {
     Compress::COMPRESS_LEVEL compression_level{Compress::COMPRESS_LEVEL::DEFAULT};
     std::shared_ptr<Compress::Dictionary> dictionary{nullptr};
 
-    inline enum_field_types real_type() const { return src_field->real_type(); }
+    inline enum_field_types real_type() const { return storage_type; }
   };
 
   struct SHANNON_ALIGNAS CU_header {
@@ -302,6 +306,10 @@ class CU : public MemoryObject {
 
   inline void reconstruct_field_metadata(Field *f, const CHARSET_INFO *cs) {
     m_header.field_desc.src_field = f;
+    if (f != nullptr) {
+      m_header.field_desc.storage_type = f->real_type();
+      m_header.field_desc.nullable = f->is_nullable();
+    }
     m_header.field_desc.charset = cs;
   }
 

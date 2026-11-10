@@ -1,0 +1,24 @@
+SET use_secondary_engine=OFF;
+CREATE TABLE distinct_spill(id INT PRIMARY KEY,k INT,g INT) SECONDARY_ENGINE=rapid;
+INSERT INTO distinct_spill WITH RECURSIVE seq(i) AS
+(SELECT 0 UNION ALL SELECT i+1 FROM seq WHERE i<999)
+SELECT a.i*100+b.i,IF(MOD(a.i+b.i,17)=0,NULL,MOD(a.i+b.i,37)),MOD(a.i,3)
+FROM seq a JOIN seq b ON b.i<100;
+ALTER TABLE distinct_spill SECONDARY_LOAD;
+SET optimizer_switch='hypergraph_optimizer=on';
+SET use_secondary_engine=FORCED;
+SET debug='+d,rapid_sort_tiny_budget';
+# Duplicates cross input batches and multiple bounded spill/merge runs.
+SELECT COUNT(*) FROM distinct_spill c LEFT JOIN (SELECT DISTINCT k FROM distinct_spill) d ON c.id=d.k WHERE d.k IS NULL;
+COUNT(*)
+99963
+# Count materialized rows: duplicate build keys cannot hide behind an anti join.
+SET debug='+d,rapid_sort_compare_distinct';
+SET debug='-d,rapid_sort_compare_distinct,rapid_sort_tiny_budget';
+# Failed spill releases its files and reservations; a later DISTINCT succeeds.
+SET debug='+d,rapid_sort_tiny_budget,rapid_sort_spill_write_error';
+SELECT COUNT(*) FROM distinct_spill c LEFT JOIN (SELECT DISTINCT k FROM distinct_spill) d ON c.id=d.k WHERE d.k IS NULL;
+ERROR HY000: Injected Rapid sort spill write failure
+SET debug='-d,rapid_sort_tiny_budget,rapid_sort_spill_write_error';
+SET use_secondary_engine=OFF;
+DROP TABLE distinct_spill;

@@ -1,0 +1,31 @@
+Warnings:
+Warning	1287	The hypergraph optimizer is highly experimental and is meant for testing only. Do not enable it unless you are a MySQL developer.
+# Q13-style NOT LIKE reaches the null-supplying scan after simplification.
+EXPLAIN FORMAT=TREE SELECT c.id,o.id FROM outer_push_customer c
+LEFT JOIN outer_push_orders o ON c.id=o.customer_id
+WHERE NOT (o.comment LIKE '%special%requests%');
+EXPLAIN
+-> Nested loop inner join  (rows=5.33)
+    -> Vectorized table scan on o in secondary engine Rapid [filter: o.comment NOT LIKE %special%requests%]  (rows=3)
+    -> Single-row index lookup on c using PRIMARY (id=o.customer_id) in secondary engine Rapid  (rows=1)
+
+Warnings:
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+# NULL comments, unmatched customers and customers with only rejected matches.
+EXPLAIN FORMAT=TREE SELECT c.id,o.id FROM outer_push_customer c
+LEFT JOIN outer_push_orders o ON c.id=o.customer_id WHERE o.comment IS NULL;
+EXPLAIN
+-> Filter: (o.`comment` is null)
+    -> Vectorized left hash join (c.id = o.customer_id)  (rows=6)
+        -> Vectorized table scan on c in secondary engine Rapid  (rows=6)
+        -> Hash
+            -> Vectorized table scan on o in secondary engine Rapid  (rows=6)
+
+Warnings:
+Note	1003	Query is executed in secondary engine; the actual query plan may diverge from the printed one
+# An anti join must keep the existence test and its inner condition intact.
+# A null-rejecting amount predicate prunes a whole IMCU on the orders side.
+SELECT COUNT(*) FROM outer_push_customer c LEFT JOIN outer_push_orders o
+ON c.id=o.customer_id WHERE o.amount>100000 AND o.comment NOT LIKE '%special%requests%';
+COUNT(*)
+6

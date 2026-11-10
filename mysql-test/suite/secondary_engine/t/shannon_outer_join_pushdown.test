@@ -1,0 +1,66 @@
+--source include/no_ps_protocol.inc
+--source include/elide_costs.inc
+--disable_query_log
+SET use_secondary_engine=OFF;
+CREATE TABLE outer_push_customer(id INT PRIMARY KEY) SECONDARY_ENGINE=rapid;
+CREATE TABLE outer_push_orders(id INT PRIMARY KEY, customer_id INT, comment VARCHAR(80), amount INT)
+ SECONDARY_ENGINE=rapid;
+INSERT INTO outer_push_customer VALUES (1),(2),(3),(4),(5),(6);
+INSERT INTO outer_push_orders VALUES
+ (1,1,'ordinary order',1),(2,1,'special requests',2),
+ (3,2,'special urgent requests',3),(4,3,NULL,4),
+ (5,5,'a special order',5),(6,5,'requests only',6);
+ALTER TABLE outer_push_customer SECONDARY_LOAD;
+ALTER TABLE outer_push_orders SECONDARY_LOAD;
+SET use_secondary_engine=FORCED;
+SET optimizer_switch='hypergraph_optimizer=on';
+--enable_query_log
+--echo # Q13-style NOT LIKE reaches the null-supplying scan after simplification.
+--replace_regex $elide_costs
+EXPLAIN FORMAT=TREE SELECT c.id,o.id FROM outer_push_customer c
+ LEFT JOIN outer_push_orders o ON c.id=o.customer_id
+ WHERE NOT (o.comment LIKE '%special%requests%');
+--let $assert_digest = SELECT CONCAT(COUNT(*),':',IFNULL(GROUP_CONCAT(CONCAT(c.id,'/',o.id) ORDER BY c.id,o.id),'-')) FROM outer_push_customer c LEFT JOIN outer_push_orders o ON c.id=o.customer_id WHERE NOT (o.comment LIKE '%special%requests%')
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--echo # NULL comments, unmatched customers and customers with only rejected matches.
+--let $assert_digest = SELECT CONCAT(COUNT(*),':',IFNULL(GROUP_CONCAT(CONCAT(c.id,'/',IFNULL(o.id,'NULL')) ORDER BY c.id,o.id),'-')) FROM outer_push_customer c LEFT JOIN outer_push_orders o ON c.id=o.customer_id WHERE o.comment IS NULL
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--replace_regex $elide_costs
+EXPLAIN FORMAT=TREE SELECT c.id,o.id FROM outer_push_customer c
+ LEFT JOIN outer_push_orders o ON c.id=o.customer_id WHERE o.comment IS NULL;
+--let $assert_digest = SELECT CONCAT(COUNT(*),':',IFNULL(GROUP_CONCAT(CONCAT(c.id,'/',IFNULL(o.id,'NULL')) ORDER BY c.id,o.id),'-')) FROM outer_push_customer c LEFT JOIN outer_push_orders o ON c.id=o.customer_id WHERE COALESCE(o.comment,'ordinary') NOT LIKE '%special%requests%'
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_digest = SELECT CONCAT(COUNT(*),':',IFNULL(GROUP_CONCAT(CONCAT(c.id,'/',IFNULL(o.id,'NULL')) ORDER BY c.id,o.id),'-')) FROM outer_push_customer c LEFT JOIN outer_push_orders o ON c.id=o.customer_id WHERE o.comment NOT LIKE '%special%requests%' OR o.comment IS NULL
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_digest = SELECT CONCAT(COUNT(*),':',IFNULL(GROUP_CONCAT(CONCAT(c.id,'/',IFNULL(o.id,'NULL')) ORDER BY c.id,o.id),'-')) FROM outer_push_customer c LEFT JOIN outer_push_orders o ON c.id=o.customer_id WHERE NOT (o.comment LIKE '%special%requests%' AND c.id=2)
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--echo # An anti join must keep the existence test and its inner condition intact.
+--let $assert_digest = SELECT CONCAT(COUNT(*),':',IFNULL(GROUP_CONCAT(c.id ORDER BY c.id),'-')) FROM outer_push_customer c WHERE NOT EXISTS (SELECT 1 FROM outer_push_orders o WHERE c.id=o.customer_id AND o.comment NOT LIKE '%special%requests%')
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_digest = SELECT CONCAT(COUNT(*),':',IFNULL(GROUP_CONCAT(c.id ORDER BY c.id),'-')) FROM outer_push_customer c LEFT JOIN outer_push_orders o ON c.id=o.customer_id AND o.comment NOT LIKE '%special%requests%' WHERE o.id IS NULL
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--echo # A null-rejecting amount predicate prunes a whole IMCU on the orders side.
+--disable_query_log
+SET use_secondary_engine=OFF;
+ALTER TABLE outer_push_orders SECONDARY_UNLOAD;
+INSERT INTO outer_push_orders WITH RECURSIVE n AS
+ (SELECT 1 i UNION ALL SELECT i+1 FROM n WHERE i<1000)
+ SELECT 6+(a.i-1)*100+b.i,5,'ordinary order',6+(a.i-1)*100+b.i
+ FROM n a JOIN n b ON b.i<=100 ORDER BY 1;
+ALTER TABLE outer_push_orders SECONDARY_LOAD;
+SET use_secondary_engine=FORCED;
+SET optimizer_switch='hypergraph_optimizer=on';
+--enable_query_log
+--let $rapid_stats_action = begin
+--source suite/secondary_engine/include/rapid_stats_check.inc
+SELECT COUNT(*) FROM outer_push_customer c LEFT JOIN outer_push_orders o
+ ON c.id=o.customer_id WHERE o.amount>100000 AND o.comment NOT LIKE '%special%requests%';
+--let $rapid_stats_action = end
+--let $rapid_stats_field = si_skipped_imcus
+--source suite/secondary_engine/include/rapid_stats_check.inc
+--let $assert_digest = SELECT COUNT(*) FROM outer_push_customer c LEFT JOIN outer_push_orders o ON c.id=o.customer_id WHERE o.amount>100000 AND o.comment NOT LIKE '%special%requests%'
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--disable_query_log
+SET use_secondary_engine=OFF;
+DROP TABLE outer_push_orders,outer_push_customer;
+--enable_query_log

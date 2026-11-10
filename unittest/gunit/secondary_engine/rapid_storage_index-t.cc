@@ -29,6 +29,7 @@
 
 #include "storage/rapid_engine/imcs/storage0index.h"
 
+#include <array>
 #include <cstring>
 #include <limits>
 #include <memory>
@@ -40,6 +41,7 @@
 
 #include "storage/rapid_engine/compress/dictionary/dictionary.h"
 #include "storage/rapid_engine/imcs/predicate.h"
+#include "storage/rapid_engine/utils/utils.h"
 #include "unittest/gunit/fake_table.h"
 #include "unittest/gunit/temptable/mock_field_varstring.h"
 #include "unittest/gunit/test_utils.h"
@@ -165,7 +167,7 @@ TEST(StorageIndexPruningTest, BetweenAndNotBetween) {
   // shape and retarget the operator, which is what the planner's builder does.
   const auto not_between = [&between](int64 lo, int64 hi) {
     auto preds = between(lo, hi);
-    preds[0]->op = PredicateOperator::NOT_BETWEEN;
+    preds[0]->m_oper = PredicateOperator::NOT_BETWEEN;
     return preds;
   };
 
@@ -528,3 +530,192 @@ TEST(DictionaryOrder, HighCardinalityUsesScalarFallback) {
   EXPECT_EQ(TruthValue::TRUE_VALUE, pred.evaluate(reinterpret_cast<const uchar *>("alpha"), 5));
 }
 }  // namespace shannon_dictionary_order_unittest
+
+namespace shannon_date_predicate_unittest {
+using namespace ShannonBase::Imcs;
+
+void CheckBatch(Simple_Predicate &predicate, const std::vector<const uchar *> &cells, size_t count) {
+  ShannonBase::bit_array_t result(count + 5);
+  std::memset(result.data, 0xff, result.size);
+  predicate.evaluate(cells, count, result);
+  for (size_t row = 0; row < count; ++row) {
+    const uchar *cell = cells[row];
+    EXPECT_EQ(predicate.evaluate(cell) == TruthValue::TRUE_VALUE, ShannonBase::Utils::Util::bit_array_get(&result, row))
+        << "row=" << row << " predicate=" << predicate.to_string();
+  }
+  // The legacy constant-NULL guard clears the entire mask. Other cases,
+  // including storage kernels, must preserve the following bits.
+  if (!predicate.value.is_null()) {
+    for (size_t row = count; row < result.rows; ++row) {
+      EXPECT_TRUE(ShannonBase::Utils::Util::bit_array_get(&result, row));
+    }
+  }
+}
+
+TEST(DatePredicateBatch, ComparisonsNullsZeroDatesAndPartialBytesMatchScalar) {
+  Field_newdate field(true, "d");
+  field.set_field_index(0);
+  const int64 dates[] = {0,        10100,    10101,    19950000, 19950100, 19950901,
+                         19950930, 19951001, 20000229, 20010231, 99991231};
+  const PredicateOperator ops[] = {PredicateOperator::EQUAL,        PredicateOperator::NOT_EQUAL,
+                                   PredicateOperator::LESS_THAN,    PredicateOperator::LESS_EQUAL,
+                                   PredicateOperator::GREATER_THAN, PredicateOperator::GREATER_EQUAL,
+                                   PredicateOperator::BETWEEN,      PredicateOperator::NOT_BETWEEN,
+                                   PredicateOperator::IS_NULL,      PredicateOperator::IS_NOT_NULL};
+  for (size_t count : {size_t{0}, size_t{1}, size_t{7}, size_t{8}, size_t{9}, size_t{127}, size_t{128}, size_t{129}}) {
+    for (unsigned null_every : {0u, 2u, 1u}) {
+      std::vector<std::array<uchar, 3>> slots(count);
+      std::vector<const uchar *> cells(count);
+      for (size_t row = 0; row < count; ++row) {
+        const auto date = dates[row % std::size(dates)];
+        const uint32 packed = static_cast<uint32>(((date / 10000) << 9) | (((date / 100) % 100) << 5) | (date % 100));
+        int3store(slots[row].data(), packed);
+        cells[row] = null_every != 0 && row % null_every == 0 ? nullptr : slots[row].data();
+      }
+      for (auto op : ops) {
+        for (int64 bound : {int64{0}, int64{10101}, int64{19950901}, int64{99991231}}) {
+          SCOPED_TRACE(::testing::Message() << "count=" << count << " null_every=" << null_every);
+          Simple_Predicate predicate(0, op, PredicateValue(bound), MYSQL_TYPE_DATE);
+          predicate.field_meta = &field;
+          predicate.value2 = PredicateValue(int64{19951001});
+          CheckBatch(predicate, cells, count);
+        }
+      }
+    }
+  }
+}
+
+TEST(DatePredicateBatch, UnpackableAndNullBoundsKeepScalarComparisonSemantics) {
+  Field_newdate field(true, "d");
+  field.set_field_index(0);
+  std::array<uchar, 3> slot{};
+  int3store(slot.data(), (1995u << 9) | (9u << 5) | 1u);
+  const std::vector<const uchar *> cells{slot.data(), nullptr, slot.data()};
+  std::vector<PredicateValue> bounds{PredicateValue(int64{-1}),       PredicateValue(int64{19950899}),
+                                     PredicateValue(int64{19951301}), PredicateValue(int64{99999999}),
+                                     PredicateValue(19950901.5),      PredicateValue(std::string("19950901")),
+                                     PredicateValue::null_value()};
+  PredicateValue unsigned_bound(int64{-1});
+  unsigned_bound.unsigned_int64 = true;
+  bounds.push_back(unsigned_bound);
+  for (const auto &bound : bounds) {
+    for (auto op : {PredicateOperator::EQUAL, PredicateOperator::NOT_EQUAL, PredicateOperator::LESS_THAN,
+                    PredicateOperator::BETWEEN, PredicateOperator::NOT_BETWEEN}) {
+      Simple_Predicate predicate(0, op, bound, MYSQL_TYPE_DATE);
+      predicate.field_meta = &field;
+      predicate.value2 = PredicateValue::null_value();
+      CheckBatch(predicate, cells, cells.size());
+    }
+  }
+  Simple_Predicate in(0, std::vector<PredicateValue>{PredicateValue(int64{19950901}), PredicateValue::null_value()},
+                      false, MYSQL_TYPE_DATE);
+  in.field_meta = &field;
+  CheckBatch(in, cells, cells.size());
+  Simple_Predicate not_in(0, in.value_list, true, MYSQL_TYPE_DATE);
+  not_in.field_meta = &field;
+  CheckBatch(not_in, cells, cells.size());
+}
+
+TEST(FixedWidthPredicateBatch, NarrowIntegersSelectWidthSignednessAndByteOrderOnce) {
+  for (bool is_unsigned : {false, true}) {
+    Field_tiny tiny(3, true, "t", is_unsigned);
+    Field_short small(5, true, "s", is_unsigned);
+    Field_medium medium(8, true, "m", is_unsigned);
+    for (Field *field : {static_cast<Field *>(&tiny), static_cast<Field *>(&small), static_cast<Field *>(&medium)}) {
+      field->set_field_index(0);
+      for (bool low_order : {false, true}) {
+        std::vector<std::array<uchar, 3>> slots(129);
+        std::vector<const uchar *> cells(slots.size());
+        const uint32 values[] = {0, 1, 127, 128, 255, 32767, 32768, 65535, 8388607, 8388608, 16777215};
+        for (size_t row = 0; row < slots.size(); ++row) {
+          const auto value = values[row % std::size(values)];
+          if (field->pack_length() == 1)
+            slots[row][0] = static_cast<uchar>(value);
+          else if (field->pack_length() == 2) {
+            if (low_order)
+              int2store(slots[row].data(), value);
+            else {
+              const uint16 native = static_cast<uint16>(value);
+              std::memcpy(slots[row].data(), &native, sizeof(native));
+            }
+          } else
+            int3store(slots[row].data(), value);
+          cells[row] = row % 7 == 0 ? nullptr : slots[row].data();
+        }
+        for (auto op : {PredicateOperator::EQUAL, PredicateOperator::NOT_EQUAL, PredicateOperator::LESS_THAN,
+                        PredicateOperator::GREATER_EQUAL, PredicateOperator::BETWEEN, PredicateOperator::NOT_BETWEEN,
+                        PredicateOperator::IS_NULL, PredicateOperator::IS_NOT_NULL}) {
+          for (int64 bound : {std::numeric_limits<int64>::min(), int64{-1}, int64{0}, int64{128}, int64{32768},
+                              int64{8388608}, std::numeric_limits<int64>::max()}) {
+            SCOPED_TRACE(::testing::Message()
+                         << "type=" << field->type() << " unsigned=" << is_unsigned << " low_order=" << low_order);
+            Simple_Predicate predicate(0, op, PredicateValue(bound), field->type());
+            predicate.field_meta = field;
+            predicate.low_order = low_order;
+            predicate.value2 = PredicateValue(int64{127});
+            CheckBatch(predicate, cells, cells.size());
+          }
+        }
+      }
+    }
+  }
+}
+
+TEST(FixedWidthPredicateBatch, YearZeroAndGapsMatchScalar) {
+  Field_year field(true, "y");
+  field.set_field_index(0);
+  std::array<uchar, 256> slots{};
+  std::vector<const uchar *> cells;
+  for (size_t row = 0; row < slots.size(); ++row) {
+    slots[row] = static_cast<uchar>(row);
+    cells.push_back(slots.data() + row);
+  }
+  cells.push_back(nullptr);
+  for (int64 bound : {int64{0}, int64{1}, int64{1900}, int64{1901}, int64{2000}, int64{2155}, int64{2156}}) {
+    for (auto op : {PredicateOperator::EQUAL, PredicateOperator::NOT_EQUAL, PredicateOperator::LESS_THAN,
+                    PredicateOperator::GREATER_EQUAL, PredicateOperator::BETWEEN, PredicateOperator::NOT_BETWEEN}) {
+      Simple_Predicate predicate(0, op, PredicateValue(bound), MYSQL_TYPE_YEAR);
+      predicate.field_meta = &field;
+      predicate.value2 = PredicateValue(int64{2000});
+      CheckBatch(predicate, cells, cells.size());
+    }
+  }
+}
+
+TEST(FixedWidthPredicateBatch, DatetimeBinaryOrderAndFractionalFallbackMatchScalar) {
+  const int64 values[] = {
+      0, 10101000000, 19950900000000, 19950901000000, 19950930235959, 20000229123045, 20010231123045, 99991231235959};
+  for (unsigned precision : {0u, 6u}) {
+    Field_datetimef field(true, "dt", precision);
+    field.set_field_index(0);
+    std::vector<std::array<uchar, 8>> slots(std::size(values));
+    std::vector<const uchar *> cells;
+    for (size_t row = 0; row < slots.size(); ++row) {
+      const auto number = values[row];
+      MYSQL_TIME time{};
+      time.year = static_cast<uint>(number / 10000000000LL);
+      time.month = static_cast<uint>((number / 100000000) % 100);
+      time.day = static_cast<uint>((number / 1000000) % 100);
+      time.hour = static_cast<uint>((number / 10000) % 100);
+      time.minute = static_cast<uint>((number / 100) % 100);
+      time.second = static_cast<uint>(number % 100);
+      time.second_part = precision == 0 ? 0 : 123456;
+      time.time_type = MYSQL_TIMESTAMP_DATETIME;
+      my_datetime_packed_to_binary(TIME_to_longlong_datetime_packed(time), slots[row].data(), precision);
+      cells.push_back(slots[row].data());
+    }
+    cells.push_back(nullptr);
+    for (int64 bound :
+         {int64{0}, int64{19950901000000}, int64{19950930235959}, int64{19950930235999}, int64{99991231235959}}) {
+      for (auto op : {PredicateOperator::EQUAL, PredicateOperator::NOT_EQUAL, PredicateOperator::LESS_THAN,
+                      PredicateOperator::LESS_EQUAL, PredicateOperator::GREATER_THAN, PredicateOperator::GREATER_EQUAL,
+                      PredicateOperator::BETWEEN, PredicateOperator::NOT_BETWEEN}) {
+        Simple_Predicate predicate(0, op, PredicateValue(bound), MYSQL_TYPE_DATETIME);
+        predicate.field_meta = &field;
+        predicate.value2 = PredicateValue(int64{19951001000000});
+        CheckBatch(predicate, cells, cells.size());
+      }
+    }
+  }
+}
+}  // namespace shannon_date_predicate_unittest

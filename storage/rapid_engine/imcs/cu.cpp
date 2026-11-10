@@ -196,6 +196,8 @@ CU::CU(Imcu *owner, const FieldMetadata &field_meta, uint32 col_idx, size_t capa
   m_header.column_id = col_idx;
   m_header.field_desc = {.src_field = field_meta.source_fld,
                          .type = field_meta.type,
+                         .storage_type = field_meta.source_fld ? field_meta.source_fld->real_type() : field_meta.type,
+                         .nullable = field_meta.nullable,
                          .pack_length = field_meta.pack_length,
                          .normalized_length = field_meta.normalized_length,
                          .charset = field_meta.charset,
@@ -480,6 +482,10 @@ size_t CU::get_data_size() const {
 }
 
 VarlenDataPool::VarlenReadGuard CU::resolve_data(row_id_t local_row_id) const {
+  // Inline slots (including dictionary IDs) need no logical length lookup.
+  // In particular, do not lock the dictionary just to discard its length.
+  // Pool-backed values still require the guard returned by the full resolver.
+  if (!m_varlen_pool) return VarlenDataPool::VarlenReadGuard(get_data_address(local_row_id));
   size_t ignored{0};
   return resolve_data(local_row_id, ignored);
 }
@@ -677,7 +683,17 @@ bool CU::decode_packed_range(size_t row_begin, size_t count, uchar *dst, size_t 
 }
 
 bool CU::reduce_packed_row(row_id_t local_row_id, PackedReduction &acc) const {
-  if (!m_packed.valid() || local_row_id >= m_packed_rows) return false;
+  if (!m_packed.valid()) return false;
+  // NULL has no code. In particular, a trailing NULL append need not extend
+  // m_packed_rows: its bitmap alone is authoritative for the reduction.
+  if (m_header.field_desc.nullable && m_header.owner_imcu) {
+    if (local_row_id >= m_packed.rows()) return false;
+    const auto &masks = m_header.owner_imcu->get_null_masks();
+    if (m_header.column_id < masks.size() && masks[m_header.column_id] &&
+        Utils::Util::bit_array_get(masks[m_header.column_id].get(), local_row_id))
+      return true;
+  }
+  if (local_row_id >= m_packed_rows) return false;
   int64_t value = 0;
   if (!m_packed.GetValue(local_row_id, &value)) return false;
   acc.add_value(value);

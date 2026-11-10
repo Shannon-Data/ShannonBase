@@ -28,9 +28,14 @@
 #ifndef __SHANNONBASE_SORT_ITERATOR_H__
 #define __SHANNONBASE_SORT_ITERATOR_H__
 
+#include <algorithm>
 #include <array>
+#include <cassert>
+#include <climits>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <memory>
 #include <string>
 #include <vector>
@@ -47,6 +52,104 @@ class THD;
 
 namespace ShannonBase {
 namespace Executor {
+// Only used for DISTINCT: equal keys may choose any input representative.
+// Four-bit MSD partitions need 32 size_t counters per digit, independent of
+// row count. Callers charge this scratch to the operator's memory reservation.
+inline constexpr size_t kRadixMaxKeyBytes = 16;
+inline constexpr size_t kRadixShortKeyMaxBytes = sizeof(uint64_t) + sizeof(unsigned char);
+inline constexpr size_t kRadixMinRows = 512;
+inline constexpr size_t kRadixWideKeyMinRows = 4096;
+inline constexpr size_t kRadixDigitBits = 4;
+inline constexpr size_t kRadixDigitsPerByte = CHAR_BIT / kRadixDigitBits;
+inline constexpr size_t kRadixBucketCount = size_t{1} << kRadixDigitBits;
+
+// Each digit retains cumulative bucket ends and the next write positions.
+inline constexpr size_t kRadixCountersPerDigit = kRadixBucketCount + kRadixBucketCount;
+inline constexpr size_t kRadixSmallPartitionRows = 64;
+static_assert(CHAR_BIT % kRadixDigitBits == 0);
+
+inline bool UseRadixForDistinct(size_t rows, size_t width) {
+  // NULL-marked BIGINT keys fit in nine bytes. Longer composite/DECIMAL keys
+  // need larger runs to amortize prefix passes, especially on skewed input.
+  return width > 0 && width <= kRadixMaxKeyBytes &&
+         rows >= (width <= kRadixShortKeyMaxBytes ? kRadixMinRows : kRadixWideKeyMinRows);
+}
+
+inline size_t FixedKeySortScratchSize(size_t width) { return width * kRadixDigitsPerByte * kRadixCountersPerDigit; }
+
+inline void RadixDistinctKeys(uint32_t *order, size_t rows, const unsigned char *keys, size_t width, size_t digit,
+                              size_t *scratch) {
+  while (rows > kRadixSmallPartitionRows && digit < width * kRadixDigitsPerByte) {
+    size_t *end = scratch + digit * kRadixCountersPerDigit;
+    size_t *next = end + kRadixBucketCount;
+    std::fill(end, end + kRadixBucketCount, 0);
+
+    const auto bucket = [=](uint32_t row) {
+      const size_t shift = (kRadixDigitsPerByte - 1 - digit % kRadixDigitsPerByte) * kRadixDigitBits;
+      return (keys[size_t{row} * width + digit / kRadixDigitsPerByte] >> shift) & (kRadixBucketCount - 1);
+    };
+
+    for (size_t i = 0; i < rows; ++i) ++end[bucket(order[i])];
+
+    size_t sum{0}, occupied{0};
+    for (size_t b = 0; b < kRadixBucketCount; ++b) {
+      next[b] = sum;
+      occupied += end[b] != 0;
+      sum += end[b];
+      end[b] = sum;
+    }
+    // Skip common prefixes without another recursion level or any swaps.
+    if (occupied == 1) {
+      ++digit;
+      continue;
+    }
+
+    for (size_t b = 0; b < kRadixBucketCount; ++b) {
+      while (next[b] < end[b]) {
+        const size_t target = bucket(order[next[b]]);
+        if (target == b)
+          ++next[b];
+        else
+          std::swap(order[next[b]], order[next[target]++]);
+      }
+    }
+
+    size_t start{0};
+    for (size_t b = 0; b < kRadixBucketCount; ++b) {
+      RadixDistinctKeys(order + start, end[b] - start, keys, width, digit + 1, scratch);
+      start = end[b];
+    }
+    return;
+  }
+
+  if (digit < width * kRadixDigitsPerByte) {
+    std::sort(order, order + rows, [=](uint32_t a, uint32_t b) {
+      return memcmp(keys + size_t{a} * width, keys + size_t{b} * width, width) < 0;
+    });
+  }
+}
+
+inline void SortFixedDistinctKeys(uint32_t *order, size_t rows, const unsigned char *keys, size_t width,
+                                  size_t *scratch) {
+  assert(width > 0 && width <= kRadixMaxKeyBytes);
+  // Avoid radix passes for ordered, reverse-ordered, or constant input. This
+  // also protects workloads where comparison sort already does little work.
+  bool ascending = true, descending = true;
+  for (size_t i = 1; i < rows && (ascending || descending); ++i) {
+    const int c = memcmp(keys + size_t{order[i - 1]} * width, keys + size_t{order[i]} * width, width);
+    ascending &= c <= 0;
+    descending &= c >= 0;
+  }
+
+  if (ascending) return;
+
+  if (descending) {
+    std::reverse(order, order + rows);
+    return;
+  }
+  RadixDistinctKeys(order, rows, keys, width, 0, scratch);
+}
+
 /**
  * ORDER BY for Rapid plans, replacing MySQL's SortingIterator.
  *
@@ -162,6 +265,10 @@ class VectorizedSortIterator final : public RowIterator, public BatchReadable {
   size_t m_key_width{0};
   ha_rows m_limit{HA_POS_ERROR};
   ha_rows m_emitted{0};
+  // Exact equality key retained across batches and spill-run boundaries.
+  std::pmr::vector<uchar> m_distinct_key{&m_aux_memory};
+  bool m_have_distinct_key{false};
+  size_t m_radix_runs{0}, m_comparison_runs{0};
 
   // Buffered rows: m_keys holds m_key_width bytes per row, m_payload the
   // packed rows back to back, m_payload_offsets[i]..[i+1] the i-th row.

@@ -1,0 +1,21 @@
+SET use_secondary_engine=OFF;
+CREATE TABLE bp_gather(id INT PRIMARY KEY,v INT COMMENT 'RAPID_COLUMN=ENCODING=BITPACK') SECONDARY_ENGINE=rapid;
+INSERT INTO bp_gather VALUES(1,101),(2,102),(3,103);
+ALTER TABLE bp_gather SECONDARY_LOAD;
+SET use_secondary_engine=FORCED;
+SET optimizer_switch='hypergraph_optimizer=on';
+SET DEBUG_SYNC='rapid_before_gather_chunk SIGNAL bp_ready WAIT_FOR bp_continue EXECUTE 1';
+SET @bp_snapshot=NULL;
+SELECT v INTO @bp_snapshot FROM bp_gather FORCE INDEX(PRIMARY) WHERE id=2;
+SET DEBUG_SYNC='now WAIT_FOR bp_ready TIMEOUT 15';
+UPDATE bp_gather SET v=902 WHERE id=2;
+SET use_secondary_engine=FORCED;
+SET DEBUG_SYNC='now SIGNAL bp_continue';
+SET use_secondary_engine=OFF;
+SELECT @bp_snapshot AS snapshot_v;
+snapshot_v
+102
+SET DEBUG_SYNC='RESET';
+SET DEBUG_SYNC='RESET';
+SET use_secondary_engine=OFF;
+DROP TABLE bp_gather;

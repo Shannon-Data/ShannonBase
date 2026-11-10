@@ -1,0 +1,123 @@
+# Packed DATE batch comparisons must agree with MySQL, including partial dates.
+--source include/no_ps_protocol.inc
+--disable_warnings
+--disable_query_log
+--disable_result_log
+SET @date_batch_sql_mode=@@sql_mode;
+SET sql_mode='ALLOW_INVALID_DATES';
+SET use_secondary_engine=OFF;
+CREATE TABLE date_batch(
+ id INT PRIMARY KEY,d DATE,d_nn DATE NOT NULL,dt DATETIME(6),dt0 DATETIME,
+ t TINYINT,ut TINYINT UNSIGNED,s SMALLINT,us SMALLINT UNSIGNED,
+ m MEDIUMINT,um MEDIUMINT UNSIGNED,y YEAR,KEY kd(d)
+) SECONDARY_ENGINE=rapid;
+INSERT INTO date_batch WITH RECURSIVE n AS
+ (SELECT 1 i UNION ALL SELECT i+1 FROM n WHERE i<1000)
+ SELECT (a.i-1)*10+b.i,
+ IF(MOD(a.i+b.i,11)=0,NULL,
+ ELT(1+MOD(a.i+b.i,9),'0000-00-00','0001-01-01','1995-00-00','1995-09-00',
+ '1995-09-01','1995-09-30','2000-02-29','2001-02-31','9999-12-31')),
+ DATE_ADD('1995-01-01',INTERVAL MOD(a.i*10+b.i,1000) DAY),
+ '1995-09-01 12:00:00.123456',
+ IF(MOD(a.i+b.i,11)=0,NULL,ELT(1+MOD(a.i+b.i,5),'0000-00-00 00:00:00',
+ '1995-09-01 00:00:00','1995-09-30 23:59:59','2000-02-29 12:30:45','9999-12-31 23:59:59')),
+ IF(MOD(a.i+b.i,13)=0,NULL,ELT(1+MOD(a.i+b.i,5),-128,-1,0,1,127)),
+ IF(MOD(a.i+b.i,13)=0,NULL,ELT(1+MOD(a.i+b.i,5),0,1,127,128,255)),
+ IF(MOD(a.i+b.i,13)=0,NULL,ELT(1+MOD(a.i+b.i,5),-32768,-1,0,1,32767)),
+ IF(MOD(a.i+b.i,13)=0,NULL,ELT(1+MOD(a.i+b.i,5),0,1,32767,32768,65535)),
+ IF(MOD(a.i+b.i,13)=0,NULL,ELT(1+MOD(a.i+b.i,5),-8388608,-1,0,1,8388607)),
+ IF(MOD(a.i+b.i,13)=0,NULL,ELT(1+MOD(a.i+b.i,5),0,1,8388607,8388608,16777215)),
+ IF(MOD(a.i+b.i,13)=0,NULL,ELT(1+MOD(a.i+b.i,5),0,1901,1970,2000,2155))
+ FROM n a JOIN n b ON b.i<=10;
+ALTER TABLE date_batch SECONDARY_LOAD;
+SET use_secondary_engine=FORCED;
+--echo # Q14 range, date boundaries, NULLs, zero and incomplete dates.
+--let $assert_digest = SELECT COUNT(*),SUM(id) FROM date_batch IGNORE INDEX(kd) WHERE d>='1995-09-01' AND d<'1995-10-01'
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_digest = SELECT COUNT(*),SUM(id) FROM date_batch WHERE d BETWEEN '1995-09-00' AND '2000-02-29'
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_digest = SELECT COUNT(*),SUM(id) FROM date_batch WHERE d NOT BETWEEN '1995-09-00' AND '2000-02-29'
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_digest = SELECT COUNT(*),SUM(id) FROM date_batch WHERE d BETWEEN '2000-02-29' AND '1995-09-00'
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_digest = SELECT COUNT(*),SUM(id) FROM date_batch WHERE d NOT BETWEEN '2000-02-29' AND '1995-09-00'
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_digest = SELECT COUNT(*),SUM(id) FROM date_batch WHERE d='0000-00-00'
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_digest = SELECT COUNT(*),SUM(id) FROM date_batch WHERE d<>'0000-00-00'
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_digest = SELECT COUNT(*),SUM(id) FROM date_batch WHERE d>'1995-09-30'
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_digest = SELECT COUNT(*),SUM(id) FROM date_batch WHERE d<='9999-12-31'
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_digest = SELECT COUNT(*),SUM(id) FROM date_batch WHERE d IS NULL
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_digest = SELECT COUNT(*),SUM(id) FROM date_batch WHERE d IS NOT NULL
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_digest = SELECT COUNT(*),SUM(id) FROM date_batch WHERE d_nn>='1995-09-01' AND d_nn<'1995-10-01'
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--echo # Numeric gaps/fractions, NULL bounds and IN keep generic comparison semantics.
+--let $assert_digest = SELECT COUNT(*),SUM(id) FROM date_batch WHERE d>19950899
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_digest = SELECT COUNT(*),SUM(id) FROM date_batch WHERE d<19951301
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_digest = SELECT COUNT(*),SUM(id) FROM date_batch WHERE d>19950901.5
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_digest = SELECT COUNT(*),SUM(id) FROM date_batch WHERE d< -1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_digest = SELECT COUNT(*),SUM(id) FROM date_batch WHERE d BETWEEN NULL AND '2000-01-01'
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_digest = SELECT COUNT(*),SUM(id) FROM date_batch WHERE d IN ('1995-09-01','2000-02-29',NULL)
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_digest = SELECT COUNT(*),SUM(id) FROM date_batch WHERE d NOT IN ('1995-09-01',NULL)
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_digest = SELECT COUNT(*),SUM(id) FROM date_batch WHERE dt>'1995-09-01 12:00:00.100000'
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--echo # Narrow signed/unsigned integers, YEAR and DATETIME(0) use native batch comparisons.
+--let $assert_digest = SELECT COUNT(*),SUM(id) FROM date_batch WHERE t BETWEEN -128 AND -1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_digest = SELECT COUNT(*),SUM(id) FROM date_batch WHERE t>=127 OR t IS NULL
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_digest = SELECT COUNT(*),SUM(id) FROM date_batch WHERE ut>=128
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_digest = SELECT COUNT(*),SUM(id) FROM date_batch WHERE s BETWEEN -32768 AND 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_digest = SELECT COUNT(*),SUM(id) FROM date_batch WHERE us>=32768 AND us<=65535
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_digest = SELECT COUNT(*),SUM(id) FROM date_batch WHERE m BETWEEN -8388608 AND -1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_digest = SELECT COUNT(*),SUM(id) FROM date_batch WHERE um>=8388608
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_digest = SELECT COUNT(*),SUM(id) FROM date_batch WHERE um<0
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_digest = SELECT COUNT(*),SUM(id) FROM date_batch WHERE y BETWEEN 1901 AND 2000
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_digest = SELECT COUNT(*),SUM(id) FROM date_batch WHERE y=0 OR y IS NULL
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_digest = SELECT COUNT(*),SUM(id) FROM date_batch WHERE y<1900
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_digest = SELECT COUNT(*),SUM(id) FROM date_batch WHERE dt0>='1995-09-01 00:00:00' AND dt0<'1995-10-01 00:00:00'
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_digest = SELECT COUNT(*),SUM(id) FROM date_batch WHERE dt0='0000-00-00 00:00:00'
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_digest = SELECT COUNT(*),SUM(id) FROM date_batch WHERE dt0 NOT BETWEEN '1995-09-01 00:00:00' AND '1995-09-30 23:59:59'
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_digest = SELECT COUNT(*),SUM(id) FROM date_batch WHERE dt0<'9999-12-31 23:59:59'
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--disable_query_log
+--disable_result_log
+SET use_secondary_engine=OFF;
+UPDATE date_batch SET d=NULL WHERE MOD(id,17)=0;
+UPDATE date_batch SET d='1995-09-15' WHERE MOD(id,19)=0;
+SET use_secondary_engine=FORCED;
+--echo # Updated DATE cells still pass through snapshot/version selection.
+--let $assert_digest = SELECT COUNT(*),SUM(id) FROM date_batch IGNORE INDEX(kd) WHERE d>='1995-09-01' AND d<'1995-10-01'
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--disable_query_log
+--disable_result_log
+SET use_secondary_engine=OFF;
+DROP TABLE date_batch;
+SET sql_mode=@date_batch_sql_mode;
+--enable_query_log
+--enable_result_log
+--enable_warnings

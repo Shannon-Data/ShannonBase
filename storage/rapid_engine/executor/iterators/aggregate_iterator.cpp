@@ -3306,7 +3306,16 @@ void VectorizedAggregateIterator::RequestPackedReductions() {
   };
 
   for (const auto &info : m_vectorizer.aggregate_infos) {
-    if (info.source_field == nullptr || info.value_expr != nullptr) continue;
+    if (info.value_expr != nullptr) {
+      // A synthetic expression slot still consumes its base columns as values.
+      // SUM(v) must not remove the v chunk also needed by SUM(v + 1).
+      for (Field *field : info.expression_fields) {
+        const auto it = m_field_to_batch_chunk_idx.find(field);
+        if (it != m_field_to_batch_chunk_idx.end()) want_for(it->second).blocked = true;
+      }
+      continue;
+    }
+    if (info.source_field == nullptr) continue;
     if (info.batch_chunk_idx == static_cast<size_t>(-1) || info.batch_chunk_idx >= m_batch_col_chunks.size()) continue;
     // The producer can only skip a column it would otherwise have filled, i.e.
     // one the scan projection carries.

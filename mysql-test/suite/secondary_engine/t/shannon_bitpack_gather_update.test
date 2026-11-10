@@ -1,0 +1,35 @@
+--source include/have_debug_sync.inc
+--source include/no_ps_protocol.inc
+--disable_warnings
+SET use_secondary_engine=OFF;
+CREATE TABLE bp_gather(id INT PRIMARY KEY,v INT COMMENT 'RAPID_COLUMN=ENCODING=BITPACK') SECONDARY_ENGINE=rapid;
+INSERT INTO bp_gather VALUES(1,101),(2,102),(3,103);
+ALTER TABLE bp_gather SECONDARY_LOAD;
+connect(bp_reader,localhost,root,,test);
+SET use_secondary_engine=FORCED;
+SET optimizer_switch='hypergraph_optimizer=on';
+SET DEBUG_SYNC='rapid_before_gather_chunk SIGNAL bp_ready WAIT_FOR bp_continue EXECUTE 1';
+SET @bp_snapshot=NULL;
+--send SELECT v INTO @bp_snapshot FROM bp_gather FORCE INDEX(PRIMARY) WHERE id=2
+connection default;
+SET DEBUG_SYNC='now WAIT_FOR bp_ready TIMEOUT 15';
+UPDATE bp_gather SET v=902 WHERE id=2;
+SET use_secondary_engine=FORCED;
+--let $assert_query = SELECT v FROM bp_gather WHERE id=2
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+SET DEBUG_SYNC='now SIGNAL bp_continue';
+connection bp_reader;
+--reap
+SET use_secondary_engine=OFF;
+--let $same_snapshot = `SELECT @bp_snapshot <=> 102`
+if (!$same_snapshot) {
+ --die A concurrent unpack changed the gather reader's snapshot value
+}
+SELECT @bp_snapshot AS snapshot_v;
+SET DEBUG_SYNC='RESET';
+disconnect bp_reader;
+connection default;
+SET DEBUG_SYNC='RESET';
+SET use_secondary_engine=OFF;
+DROP TABLE bp_gather;
+--enable_warnings

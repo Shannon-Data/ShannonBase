@@ -1,0 +1,22 @@
+SET use_secondary_engine=OFF;
+CREATE TABLE bp_reduction(id INT PRIMARY KEY,v INT COMMENT 'RAPID_COLUMN=ENCODING=BITPACK') SECONDARY_ENGINE=rapid;
+INSERT INTO bp_reduction WITH RECURSIVE n AS (SELECT 1 i UNION ALL SELECT i+1 FROM n WHERE i<1000)
+SELECT (a.i-1)*10+b.i,IF(MOD(b.i,5)=0,NULL,100000+(a.i-1)*10+b.i)
+FROM n a JOIN n b ON b.i<=10;
+ALTER TABLE bp_reduction SECONDARY_LOAD;
+SET optimizer_switch='hypergraph_optimizer=on';
+SET use_secondary_engine=FORCED;
+# NULL codes must not contribute to COUNT(column), SUM or extrema.
+SELECT COUNT(*),COUNT(v),SUM(v),MIN(v),MAX(v) FROM bp_reduction;
+COUNT(*)	COUNT(v)	SUM(v)	MIN(v)	MAX(v)
+10000	8000	840000000	100001	109999
+# Trailing NULL inserts need no packed code or increase of the written frontier.
+INSERT INTO bp_reduction VALUES(10001,NULL),(10002,NULL);
+# An expression consumer requires its base column as values.
+SET use_secondary_engine=OFF;
+CREATE TABLE bp_expression(id INT PRIMARY KEY,v INT NOT NULL COMMENT 'RAPID_COLUMN=ENCODING=BITPACK') SECONDARY_ENGINE=rapid;
+INSERT INTO bp_expression SELECT id,100000+id FROM bp_reduction;
+ALTER TABLE bp_expression SECONDARY_LOAD;
+SET use_secondary_engine=FORCED;
+SET use_secondary_engine=OFF;
+DROP TABLE bp_expression,bp_reduction;

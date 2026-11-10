@@ -498,7 +498,7 @@ void Imcu::evaluate_compound_predicate_vectorized(Rapid_scan_context *context, c
     return;
   }
 
-  switch (pred->op) {
+  switch (pred->m_oper) {
     case PredicateOperator::AND: {
       result.set();
       bit_array_t child_result = result.clone_empty();
@@ -629,7 +629,7 @@ TruthValue Imcu::evaluate_predicate_truth_at_row(Rapid_scan_context *context, co
   }
 
   const auto *compound = static_cast<const Compound_Predicate *>(pred);
-  switch (compound->op) {
+  switch (compound->m_oper) {
     case PredicateOperator::AND: {
       TruthValue result = TruthValue::TRUE_VALUE;
       for (const auto &child : compound->children) {

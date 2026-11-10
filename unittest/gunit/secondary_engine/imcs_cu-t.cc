@@ -23,8 +23,11 @@
 #include <sstream>
 #include <vector>
 
+#include "typelib.h"
+
 #include "storage/rapid_engine/imcs/col0stats.h"
 #include "storage/rapid_engine/imcs/cu.h"
+#include "storage/rapid_engine/imcs/imcu.h"
 #include "storage/rapid_engine/imcs/predicate.h"
 #include "storage/rapid_engine/imcs/table0meta.h"
 #include "storage/rapid_engine/imcs/table0persistence.h"
@@ -585,6 +588,73 @@ TEST(BitPackedCuStorage, ReducePackedRowsAccumulatesCodes) {
   EXPECT_EQ(acc.sum, static_cast<__int128>(108));
   EXPECT_EQ(acc.min_value, -7);
   EXPECT_EQ(acc.max_value, 100);
+}
+
+TEST(BitPackedCuStorage, ReductionSchemaTraitsAcrossWidthsAndNullDensities) {
+  auto pool = native_pool();
+  const std::pair<enum_field_types, size_t> types[] = {
+      {MYSQL_TYPE_TINY, 1}, {MYSQL_TYPE_SHORT, 2}, {MYSQL_TYPE_INT24, 3},
+      {MYSQL_TYPE_LONG, 4}, {MYSQL_TYPE_LONGLONG, 8}};
+  const std::vector<int64_t> values{-7, 0, 5, 9, 100, -3, 2};
+  for (auto [type, width] : types) {
+    for (unsigned null_every : {0u, 1u, 2u, 7u}) {
+      SCOPED_TRACE(::testing::Message() << "type=" << type << " null_every=" << null_every);
+      Imcu owner;
+      owner.get_null_masks().push_back(std::make_unique<bit_array_t>(16));
+      auto field = native_bitpack_field(type, width);
+      field.nullable = null_every != 0;
+      PackedReduction expected;
+      for (size_t i = 0; i < values.size(); ++i) {
+        if (null_every != 0 && i % null_every == 0)
+          Utils::Util::bit_array_set(owner.get_null_masks()[0].get(), i);
+        else
+          expected.add_value(values[i]);
+      }
+      CU column(&owner, field, 0, 16, pool);
+      std::istringstream input(native_packed_record(type, width, values));
+      ASSERT_EQ(column.deserialize(nullptr, input, values.size()), SHANNON_SUCCESS);
+      if (!expected.any) {
+        // An all-NULL CU stays canonical; no packed reduction may be attempted.
+        EXPECT_EQ(column.pack(values.size()), 0);
+        continue;
+      }
+      ASSERT_NE(column.pack(values.size()), 0);
+      PackedReduction actual;
+      for (size_t i = 0; i < values.size(); ++i) ASSERT_TRUE(column.reduce_packed_row(i, actual));
+      EXPECT_EQ(actual.non_null, expected.non_null);
+      EXPECT_EQ(actual.sum, expected.sum);
+      EXPECT_EQ(actual.min_value, expected.min_value);
+      EXPECT_EQ(actual.max_value, expected.max_value);
+      // A nullable trailing append has a bitmap bit but no packed code.
+      if (field.nullable) {
+        Utils::Util::bit_array_set(owner.get_null_masks()[0].get(), values.size());
+        ASSERT_TRUE(column.reduce_packed_row(values.size(), actual));
+        EXPECT_EQ(actual.sum, expected.sum);
+        EXPECT_EQ(actual.non_null, expected.non_null);
+      } else {
+        EXPECT_FALSE(column.reduce_packed_row(values.size(), actual));
+      }
+    }
+  }
+}
+
+TEST(NativeCuPersistence, RebindingPreservesPhysicalEnumAndSetTypes) {
+  auto pool = native_pool();
+  TYPELIB values{};
+  Field_enum enum_field(8, true, "e", 1, &values, &my_charset_latin1);
+  Field_set set_field(8, false, "s", 1, &values, &my_charset_latin1);
+  auto meta = native_field();
+  meta.type = enum_field.type();  // Both Field types report MYSQL_TYPE_STRING.
+  meta.source_fld = &enum_field;
+  meta.nullable = true;
+  CU column(nullptr, meta, 0, 16, pool);
+  EXPECT_EQ(column.type(), MYSQL_TYPE_STRING);
+  EXPECT_EQ(column.real_type(), MYSQL_TYPE_ENUM);
+  // Recovery reconnects a live Field rather than serializing runtime traits.
+  column.reconstruct_field_metadata(&set_field, &my_charset_latin1);
+  EXPECT_EQ(column.real_type(), MYSQL_TYPE_SET);
+  column.reconstruct_field_metadata(&enum_field, &my_charset_latin1);
+  EXPECT_EQ(column.real_type(), MYSQL_TYPE_ENUM);
 }
 
 TEST(BitPackedPredicateRange, IntegerRangeCoversEachComparison) {

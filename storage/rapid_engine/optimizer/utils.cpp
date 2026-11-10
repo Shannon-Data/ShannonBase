@@ -305,11 +305,11 @@ bool is_storage_index_predicate_safe(const Imcs::Predicate *predicate) {
   const auto type = simple->column_type.load(std::memory_order_acquire);
   const Field *field = simple->field_meta.load(std::memory_order_acquire);
 
-  if (simple->op == Imcs::PredicateOperator::LIKE || simple->op == Imcs::PredicateOperator::NOT_LIKE)
+  if (simple->m_oper == Imcs::PredicateOperator::LIKE || simple->m_oper == Imcs::PredicateOperator::NOT_LIKE)
     return simple->has_mysql_like() && field != nullptr && ShannonBase::Utils::Util::is_string(type) &&
            !ShannonBase::Utils::Util::is_off_page(field);
 
-  if (!is_pushable_comparison(simple->op)) return false;
+  if (!is_pushable_comparison(simple->m_oper)) return false;
 
   switch (type) {
     case MYSQL_TYPE_TINY:
@@ -360,7 +360,7 @@ bool is_storage_index_predicate_safe(const Imcs::Predicate *predicate) {
       // strnncollsp), which is what makes CHAR padding and case-insensitive
       // collations come out right. Ordering comparisons stay out until the
       // string range filter is proven PAD SPACE correct.
-      return is_equality_comparison(simple->op);
+      return is_equality_comparison(simple->m_oper);
 
     default:
       // FLOAT/DOUBLE are comparable but excluded on purpose: a literal that is
