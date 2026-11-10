@@ -1218,39 +1218,6 @@ inline size_t count_non_null_neon(const uint8_t *null_mask, size_t row_count) {
 // Filter (SSE2 int32 equality specialization)
 // ============================================================================
 
-template <typename Allocator>
-inline size_t filter_sse2_int32_eq(const int32_t *data, const uint8_t *null_mask, size_t row_count, int32_t value,
-                                   std::vector<size_t, Allocator> &out) {
-#if defined(SHANNON_HAVE_SSE2)
-  size_t cnt = 0;
-  size_t i = 0;
-  __m128i target = _mm_set1_epi32(value);
-  for (; i + 4 <= row_count; i += 4) {
-    __m128i chunk = _mm_loadu_si128(reinterpret_cast<const __m128i *>(data + i));
-    __m128i cmp = _mm_cmpeq_epi32(chunk, target);
-    if (null_mask) {
-      const unsigned valid = lane_valid_bits(null_mask, i, 4);
-      if (valid != 0xFu) cmp = _mm_and_si128(cmp, Vec<Sse2Tag, int32_t>::valid_mask(valid));
-    }
-    int rm = _mm_movemask_ps(_mm_castsi128_ps(cmp));
-    for (int j = 0; j < 4; ++j)
-      if (rm & (1 << j)) {
-        out.push_back(i + j);
-        ++cnt;
-      }
-  }
-  for (; i < row_count; ++i)
-    if (!is_null(null_mask, i) && data[i] == value) {
-      out.push_back(i);
-      ++cnt;
-    }
-  return cnt;
-#else
-  return filter_generic<int32_t>(
-      data, null_mask, row_count, [value](int32_t v) { return v == value; }, out);
-#endif
-}
-
 template <typename T>
 inline bool compare_scalar(T lhs, T rhs, CompareOp op) {
   switch (op) {
@@ -1270,119 +1237,592 @@ inline bool compare_scalar(T lhs, T rhs, CompareOp op) {
   return false;
 }
 
-template <typename Allocator>
-SHANNON_TARGET_AVX2 inline size_t filter_avx2_int32_compare(const int32_t *data, const uint8_t *null_mask,
-                                                            size_t row_count, int32_t value, CompareOp op,
-                                                            std::vector<size_t, Allocator> &out) {
-#if defined(SHANNON_HAVE_AVX2) || defined(SHANNON_RUNTIME_AVX2)
-  size_t cnt = 0;
-  size_t i = 0;
-  const __m256i target = _mm256_set1_epi32(value);
-  const __m256i all_ones = _mm256_set1_epi32(-1);
-  for (; i + 8 <= row_count; i += 8) {
-    const __m256i values = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(data + i));
-    __m256i cmp = _mm256_setzero_si256();
-    switch (op) {
-      case CompareOp::EQ:
-        cmp = _mm256_cmpeq_epi32(values, target);
-        break;
-      case CompareOp::NE:
-        cmp = _mm256_xor_si256(_mm256_cmpeq_epi32(values, target), all_ones);
-        break;
-      case CompareOp::LT:
-        cmp = _mm256_cmpgt_epi32(target, values);
-        break;
-      case CompareOp::LE:
-        cmp = _mm256_xor_si256(_mm256_cmpgt_epi32(values, target), all_ones);
-        break;
-      case CompareOp::GT:
-        cmp = _mm256_cmpgt_epi32(values, target);
-        break;
-      case CompareOp::GE:
-        cmp = _mm256_xor_si256(_mm256_cmpgt_epi32(target, values), all_ones);
-        break;
-    }
-    if (null_mask) {
-      const unsigned valid = lane_valid_bits(null_mask, i, 8);
-      if (valid != 0xFFu) cmp = _mm256_and_si256(cmp, Vec<Avx2Tag, int32_t>::valid_mask(valid));
-    }
-    int mask = _mm256_movemask_ps(_mm256_castsi256_ps(cmp));
-    for (int lane = 0; lane < 8; ++lane) {
-      if (mask & (1 << lane)) {
-        out.push_back(i + lane);
-        ++cnt;
+// ============================================================================
+// Gathered integer comparison: one compare primitive per (ISA, width) and one
+// gather loop. The index-output filters below and the IMCS predicate's bitmap
+// kernels both go through here, so the operator lattice is written once.
+// ============================================================================
+namespace detail {
+// Rows per gathered block: a multiple of every lane width below, so a block
+// never needs a partial vector.
+constexpr size_t kCmpBlockRows = 64;
+
+struct CmpRequest {
+  CompareOp op{CompareOp::EQ};
+  bool range{false};   // also require value <= upper
+  bool negate{false};  // NOT BETWEEN
+};
+
+template <typename T>
+inline uint64_t cmp_block_scalar(const T *vals, T lower, T upper, const CmpRequest &req) {
+  uint64_t mask = 0;
+  for (size_t j = 0; j < kCmpBlockRows; ++j) {
+    if constexpr (std::is_floating_point_v<T>) {
+      // Floating-point NOT BETWEEN is ordered LT || GT, not the complement
+      // of GE && LE: NaN would otherwise become a matching row.
+      if (req.range && req.negate) {
+        if (vals[j] < lower || vals[j] > upper) mask |= static_cast<uint64_t>(1) << j;
+        continue;
       }
+      if (req.op == CompareOp::NE && (std::isnan(vals[j]) || std::isnan(lower))) continue;
     }
+    bool matched = compare_scalar(vals[j], lower, req.op);
+    if (req.range) matched = matched && compare_scalar(vals[j], upper, CompareOp::LE);
+    if (req.negate) matched = !matched;
+    if (matched) mask |= static_cast<uint64_t>(1) << j;
   }
-  for (; i < row_count; ++i) {
-    if (!is_null(null_mask, i) && compare_scalar(data[i], value, op)) {
-      out.push_back(i);
-      ++cnt;
-    }
-  }
-  return cnt;
-#else
-  return filter_generic<int32_t>(
-      data, null_mask, row_count, [value, op](int32_t v) { return compare_scalar(v, value, op); }, out);
-#endif
+  return mask;
 }
 
-template <typename Allocator>
-SHANNON_TARGET_AVX2 inline size_t filter_avx2_int64_compare(const int64_t *data, const uint8_t *null_mask,
-                                                            size_t row_count, int64_t value, CompareOp op,
-                                                            std::vector<size_t, Allocator> &out) {
 #if defined(SHANNON_HAVE_AVX2) || defined(SHANNON_RUNTIME_AVX2)
-  size_t cnt = 0;
-  size_t i = 0;
-  const __m256i target = _mm256_set1_epi64x(value);
+
+SHANNON_TARGET_AVX2 inline __m256i cmp_avx2_i32(__m256i values, __m256i bound, CompareOp op) {
+  const __m256i all_ones = _mm256_set1_epi32(-1);
+  switch (op) {
+    case CompareOp::EQ:
+      return _mm256_cmpeq_epi32(values, bound);
+    case CompareOp::NE:
+      return _mm256_xor_si256(_mm256_cmpeq_epi32(values, bound), all_ones);
+    case CompareOp::LT:
+      return _mm256_cmpgt_epi32(bound, values);
+    case CompareOp::LE:
+      return _mm256_xor_si256(_mm256_cmpgt_epi32(values, bound), all_ones);
+    case CompareOp::GT:
+      return _mm256_cmpgt_epi32(values, bound);
+    case CompareOp::GE:
+      return _mm256_xor_si256(_mm256_cmpgt_epi32(bound, values), all_ones);
+  }
+  return _mm256_setzero_si256();
+}
+
+SHANNON_TARGET_AVX2 inline __m256i cmp_avx2_i64(__m256i values, __m256i bound, CompareOp op) {
   const __m256i all_ones = _mm256_set1_epi64x(-1);
-  for (; i + 4 <= row_count; i += 4) {
-    const __m256i values = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(data + i));
-    __m256i cmp = _mm256_setzero_si256();
-    switch (op) {
+  switch (op) {
+    case CompareOp::EQ:
+      return _mm256_cmpeq_epi64(values, bound);
+    case CompareOp::NE:
+      return _mm256_xor_si256(_mm256_cmpeq_epi64(values, bound), all_ones);
+    case CompareOp::LT:
+      return _mm256_cmpgt_epi64(bound, values);
+    case CompareOp::LE:
+      return _mm256_xor_si256(_mm256_cmpgt_epi64(values, bound), all_ones);
+    case CompareOp::GT:
+      return _mm256_cmpgt_epi64(values, bound);
+    case CompareOp::GE:
+      return _mm256_xor_si256(_mm256_cmpgt_epi64(bound, values), all_ones);
+  }
+  return _mm256_setzero_si256();
+}
+
+SHANNON_TARGET_AVX2 inline uint64_t cmp_block_avx2_i32(const int32_t *vals, int32_t lower, int32_t upper,
+                                                       const CmpRequest &req) {
+  const __m256i lo = _mm256_set1_epi32(lower);
+  const __m256i hi = _mm256_set1_epi32(upper);
+  const __m256i all_ones = _mm256_set1_epi32(-1);
+  uint64_t mask = 0;
+  for (size_t j = 0; j < kCmpBlockRows; j += 8) {
+    const __m256i values = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(vals + j));
+    __m256i cmp = cmp_avx2_i32(values, lo, req.op);
+    if (req.range) cmp = _mm256_and_si256(cmp, _mm256_xor_si256(_mm256_cmpgt_epi32(values, hi), all_ones));
+    if (req.negate) cmp = _mm256_xor_si256(cmp, all_ones);
+    mask |= static_cast<uint64_t>(static_cast<unsigned>(_mm256_movemask_ps(_mm256_castsi256_ps(cmp)))) << j;
+  }
+  return mask;
+}
+
+SHANNON_TARGET_AVX2 inline uint64_t cmp_block_avx2_i64(const int64_t *vals, int64_t lower, int64_t upper,
+                                                       const CmpRequest &req) {
+  const __m256i lo = _mm256_set1_epi64x(lower);
+  const __m256i hi = _mm256_set1_epi64x(upper);
+  const __m256i all_ones = _mm256_set1_epi64x(-1);
+  uint64_t mask = 0;
+  for (size_t j = 0; j < kCmpBlockRows; j += 4) {
+    const __m256i values = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(vals + j));
+    __m256i cmp = cmp_avx2_i64(values, lo, req.op);
+    if (req.range) cmp = _mm256_and_si256(cmp, _mm256_xor_si256(_mm256_cmpgt_epi64(values, hi), all_ones));
+    if (req.negate) cmp = _mm256_xor_si256(cmp, all_ones);
+    mask |= static_cast<uint64_t>(static_cast<unsigned>(_mm256_movemask_pd(_mm256_castsi256_pd(cmp)))) << j;
+  }
+  return mask;
+}
+
+#endif  // AVX2
+
+#if defined(SHANNON_HAVE_SSE2)
+
+inline __m128i cmp_sse_i32(__m128i values, __m128i bound, CompareOp op) {
+  const __m128i all_ones = _mm_set1_epi32(-1);
+  switch (op) {
+    case CompareOp::EQ:
+      return _mm_cmpeq_epi32(values, bound);
+    case CompareOp::NE:
+      return _mm_xor_si128(_mm_cmpeq_epi32(values, bound), all_ones);
+    case CompareOp::LT:
+      return _mm_cmpgt_epi32(bound, values);
+    case CompareOp::LE:
+      return _mm_xor_si128(_mm_cmpgt_epi32(values, bound), all_ones);
+    case CompareOp::GT:
+      return _mm_cmpgt_epi32(values, bound);
+    case CompareOp::GE:
+      return _mm_xor_si128(_mm_cmpgt_epi32(bound, values), all_ones);
+  }
+  return _mm_setzero_si128();
+}
+
+inline uint64_t cmp_block_sse_i32(const int32_t *vals, int32_t lower, int32_t upper, const CmpRequest &req) {
+  const __m128i lo = _mm_set1_epi32(lower);
+  const __m128i hi = _mm_set1_epi32(upper);
+  const __m128i all_ones = _mm_set1_epi32(-1);
+  uint64_t mask = 0;
+  for (size_t j = 0; j < kCmpBlockRows; j += 4) {
+    const __m128i values = _mm_loadu_si128(reinterpret_cast<const __m128i *>(vals + j));
+    __m128i cmp = cmp_sse_i32(values, lo, req.op);
+    if (req.range) cmp = _mm_and_si128(cmp, _mm_xor_si128(_mm_cmpgt_epi32(values, hi), all_ones));
+    if (req.negate) cmp = _mm_xor_si128(cmp, all_ones);
+    mask |= static_cast<uint64_t>(static_cast<unsigned>(_mm_movemask_ps(_mm_castsi128_ps(cmp)))) << j;
+  }
+  return mask;
+}
+
+#if defined(SHANNON_HAVE_SSE42)
+
+inline __m128i cmp_sse_i64(__m128i values, __m128i bound, CompareOp op) {
+  const __m128i all_ones = _mm_set1_epi64x(-1);
+  switch (op) {
+    case CompareOp::EQ:
+      return _mm_cmpeq_epi64(values, bound);
+    case CompareOp::NE:
+      return _mm_xor_si128(_mm_cmpeq_epi64(values, bound), all_ones);
+    case CompareOp::LT:
+      return _mm_cmpgt_epi64(bound, values);
+    case CompareOp::LE:
+      return _mm_xor_si128(_mm_cmpgt_epi64(values, bound), all_ones);
+    case CompareOp::GT:
+      return _mm_cmpgt_epi64(values, bound);
+    case CompareOp::GE:
+      return _mm_xor_si128(_mm_cmpgt_epi64(bound, values), all_ones);
+  }
+  return _mm_setzero_si128();
+}
+
+inline uint64_t cmp_block_sse_i64(const int64_t *vals, int64_t lower, int64_t upper, const CmpRequest &req) {
+  const __m128i lo = _mm_set1_epi64x(lower);
+  const __m128i hi = _mm_set1_epi64x(upper);
+  const __m128i all_ones = _mm_set1_epi64x(-1);
+  uint64_t mask = 0;
+  for (size_t j = 0; j < kCmpBlockRows; j += 2) {
+    const __m128i values = _mm_loadu_si128(reinterpret_cast<const __m128i *>(vals + j));
+    __m128i cmp = cmp_sse_i64(values, lo, req.op);
+    if (req.range) cmp = _mm_and_si128(cmp, _mm_xor_si128(_mm_cmpgt_epi64(values, hi), all_ones));
+    if (req.negate) cmp = _mm_xor_si128(cmp, all_ones);
+    mask |= static_cast<uint64_t>(static_cast<unsigned>(_mm_movemask_pd(_mm_castsi128_pd(cmp)))) << j;
+  }
+  return mask;
+}
+
+#endif  // SSE4.2
+#endif  // SSE2
+
+#if defined(SHANNON_HAVE_NEON)
+
+inline uint8_t neon_lane_mask_u32(uint32x4_t mask) {
+  alignas(16) uint32_t lanes[4];
+  vst1q_u32(lanes, mask);
+  uint8_t bits = 0;
+  for (unsigned j = 0; j < 4; ++j)
+    if (lanes[j] != 0) bits = static_cast<uint8_t>(bits | (1u << j));
+  return bits;
+}
+
+inline uint64_t cmp_block_neon_i32(const int32_t *vals, int32_t lower, int32_t upper, const CmpRequest &req) {
+  const int32x4_t lo = vdupq_n_s32(lower);
+  const int32x4_t hi = vdupq_n_s32(upper);
+  const uint32x4_t all_ones = vdupq_n_u32(0xFFFFFFFFu);
+  uint64_t mask = 0;
+  for (size_t j = 0; j < kCmpBlockRows; j += 4) {
+    const int32x4_t values = vld1q_s32(vals + j);
+    uint32x4_t cmp;
+    switch (req.op) {
       case CompareOp::EQ:
-        cmp = _mm256_cmpeq_epi64(values, target);
+        cmp = vceqq_s32(values, lo);
         break;
       case CompareOp::NE:
-        cmp = _mm256_xor_si256(_mm256_cmpeq_epi64(values, target), all_ones);
+        cmp = veorq_u32(vceqq_s32(values, lo), all_ones);
         break;
       case CompareOp::LT:
-        cmp = _mm256_cmpgt_epi64(target, values);
+        cmp = vcltq_s32(values, lo);
         break;
       case CompareOp::LE:
-        cmp = _mm256_xor_si256(_mm256_cmpgt_epi64(values, target), all_ones);
+        cmp = vcleq_s32(values, lo);
         break;
       case CompareOp::GT:
-        cmp = _mm256_cmpgt_epi64(values, target);
+        cmp = vcgtq_s32(values, lo);
         break;
       case CompareOp::GE:
-        cmp = _mm256_xor_si256(_mm256_cmpgt_epi64(target, values), all_ones);
+        cmp = vcgeq_s32(values, lo);
+        break;
+      default:
+        cmp = vdupq_n_u32(0);
         break;
     }
-    if (null_mask) {
-      const unsigned valid = lane_valid_bits(null_mask, i, 4);
-      if (valid != 0xFu) cmp = _mm256_and_si256(cmp, Vec<Avx2Tag, int64_t>::valid_mask(valid));
+    if (req.range) cmp = vandq_u32(cmp, vcleq_s32(values, hi));
+    if (req.negate) cmp = veorq_u32(cmp, all_ones);
+    mask |= static_cast<uint64_t>(neon_lane_mask_u32(cmp)) << j;
+  }
+  return mask;
+}
+
+#if defined(SHANNON_HAVE_NEON_A64)
+// AArch32 NEON has no 64-bit ordered compare; there cmp_block_scalar covers it.
+inline uint8_t neon_lane_mask_u64(uint64x2_t mask) {
+  alignas(16) uint64_t lanes[2];
+  vst1q_u64(lanes, mask);
+  uint8_t bits = 0;
+  for (unsigned j = 0; j < 2; ++j)
+    if (lanes[j] != 0) bits = static_cast<uint8_t>(bits | (1u << j));
+  return bits;
+}
+
+inline uint64_t cmp_block_neon_i64(const int64_t *vals, int64_t lower, int64_t upper, const CmpRequest &req) {
+  const int64x2_t lo = vdupq_n_s64(lower);
+  const int64x2_t hi = vdupq_n_s64(upper);
+  const uint64x2_t all_ones = vdupq_n_u64(0xFFFFFFFFFFFFFFFFull);
+  uint64_t mask = 0;
+  for (size_t j = 0; j < kCmpBlockRows; j += 2) {
+    const int64x2_t values = vld1q_s64(vals + j);
+    uint64x2_t cmp;
+    switch (req.op) {
+      case CompareOp::EQ:
+        cmp = vceqq_s64(values, lo);
+        break;
+      case CompareOp::NE:
+        cmp = veorq_u64(vceqq_s64(values, lo), all_ones);
+        break;
+      case CompareOp::LT:
+        cmp = vcltq_s64(values, lo);
+        break;
+      case CompareOp::LE:
+        cmp = vcleq_s64(values, lo);
+        break;
+      case CompareOp::GT:
+        cmp = vcgtq_s64(values, lo);
+        break;
+      case CompareOp::GE:
+        cmp = vcgeq_s64(values, lo);
+        break;
+      default:
+        cmp = vdupq_n_u64(0);
+        break;
     }
-    int mask = _mm256_movemask_pd(_mm256_castsi256_pd(cmp));
-    for (int lane = 0; lane < 4; ++lane) {
-      if (mask & (1 << lane)) {
-        out.push_back(i + lane);
-        ++cnt;
+    if (req.range) cmp = vandq_u64(cmp, vcleq_s64(values, hi));
+    if (req.negate) cmp = veorq_u64(cmp, all_ones);
+    mask |= static_cast<uint64_t>(neon_lane_mask_u64(cmp)) << j;
+  }
+  return mask;
+}
+#endif  // NEON A64
+#endif  // NEON
+
+inline uint64_t cmp_block_i32(const int32_t *vals, int32_t lower, int32_t upper, const CmpRequest &req) {
+  const SIMDType isa = simd_support();
+#if defined(SHANNON_HAVE_AVX2) || defined(SHANNON_RUNTIME_AVX2)
+  if (isa == SIMDType::AVX2) return cmp_block_avx2_i32(vals, lower, upper, req);
+#endif
+#if defined(SHANNON_HAVE_SSE2)
+  if (isa != SIMDType::NONE && isa != SIMDType::NEON) return cmp_block_sse_i32(vals, lower, upper, req);
+#endif
+#if defined(SHANNON_HAVE_NEON)
+  if (isa == SIMDType::NEON) return cmp_block_neon_i32(vals, lower, upper, req);
+#endif
+  return cmp_block_scalar<int32_t>(vals, lower, upper, req);
+}
+
+inline uint64_t cmp_block_i64(const int64_t *vals, int64_t lower, int64_t upper, const CmpRequest &req) {
+  const SIMDType isa = simd_support();
+#if defined(SHANNON_HAVE_AVX2) || defined(SHANNON_RUNTIME_AVX2)
+  if (isa == SIMDType::AVX2) return cmp_block_avx2_i64(vals, lower, upper, req);
+#endif
+#if defined(SHANNON_HAVE_SSE42)
+  if (isa != SIMDType::NONE && isa != SIMDType::NEON) return cmp_block_sse_i64(vals, lower, upper, req);
+#endif
+#if defined(SHANNON_HAVE_NEON_A64)
+  if (isa == SIMDType::NEON) return cmp_block_neon_i64(vals, lower, upper, req);
+#endif
+  return cmp_block_scalar<int64_t>(vals, lower, upper, req);
+}
+
+// Writes one block's match bits, keeping the bits of the trailing byte that
+// fall outside the requested rows.
+inline void write_cmp_block_bits(uint64_t mask, size_t first, size_t count, uint8_t *out_bits) {
+  for (size_t j = 0; j < count; j += 8) {
+    const unsigned lanes = static_cast<unsigned>(std::min<size_t>(8, count - j));
+    const uint8_t keep = static_cast<uint8_t>((1u << lanes) - 1u);
+    uint8_t &byte = out_bits[(first + j) >> 3];
+    byte = static_cast<uint8_t>((byte & ~keep) | ((mask >> j) & keep));
+  }
+}
+
+// Floating-point compares are all ordered, so a NaN operand matches nothing and
+// never satisfies NOT_EQUAL either.
+#if defined(SHANNON_HAVE_AVX2) || defined(SHANNON_RUNTIME_AVX2)
+
+SHANNON_TARGET_AVX2 inline __m256d cmp_avx2_f64(__m256d values, __m256d bound, CompareOp op) {
+  switch (op) {
+    case CompareOp::EQ:
+      return _mm256_cmp_pd(values, bound, _CMP_EQ_OQ);
+    case CompareOp::NE:
+      return _mm256_cmp_pd(values, bound, _CMP_NEQ_OQ);
+    case CompareOp::LT:
+      return _mm256_cmp_pd(values, bound, _CMP_LT_OQ);
+    case CompareOp::LE:
+      return _mm256_cmp_pd(values, bound, _CMP_LE_OQ);
+    case CompareOp::GT:
+      return _mm256_cmp_pd(values, bound, _CMP_GT_OQ);
+    case CompareOp::GE:
+      return _mm256_cmp_pd(values, bound, _CMP_GE_OQ);
+  }
+  return _mm256_setzero_pd();
+}
+
+SHANNON_TARGET_AVX2 inline uint64_t cmp_block_avx2_f64(const double *vals, double lower, double upper,
+                                                       const CmpRequest &req) {
+  const __m256d lo = _mm256_set1_pd(lower);
+  const __m256d hi = _mm256_set1_pd(upper);
+  const __m256d all_ones = _mm256_castsi256_pd(_mm256_set1_epi64x(-1));
+  uint64_t mask = 0;
+  for (size_t j = 0; j < kCmpBlockRows; j += 4) {
+    const __m256d values = _mm256_loadu_pd(vals + j);
+    __m256d cmp = cmp_avx2_f64(values, lo, req.op);
+    if (req.range && req.negate)
+      cmp = _mm256_or_pd(_mm256_cmp_pd(values, lo, _CMP_LT_OQ), _mm256_cmp_pd(values, hi, _CMP_GT_OQ));
+    else {
+      if (req.range) cmp = _mm256_and_pd(cmp, _mm256_cmp_pd(values, hi, _CMP_LE_OQ));
+      if (req.negate) cmp = _mm256_xor_pd(cmp, all_ones);
+    }
+    mask |= static_cast<uint64_t>(static_cast<unsigned>(_mm256_movemask_pd(cmp))) << j;
+  }
+  return mask;
+}
+
+#endif  // AVX2
+
+#if defined(SHANNON_HAVE_SSE2)
+
+inline uint64_t cmp_block_sse_f64(const double *vals, double lower, double upper, const CmpRequest &req) {
+  const __m128d lo = _mm_set1_pd(lower);
+  const __m128d hi = _mm_set1_pd(upper);
+  const __m128d all_ones = _mm_castsi128_pd(_mm_set1_epi64x(-1));
+  uint64_t mask = 0;
+  for (size_t j = 0; j < kCmpBlockRows; j += 2) {
+    const __m128d values = _mm_loadu_pd(vals + j);
+    __m128d cmp;
+    switch (req.op) {
+      case CompareOp::EQ:
+        cmp = _mm_cmpeq_pd(values, lo);
+        break;
+      case CompareOp::NE:  // ordered, so a NaN row never matches
+        cmp = _mm_andnot_pd(_mm_cmpeq_pd(values, lo), _mm_cmpord_pd(values, lo));
+        break;
+      case CompareOp::LT:
+        cmp = _mm_cmplt_pd(values, lo);
+        break;
+      case CompareOp::LE:
+        cmp = _mm_cmple_pd(values, lo);
+        break;
+      case CompareOp::GT:
+        cmp = _mm_cmpgt_pd(values, lo);
+        break;
+      case CompareOp::GE:
+        cmp = _mm_cmpge_pd(values, lo);
+        break;
+      default:
+        cmp = _mm_setzero_pd();
+        break;
+    }
+    if (req.range && req.negate)
+      cmp = _mm_or_pd(_mm_cmplt_pd(values, lo), _mm_cmpgt_pd(values, hi));
+    else {
+      if (req.range) cmp = _mm_and_pd(cmp, _mm_cmple_pd(values, hi));
+      if (req.negate) cmp = _mm_xor_pd(cmp, all_ones);
+    }
+    mask |= static_cast<uint64_t>(static_cast<unsigned>(_mm_movemask_pd(cmp))) << j;
+  }
+  return mask;
+}
+
+#endif  // SSE2
+
+#if defined(SHANNON_HAVE_NEON_A64)
+
+inline uint64_t cmp_block_neon_f64(const double *vals, double lower, double upper, const CmpRequest &req) {
+  const float64x2_t lo = vdupq_n_f64(lower);
+  const float64x2_t hi = vdupq_n_f64(upper);
+  const uint64x2_t all_ones = vdupq_n_u64(0xFFFFFFFFFFFFFFFFull);
+  uint64_t mask = 0;
+  for (size_t j = 0; j < kCmpBlockRows; j += 2) {
+    const float64x2_t values = vld1q_f64(vals + j);
+    uint64x2_t cmp;
+    switch (req.op) {
+      case CompareOp::EQ:
+        cmp = vceqq_f64(values, lo);
+        break;
+      case CompareOp::NE:
+        // Ordered NE: unordered (NaN) lanes must not match.
+        cmp = vandq_u64(veorq_u64(vceqq_f64(values, lo), all_ones),
+                        vandq_u64(vceqq_f64(values, values), vceqq_f64(lo, lo)));
+        break;
+      case CompareOp::LT:
+        cmp = vcltq_f64(values, lo);
+        break;
+      case CompareOp::LE:
+        cmp = vcleq_f64(values, lo);
+        break;
+      case CompareOp::GT:
+        cmp = vcgtq_f64(values, lo);
+        break;
+      case CompareOp::GE:
+        cmp = vcgeq_f64(values, lo);
+        break;
+      default:
+        cmp = vdupq_n_u64(0);
+        break;
+    }
+    if (req.range && req.negate)
+      cmp = vorrq_u64(vcltq_f64(values, lo), vcgtq_f64(values, hi));
+    else {
+      if (req.range) cmp = vandq_u64(cmp, vcleq_f64(values, hi));
+      if (req.negate) cmp = veorq_u64(cmp, all_ones);
+    }
+    mask |= static_cast<uint64_t>(neon_lane_mask_u64(cmp)) << j;
+  }
+  return mask;
+}
+
+#endif  // NEON A64
+
+inline uint64_t cmp_block_f64(const double *vals, double lower, double upper, const CmpRequest &req) {
+  const SIMDType isa = simd_support();
+#if defined(SHANNON_HAVE_AVX2) || defined(SHANNON_RUNTIME_AVX2)
+  if (isa == SIMDType::AVX2) return cmp_block_avx2_f64(vals, lower, upper, req);
+#endif
+#if defined(SHANNON_HAVE_SSE2)
+  if (isa != SIMDType::NONE && isa != SIMDType::NEON) return cmp_block_sse_f64(vals, lower, upper, req);
+#endif
+#if defined(SHANNON_HAVE_NEON_A64)
+  if (isa == SIMDType::NEON) return cmp_block_neon_f64(vals, lower, upper, req);
+#endif
+  return cmp_block_scalar<double>(vals, lower, upper, req);
+}
+
+template <typename T>
+inline uint64_t cmp_block(const T *vals, T lower, T upper, const CmpRequest &req) {
+  if constexpr (std::is_same_v<T, int32_t>)
+    return cmp_block_i32(vals, lower, upper, req);
+  else
+    return cmp_block_i64(vals, lower, upper, req);
+}
+
+// Gathers `rows` cell pointers into fixed blocks, compares them and writes the
+// matches as a LSB-first bitmap. `bias` XORs both sides, which is how an
+// unsigned column keeps its ordering under signed compare instructions.
+template <typename T>
+inline size_t gather_compare_bitmap(const unsigned char *const *cells, size_t rows, T lower, T upper, T bias,
+                                    const CmpRequest &req, uint8_t *out_bits) {
+  if (cells == nullptr || out_bits == nullptr || rows == 0) return 0;
+  const T lo = static_cast<T>(lower ^ bias);
+  const T hi = static_cast<T>(upper ^ bias);
+  alignas(32) T vals[kCmpBlockRows];
+  size_t matched = 0;
+  for (size_t first = 0; first < rows; first += kCmpBlockRows) {
+    const size_t count = std::min(kCmpBlockRows, rows - first);
+    uint64_t valid = 0;
+    for (size_t j = 0; j < kCmpBlockRows; ++j) {
+      if (j >= count) {
+        vals[j] = bias;
+        continue;
+      }
+      const unsigned char *cell = cells[first + j];
+      T raw{};
+      if (cell != nullptr) {
+        std::memcpy(&raw, cell, sizeof(T));
+        valid |= static_cast<uint64_t>(1) << j;
+      }
+      vals[j] = static_cast<T>(raw ^ bias);
+    }
+    uint64_t mask = cmp_block<T>(vals, lo, req.range ? hi : lo, req) & valid;
+    if (count < kCmpBlockRows) mask &= (static_cast<uint64_t>(1) << count) - 1;
+    matched += static_cast<size_t>(std::popcount(mask));
+    write_cmp_block_bits(mask, first, count, out_bits);
+  }
+  return matched;
+}
+
+// Same loop for decoded floating-point cells. The decoder is only called for
+// non-NULL rows, so a FLOAT/DOUBLE/DECIMAL reader never has to invent a value.
+template <typename Decode>
+inline size_t gather_compare_double_bitmap(const unsigned char *const *cells, size_t rows, double lower, double upper,
+                                           const CmpRequest &req, Decode decode, uint8_t *out_bits) {
+  if (cells == nullptr || out_bits == nullptr || rows == 0) return 0;
+  alignas(32) double vals[kCmpBlockRows];
+  size_t matched = 0;
+  for (size_t first = 0; first < rows; first += kCmpBlockRows) {
+    const size_t count = std::min(kCmpBlockRows, rows - first);
+    uint64_t valid = 0;
+    for (size_t j = 0; j < kCmpBlockRows; ++j) {
+      if (j >= count) {
+        vals[j] = 0.0;
+        continue;
+      }
+      const unsigned char *cell = cells[first + j];
+      if (cell != nullptr) {
+        vals[j] = decode(cell);
+        valid |= static_cast<uint64_t>(1) << j;
+      } else {
+        vals[j] = 0.0;
       }
     }
+    uint64_t mask = cmp_block_f64(vals, lower, req.range ? upper : lower, req) & valid;
+    if (count < kCmpBlockRows) mask &= (static_cast<uint64_t>(1) << count) - 1;
+    matched += static_cast<size_t>(std::popcount(mask));
+    write_cmp_block_bits(mask, first, count, out_bits);
   }
-  for (; i < row_count; ++i) {
-    if (!is_null(null_mask, i) && compare_scalar(data[i], value, op)) {
-      out.push_back(i);
-      ++cnt;
+  return matched;
+}
+
+// Index-output variant for a contiguous column: same kernels, same null
+// contract (bit set = NULL), pushes the matching row numbers.
+template <typename T, typename Allocator>
+inline size_t filter_compare_indexed(const T *data, const uint8_t *null_mask, size_t row_count, T value, CompareOp op,
+                                     std::vector<size_t, Allocator> &out) {
+  if (data == nullptr || row_count == 0) return 0;
+  const CmpRequest req{op, false, false};
+  size_t matched = 0;
+  size_t i = 0;
+  for (; i + kCmpBlockRows <= row_count; i += kCmpBlockRows) {
+    uint64_t mask = cmp_block<T>(data + i, value, value, req);
+    if (mask == 0) continue;
+    if (null_mask != nullptr) {
+      // kCmpBlockRows is a multiple of 8, so one block covers whole mask bytes.
+      uint64_t valid = 0;
+      for (unsigned byte = 0; byte < kCmpBlockRows / 8; ++byte)
+        valid |= static_cast<uint64_t>(static_cast<uint8_t>(~null_mask[(i >> 3) + byte])) << (byte * 8);
+      mask &= valid;
+    }
+    while (mask != 0) {
+      out.push_back(i + static_cast<unsigned>(std::countr_zero(mask)));
+      mask &= mask - 1;
+      ++matched;
     }
   }
-  return cnt;
-#else
-  return filter_generic<int64_t>(
-      data, null_mask, row_count, [value, op](int64_t v) { return compare_scalar(v, value, op); }, out);
-#endif
+  for (; i < row_count; ++i)
+    if (!is_null(null_mask, i) && compare_scalar(data[i], value, op)) {
+      out.push_back(i);
+      ++matched;
+    }
+  return matched;
 }
+
+}  // namespace detail
 
 // ============================================================================
 // High-level dispatch
@@ -1567,40 +2007,117 @@ size_t filter(const T *data, const uint8_t *null_mask, size_t row_count, std::fu
   return filter_generic<T>(data, null_mask, row_count, predicate, out);
 }
 
-inline size_t filter_eq_int32(const int32_t *data, const uint8_t *null_mask, size_t row_count, int32_t value,
-                              std::vector<size_t> &out) {
-  const SIMDType simd_type = simd_support();
-  switch (simd_type) {
-#if defined(SHANNON_X86_PLATFORM)
-    case SIMDType::AVX2:
-    case SIMDType::AVX:
-    case SIMDType::SSE4_2:
-    case SIMDType::SSE4_1:
-    case SIMDType::SSE2:
-    case SIMDType::SSE:
-      return filter_sse2_int32_eq(data, null_mask, row_count, value, out);
-#endif
-    default:
-      return filter_generic<int32_t>(
-          data, null_mask, row_count, [value](int32_t v) { return v == value; }, out);
-  }
-}
-
 template <typename Allocator>
 inline size_t filter_compare_int32(const int32_t *data, const uint8_t *null_mask, size_t row_count, int32_t value,
                                    CompareOp op, std::vector<size_t, Allocator> &out) {
-  if (simd_support() == SIMDType::AVX2) return filter_avx2_int32_compare(data, null_mask, row_count, value, op, out);
-  if (op == CompareOp::EQ) return filter_sse2_int32_eq(data, null_mask, row_count, value, out);
-  return filter_generic<int32_t>(
-      data, null_mask, row_count, [value, op](int32_t v) { return compare_scalar(v, value, op); }, out);
+  return detail::filter_compare_indexed<int32_t>(data, null_mask, row_count, value, op, out);
 }
 
 template <typename Allocator>
 inline size_t filter_compare_int64(const int64_t *data, const uint8_t *null_mask, size_t row_count, int64_t value,
                                    CompareOp op, std::vector<size_t, Allocator> &out) {
-  if (simd_support() == SIMDType::AVX2) return filter_avx2_int64_compare(data, null_mask, row_count, value, op, out);
-  return filter_generic<int64_t>(
-      data, null_mask, row_count, [value, op](int64_t v) { return compare_scalar(v, value, op); }, out);
+  return detail::filter_compare_indexed<int64_t>(data, null_mask, row_count, value, op, out);
+}
+
+inline size_t filter_eq_int32(const int32_t *data, const uint8_t *null_mask, size_t row_count, int32_t value,
+                              std::vector<size_t> &out) {
+  return filter_compare_int32(data, null_mask, row_count, value, CompareOp::EQ, out);
+}
+
+// True when this width really runs vectorized on the current CPU. Every tier
+// with a kernel covers all six operators, so only the width and the ISA decide;
+// callers use this to skip setup that would not pay off.
+inline bool integer_compare_simd(bool is_int32, CompareOp op) {
+  (void)op;
+  const auto isa = simd_support();
+#if defined(SHANNON_HAVE_AVX2) || defined(SHANNON_RUNTIME_AVX2)
+  if (isa == SIMDType::AVX2) return true;
+#endif
+  if (isa == SIMDType::NEON) {
+    if (is_int32) {
+#if defined(SHANNON_HAVE_NEON)
+      return true;
+#endif
+    } else {
+#if defined(SHANNON_HAVE_NEON_A64)
+      return true;
+#endif
+    }
+    return false;
+  }
+  if (isa == SIMDType::NONE) return false;
+  if (is_int32) {
+#if defined(SHANNON_HAVE_SSE2)
+    return true;
+#endif
+  } else {
+#if defined(SHANNON_HAVE_SSE42)
+    return true;
+#endif
+  }
+  return false;
+}
+
+// ============================================================================
+// Gathered integer filters
+// ============================================================================
+
+inline size_t filter_compare_int32_bitmap(const unsigned char *const *cells, size_t rows, int32_t value, CompareOp op,
+                                          bool is_unsigned, uint8_t *out_bits) {
+  const int32_t bias = is_unsigned ? static_cast<int32_t>(0x80000000u) : 0;
+  return detail::gather_compare_bitmap<int32_t>(cells, rows, value, value, bias, detail::CmpRequest{op, false, false},
+                                                out_bits);
+}
+
+inline size_t filter_compare_int64_bitmap(const unsigned char *const *cells, size_t rows, int64_t value, CompareOp op,
+                                          bool is_unsigned, uint8_t *out_bits) {
+  const int64_t bias = is_unsigned ? static_cast<int64_t>(0x8000000000000000ull) : 0;
+  return detail::gather_compare_bitmap<int64_t>(cells, rows, value, value, bias, detail::CmpRequest{op, false, false},
+                                                out_bits);
+}
+
+inline size_t filter_range_int32_bitmap(const unsigned char *const *cells, size_t rows, int32_t lower, int32_t upper,
+                                        bool is_unsigned, bool negate, uint8_t *out_bits) {
+  const int32_t bias = is_unsigned ? static_cast<int32_t>(0x80000000u) : 0;
+  return detail::gather_compare_bitmap<int32_t>(cells, rows, lower, upper, bias,
+                                                detail::CmpRequest{CompareOp::GE, true, negate}, out_bits);
+}
+
+inline size_t filter_range_int64_bitmap(const unsigned char *const *cells, size_t rows, int64_t lower, int64_t upper,
+                                        bool is_unsigned, bool negate, uint8_t *out_bits) {
+  const int64_t bias = is_unsigned ? static_cast<int64_t>(0x8000000000000000ull) : 0;
+  return detail::gather_compare_bitmap<int64_t>(cells, rows, lower, upper, bias,
+                                                detail::CmpRequest{CompareOp::GE, true, negate}, out_bits);
+}
+
+inline size_t filter_null_bitmap(const unsigned char *const *cells, size_t rows, bool negate, uint8_t *out_bits) {
+  if (cells == nullptr || out_bits == nullptr || rows == 0) return 0;
+  size_t matched = 0;
+  for (size_t j = 0; j < rows; j += 8) {
+    const unsigned lanes = static_cast<unsigned>(std::min<size_t>(8, rows - j));
+    const uint8_t keep = static_cast<uint8_t>((1u << lanes) - 1u);
+    uint8_t bits = 0;
+    for (unsigned lane = 0; lane < lanes; ++lane)
+      if ((cells[j + lane] == nullptr) != negate) bits = static_cast<uint8_t>(bits | (1u << lane));
+    uint8_t &byte = out_bits[j >> 3];
+    byte = static_cast<uint8_t>((byte & ~keep) | bits);
+    matched += static_cast<size_t>(std::popcount(static_cast<unsigned>(bits)));
+  }
+  return matched;
+}
+
+template <typename Decode>
+inline size_t filter_compare_double_bitmap(const unsigned char *const *cells, size_t rows, double value, CompareOp op,
+                                           Decode decode, uint8_t *out_bits) {
+  return detail::gather_compare_double_bitmap(cells, rows, value, value, detail::CmpRequest{op, false, false}, decode,
+                                              out_bits);
+}
+
+template <typename Decode>
+inline size_t filter_range_double_bitmap(const unsigned char *const *cells, size_t rows, double lower, double upper,
+                                         bool negate, Decode decode, uint8_t *out_bits) {
+  return detail::gather_compare_double_bitmap(cells, rows, lower, upper,
+                                              detail::CmpRequest{CompareOp::GE, true, negate}, decode, out_bits);
 }
 }  // namespace SIMD
 }  // namespace Utils

@@ -17,6 +17,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -24,6 +25,7 @@
 #include <cstring>
 #include <limits>
 #include <random>
+#include <type_traits>
 #include <vector>
 
 #include "storage/rapid_engine/utils/SIMD.h"
@@ -269,6 +271,313 @@ TEST(SimdKernels, PaddingBitsPastRowCountAreIgnored) {
     EXPECT_EQ(Utils::SIMD::count_non_null(dirty.data(), rows), rows);
     EXPECT_EQ(Utils::SIMD::sum<int32_t>(values.data(), dirty.data(), rows),
               Utils::SIMD::sum<int32_t>(values.data(), clean.data(), rows));
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Gathered filters: one cell pointer per row in, LSB-first bitmap out. The
+// index-output filter runs on the same block kernels, so it is pinned here too.
+// ---------------------------------------------------------------------------
+
+bool BitAt(const uint8_t *bits, size_t i) { return ((bits[i >> 3] >> (i & 7)) & 1u) != 0; }
+
+bool RefCompareSigned(int64_t lhs, int64_t rhs, CompareOp op) {
+  switch (op) {
+    case CompareOp::EQ:
+      return lhs == rhs;
+    case CompareOp::NE:
+      return lhs != rhs;
+    case CompareOp::LT:
+      return lhs < rhs;
+    case CompareOp::LE:
+      return lhs <= rhs;
+    case CompareOp::GT:
+      return lhs > rhs;
+    case CompareOp::GE:
+      return lhs >= rhs;
+  }
+  return false;
+}
+
+bool RefCompareUnsigned(uint64_t lhs, uint64_t rhs, CompareOp op) {
+  switch (op) {
+    case CompareOp::EQ:
+      return lhs == rhs;
+    case CompareOp::NE:
+      return lhs != rhs;
+    case CompareOp::LT:
+      return lhs < rhs;
+    case CompareOp::LE:
+      return lhs <= rhs;
+    case CompareOp::GT:
+      return lhs > rhs;
+    case CompareOp::GE:
+      return lhs >= rhs;
+  }
+  return false;
+}
+
+bool RefCompareDouble(double lhs, double rhs, CompareOp op) {
+  switch (op) {
+    case CompareOp::EQ:
+      return lhs == rhs;
+    case CompareOp::NE:
+      return lhs != rhs;
+    case CompareOp::LT:
+      return lhs < rhs;
+    case CompareOp::LE:
+      return lhs <= rhs;
+    case CompareOp::GT:
+      return lhs > rhs;
+    case CompareOp::GE:
+      return lhs >= rhs;
+  }
+  return false;
+}
+
+template <typename T>
+size_t CallBitmapCompare(const std::vector<const unsigned char *> &cells, size_t rows, T bound, CompareOp op,
+                         bool is_unsigned, uint8_t *bits) {
+  if constexpr (std::is_same_v<T, int32_t>)
+    return Utils::SIMD::filter_compare_int32_bitmap(cells.data(), rows, bound, op, is_unsigned, bits);
+  else
+    return Utils::SIMD::filter_compare_int64_bitmap(cells.data(), rows, bound, op, is_unsigned, bits);
+}
+
+template <typename T>
+size_t CallBitmapRange(const std::vector<const unsigned char *> &cells, size_t rows, T lower, T upper,
+                       bool is_unsigned, bool negate, uint8_t *bits) {
+  if constexpr (std::is_same_v<T, int32_t>)
+    return Utils::SIMD::filter_range_int32_bitmap(cells.data(), rows, lower, upper, is_unsigned, negate, bits);
+  else
+    return Utils::SIMD::filter_range_int64_bitmap(cells.data(), rows, lower, upper, is_unsigned, negate, bits);
+}
+
+template <typename T>
+void CheckGatheredCompare(const char *name, bool is_unsigned) {
+  const CompareOp ops[] = {CompareOp::EQ, CompareOp::NE, CompareOp::LT,
+                           CompareOp::LE, CompareOp::GT, CompareOp::GE};
+  for (size_t rows : {size_t{1}, size_t{7}, size_t{64}, size_t{65}, size_t{173}}) {
+    std::vector<T> raw(rows);
+    std::vector<const unsigned char *> cells(rows, nullptr);
+    for (size_t i = 0; i < rows; ++i) {
+      if constexpr (std::is_same_v<T, int32_t>) {
+        raw[i] = is_unsigned ? static_cast<T>(static_cast<uint32_t>(i) * 2654435761u)
+                             : static_cast<T>(static_cast<int64_t>(i) * 1000003 - 50000000);
+      } else {
+        raw[i] = is_unsigned ? static_cast<T>(static_cast<uint64_t>(i) * 0x9E3779B97F4A7C15ull)
+                             : static_cast<T>(static_cast<int64_t>(i) * 1000003 - 50000000);
+      }
+      if (i % 5 != 3) cells[i] = reinterpret_cast<const unsigned char *>(&raw[i]);
+    }
+    const T bound = raw[rows / 2];
+    std::vector<uint8_t> bits(rows / 8 + 2, 0);
+    for (CompareOp op : ops) {
+      std::fill(bits.begin(), bits.end(), 0xA5);  // sentinel: bits outside the rows must survive
+      const size_t matched = CallBitmapCompare<T>(cells, rows, bound, op, is_unsigned, bits.data());
+      size_t expected_count = 0;
+      for (size_t i = 0; i < rows; ++i) {
+        const bool hit =
+            cells[i] != nullptr &&
+            (is_unsigned
+                 ? RefCompareUnsigned(static_cast<uint64_t>(static_cast<std::make_unsigned_t<T>>(raw[i])),
+                                      static_cast<uint64_t>(static_cast<std::make_unsigned_t<T>>(bound)), op)
+                 : RefCompareSigned(raw[i], bound, op));
+        EXPECT_EQ(BitAt(bits.data(), i), hit) << name << " rows=" << rows << " unsigned=" << is_unsigned
+                                              << " op=" << int(op);
+        expected_count += hit ? 1u : 0u;
+      }
+      EXPECT_EQ(matched, expected_count) << name << " count rows=" << rows << " op=" << int(op);
+      EXPECT_EQ(bits[rows / 8 + 1], 0xA5) << name << " trailing byte rows=" << rows;
+      if (rows % 8 != 0) {
+        const uint8_t used = static_cast<uint8_t>((1u << (rows % 8)) - 1u);
+        EXPECT_EQ(static_cast<uint8_t>(bits[rows / 8] & ~used), static_cast<uint8_t>(0xA5 & ~used))
+            << name << " padding bits rows=" << rows;
+      }
+    }
+  }
+}
+
+template <typename T>
+void CheckGatheredRange(const char *name, bool is_unsigned, bool negate) {
+  for (size_t rows : {size_t{1}, size_t{17}, size_t{64}, size_t{130}}) {
+    std::vector<T> raw(rows);
+    std::vector<const unsigned char *> cells(rows, nullptr);
+    for (size_t i = 0; i < rows; ++i) {
+      raw[i] = static_cast<T>(static_cast<int64_t>(i) * 37 - 2400);
+      if (i % 4 != 2) cells[i] = reinterpret_cast<const unsigned char *>(&raw[i]);
+    }
+    const T lower = static_cast<T>(-500), upper = static_cast<T>(900);
+    std::vector<uint8_t> bits(rows / 8 + 2, 0);
+    const size_t matched = CallBitmapRange<T>(cells, rows, lower, upper, is_unsigned, negate, bits.data());
+    size_t expected_count = 0;
+    for (size_t i = 0; i < rows; ++i) {
+      const bool inside =
+          is_unsigned ? (RefCompareUnsigned(static_cast<uint64_t>(static_cast<std::make_unsigned_t<T>>(raw[i])),
+                                            static_cast<uint64_t>(static_cast<std::make_unsigned_t<T>>(lower)),
+                                            CompareOp::GE) &&
+                         RefCompareUnsigned(static_cast<uint64_t>(static_cast<std::make_unsigned_t<T>>(raw[i])),
+                                            static_cast<uint64_t>(static_cast<std::make_unsigned_t<T>>(upper)),
+                                            CompareOp::LE))
+                      : (raw[i] >= lower && raw[i] <= upper);
+      const bool hit = cells[i] != nullptr && (negate ? !inside : inside);
+      EXPECT_EQ(BitAt(bits.data(), i), hit)
+          << name << " rows=" << rows << " unsigned=" << is_unsigned << " negate=" << negate;
+      expected_count += hit ? 1u : 0u;
+    }
+    EXPECT_EQ(matched, expected_count) << name << " range count rows=" << rows;
+  }
+}
+
+TEST(SimdGatheredFilters, IntegerCompareMatchesScalarReference) {
+  for (bool is_unsigned : {false, true}) {
+    CheckGatheredCompare<int32_t>("int32", is_unsigned);
+    CheckGatheredCompare<int64_t>("int64", is_unsigned);
+  }
+}
+
+TEST(SimdGatheredFilters, IntegerRangeMatchesScalarReference) {
+  for (bool is_unsigned : {false, true}) {
+    for (bool negate : {false, true}) {
+      CheckGatheredRange<int32_t>("int32", is_unsigned, negate);
+      CheckGatheredRange<int64_t>("int64", is_unsigned, negate);
+    }
+  }
+}
+
+TEST(SimdGatheredFilters, NullFilterMatchesScalarReference) {
+  for (size_t rows : {size_t{1}, size_t{7}, size_t{64}, size_t{65}, size_t{173}}) {
+    std::vector<int32_t> raw(rows);
+    std::vector<const unsigned char *> cells(rows, nullptr);
+    for (size_t i = 0; i < rows; ++i) {
+      raw[i] = static_cast<int32_t>(i);
+      if (i % 3 != 0) cells[i] = reinterpret_cast<const unsigned char *>(&raw[i]);
+    }
+    for (bool negate : {false, true}) {
+      std::vector<uint8_t> bits(rows / 8 + 2, 0);
+      const size_t matched = Utils::SIMD::filter_null_bitmap(cells.data(), rows, negate, bits.data());
+      size_t expected_count = 0;
+      for (size_t i = 0; i < rows; ++i) {
+        const bool hit = (cells[i] == nullptr) != negate;
+        EXPECT_EQ(BitAt(bits.data(), i), hit) << "rows=" << rows << " negate=" << negate;
+        expected_count += hit ? 1u : 0u;
+      }
+      EXPECT_EQ(matched, expected_count) << "rows=" << rows << " negate=" << negate;
+    }
+  }
+}
+
+TEST(SimdGatheredFilters, DecodedDoubleFiltersMatchScalarReference) {
+  constexpr size_t rows = 173;
+  std::vector<double> wide(rows);
+  std::vector<float> narrow(rows);
+  std::vector<const unsigned char *> wide_cells(rows, nullptr), narrow_cells(rows, nullptr);
+  for (size_t i = 0; i < rows; ++i) {
+    wide[i] = static_cast<double>(i) * 0.25 - 12.5;
+    narrow[i] = static_cast<float>(wide[i]);
+    if (i % 6 != 4) {
+      wide_cells[i] = reinterpret_cast<const unsigned char *>(&wide[i]);
+      narrow_cells[i] = reinterpret_cast<const unsigned char *>(&narrow[i]);
+    }
+  }
+  const auto decode_double = [](const unsigned char *p) {
+    double v;
+    std::memcpy(&v, p, sizeof(v));
+    return v;
+  };
+  const auto decode_float = [](const unsigned char *p) {
+    float v;
+    std::memcpy(&v, p, sizeof(v));
+    return static_cast<double>(v);
+  };
+  std::vector<uint8_t> bits(rows / 8 + 2, 0);
+  for (CompareOp op : {CompareOp::EQ, CompareOp::NE, CompareOp::LT, CompareOp::LE, CompareOp::GT, CompareOp::GE}) {
+    std::fill(bits.begin(), bits.end(), 0);
+    Utils::SIMD::filter_compare_double_bitmap(wide_cells.data(), rows, 5.0, op, decode_double, bits.data());
+    for (size_t i = 0; i < rows; ++i)
+      EXPECT_EQ(BitAt(bits.data(), i), wide_cells[i] != nullptr && RefCompareDouble(wide[i], 5.0, op))
+          << "double op=" << int(op);
+
+    std::fill(bits.begin(), bits.end(), 0);
+    Utils::SIMD::filter_compare_double_bitmap(narrow_cells.data(), rows, 5.0, op, decode_float, bits.data());
+    for (size_t i = 0; i < rows; ++i)
+      EXPECT_EQ(BitAt(bits.data(), i), narrow_cells[i] != nullptr && RefCompareDouble(narrow[i], 5.0, op))
+          << "float op=" << int(op);
+  }
+  std::fill(bits.begin(), bits.end(), 0);
+  Utils::SIMD::filter_range_double_bitmap(wide_cells.data(), rows, -2.0, 6.0, false, decode_double, bits.data());
+  for (size_t i = 0; i < rows; ++i)
+    EXPECT_EQ(BitAt(bits.data(), i), wide_cells[i] != nullptr && wide[i] >= -2.0 && wide[i] <= 6.0);
+}
+
+// The index-output filter and the bitmap filter are the same kernels, so they
+// must agree row for row on the same data.
+TEST(SimdGatheredFilters, IndexFilterMatchesBitmapFilter) {
+  constexpr size_t rows = 173;
+  std::vector<int32_t> raw(rows);
+  std::vector<const unsigned char *> cells(rows, nullptr);
+  std::vector<uint8_t> null_mask((rows + 7) / 8, 0);
+  for (size_t i = 0; i < rows; ++i) {
+    raw[i] = static_cast<int32_t>(i) - 80;
+    if (i % 4 == 1) {
+      null_mask[i >> 3] |= static_cast<uint8_t>(1u << (i & 7));
+    } else {
+      cells[i] = reinterpret_cast<const unsigned char *>(&raw[i]);
+    }
+  }
+  for (CompareOp op : {CompareOp::EQ, CompareOp::NE, CompareOp::LT, CompareOp::LE, CompareOp::GT, CompareOp::GE}) {
+    std::vector<uint8_t> bits(rows / 8 + 2, 0);
+    Utils::SIMD::filter_compare_int32_bitmap(cells.data(), rows, -20, op, false, bits.data());
+    std::vector<size_t> indices;
+    Utils::SIMD::filter_compare_int32(raw.data(), null_mask.data(), rows, -20, op, indices);
+    size_t seen = 0;
+    for (size_t i = 0; i < rows; ++i) {
+      if (!BitAt(bits.data(), i)) continue;
+      ASSERT_LT(seen, indices.size());
+      EXPECT_EQ(indices[seen], i) << "op=" << int(op);
+      ++seen;
+    }
+    EXPECT_EQ(seen, indices.size()) << "op=" << int(op);
+  }
+}
+
+TEST(SimdGatheredFilters, OrderedNaNComparisonsAgreeWithScalarAndSseBackends) {
+  alignas(32) std::array<double, Utils::SIMD::detail::kCmpBlockRows> block{};
+  block[0] = std::numeric_limits<double>::quiet_NaN();
+  const Utils::SIMD::detail::CmpRequest unequal{CompareOp::NE, false, false};
+  const Utils::SIMD::detail::CmpRequest outside{CompareOp::GE, true, true};
+  EXPECT_EQ(0u, Utils::SIMD::detail::cmp_block_scalar<double>(block.data(), 0.0, 1.0, unequal));
+  EXPECT_EQ(0u, Utils::SIMD::detail::cmp_block_scalar<double>(block.data(), 0.0, 1.0, outside));
+#if defined(SHANNON_HAVE_SSE2)
+  EXPECT_EQ(0u, Utils::SIMD::detail::cmp_block_sse_f64(block.data(), 0.0, 1.0, unequal));
+  EXPECT_EQ(0u, Utils::SIMD::detail::cmp_block_sse_f64(block.data(), 0.0, 1.0, outside));
+#endif
+  const std::vector<double> values{std::numeric_limits<double>::quiet_NaN(), -1.0, -0.0, 0.0, 1.0,
+                                   std::numeric_limits<double>::infinity()};
+  const auto decode = [](const unsigned char *cell) {
+    double value;
+    std::memcpy(&value, cell, sizeof(value));
+    return value;
+  };
+  for (size_t rows : {size_t{1}, size_t{3}, size_t{63}, size_t{64}, size_t{65}, size_t{129}}) {
+    std::vector<const unsigned char *> cells(rows);
+    for (size_t row = 0; row < rows; ++row)
+      cells[row] = row % 11 == 10 ? nullptr : reinterpret_cast<const unsigned char *>(&values[row % values.size()]);
+    std::vector<uint8_t> bits((rows + 7) / 8, 0);
+    for (auto bounds : {std::pair{0.0, 1.0}, std::pair{1.0, 0.0},
+                        std::pair{std::numeric_limits<double>::quiet_NaN(), 1.0},
+                        std::pair{0.0, std::numeric_limits<double>::quiet_NaN()}}) {
+      Utils::SIMD::filter_range_double_bitmap(cells.data(), rows, bounds.first, bounds.second, true, decode, bits.data());
+      for (size_t row = 0; row < rows; ++row) {
+        const double value = values[row % values.size()];
+        EXPECT_EQ(cells[row] != nullptr && (value < bounds.first || value > bounds.second), BitAt(bits.data(), row));
+      }
+    }
+    Utils::SIMD::filter_compare_double_bitmap(cells.data(), rows, 0.0, CompareOp::NE, decode, bits.data());
+    for (size_t row = 0; row < rows; ++row) {
+      const double value = values[row % values.size()];
+      EXPECT_EQ(cells[row] != nullptr && !std::isnan(value) && value != 0.0, BitAt(bits.data(), row));
+    }
   }
 }
 

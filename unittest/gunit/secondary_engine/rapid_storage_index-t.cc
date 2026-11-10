@@ -543,12 +543,9 @@ void CheckBatch(Simple_Predicate &predicate, const std::vector<const uchar *> &c
     EXPECT_EQ(predicate.evaluate(cell) == TruthValue::TRUE_VALUE, ShannonBase::Utils::Util::bit_array_get(&result, row))
         << "row=" << row << " predicate=" << predicate.to_string();
   }
-  // The legacy constant-NULL guard clears the entire mask. Other cases,
-  // including storage kernels, must preserve the following bits.
-  if (!predicate.value.is_null()) {
-    for (size_t row = count; row < result.rows; ++row) {
-      EXPECT_TRUE(ShannonBase::Utils::Util::bit_array_get(&result, row));
-    }
+  // Every prefix evaluation, including NULL bounds, preserves following bits.
+  for (size_t row = count; row < result.rows; ++row) {
+    EXPECT_TRUE(ShannonBase::Utils::Util::bit_array_get(&result, row));
   }
 }
 
@@ -714,6 +711,67 @@ TEST(FixedWidthPredicateBatch, DatetimeBinaryOrderAndFractionalFallbackMatchScal
         predicate.field_meta = &field;
         predicate.value2 = PredicateValue(int64{19951001000000});
         CheckBatch(predicate, cells, cells.size());
+      }
+    }
+  }
+}
+
+TEST(SharedPredicateBatch, Int32WideBoundsAndFractionalBoundsDoNotNarrow) {
+  Field_long field(11, true, "i", false);
+  field.set_field_index(0);
+  std::array<uchar, 4> slot{};
+  int4store(slot.data(), 0);
+  const std::vector<const uchar *> cells{slot.data()};
+  for (const auto &bound : {PredicateValue(int64{2147483648LL}), PredicateValue(int64{-2147483649LL}),
+                            PredicateValue(0.5)}) {
+    Simple_Predicate predicate(0, PredicateOperator::LESS_THAN, bound, MYSQL_TYPE_LONG);
+    predicate.field_meta = &field;
+    CheckBatch(predicate, cells, cells.size());
+  }
+}
+
+TEST(SharedPredicateBatch, SignedUnsignedAndNullUpperBoundsMatchScalar) {
+  for (bool is_unsigned : {false, true}) {
+    Field_longlong field(20, true, "b", is_unsigned);
+    field.set_field_index(0);
+    std::array<std::array<uchar, 8>, 5> slots{};
+    const uint64 values[] = {0, 1, 0x7fffffffffffffffULL, 0x8000000000000000ULL, 0xffffffffffffffffULL};
+    std::vector<const uchar *> cells;
+    for (size_t row = 0; row < slots.size(); ++row) {
+      int8store(slots[row].data(), values[row]);
+      cells.push_back(slots[row].data());
+    }
+    cells.push_back(nullptr);
+    PredicateValue wide_unsigned(int64{-1});
+    wide_unsigned.unsigned_int64 = true;
+    for (auto bound : {PredicateValue(int64{-1}), PredicateValue(int64{0}), wide_unsigned}) {
+      for (auto op : {PredicateOperator::LESS_THAN, PredicateOperator::GREATER_THAN, PredicateOperator::EQUAL,
+                      PredicateOperator::BETWEEN, PredicateOperator::NOT_BETWEEN}) {
+        Simple_Predicate predicate(0, op, bound, MYSQL_TYPE_LONGLONG);
+        predicate.field_meta = &field;
+        predicate.value2 = PredicateValue::null_value();
+        CheckBatch(predicate, cells, cells.size());
+      }
+    }
+  }
+}
+TEST(SharedPredicateBatch, ScalarFallbackHonorsEmptyAndPartialPrefixes) {
+  Field_long field(11, true, "i", false);
+  field.set_field_index(0);
+  std::array<uchar, 4> slot{};
+  int4store(slot.data(), 0);
+  const std::vector<const uchar *> cells(9, slot.data());
+  for (size_t count : {0u, 1u, 7u, 8u}) {
+    for (auto bound : {PredicateValue(int64{-2147483649LL}), PredicateValue(0.5), PredicateValue::null_value()}) {
+      Simple_Predicate predicate(0, PredicateOperator::LESS_THAN, bound, MYSQL_TYPE_LONG);
+      predicate.field_meta = &field;
+      ShannonBase::bit_array_t result(cells.size());
+      memset(result.data, 0xff, result.size);
+      predicate.evaluate(cells, count, result);
+      const uchar *cell = slot.data();
+      const bool expected = predicate.evaluate(cell) == ShannonBase::Imcs::TruthValue::TRUE_VALUE;
+      for (size_t row = 0; row < cells.size(); ++row) {
+        EXPECT_EQ(row < count ? expected : true, ShannonBase::Utils::Util::bit_array_get(&result, row));
       }
     }
   }
