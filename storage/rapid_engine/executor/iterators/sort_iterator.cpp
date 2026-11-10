@@ -39,6 +39,7 @@
 #include "sql/field.h"
 #include "sql/filesort.h"
 #include "sql/item.h"
+#include "sql/opt_trace.h"
 #include "sql/sort_param.h"
 #include "sql/sql_class.h"
 #include "sql/table.h"
@@ -77,7 +78,7 @@ bool VectorizedSortIterator::CanVectorize(const Filesort *filesort, bool unwrap_
   // Lets a test run the same query on MySQL's filesort for comparison.
   DBUG_EXECUTE_IF("rapid_disable_vectorized_sort", { return false; });
   if (filesort == nullptr || unwrap_rollup || tables_to_get_rowid_for != 0) return false;
-  if (filesort->m_remove_duplicates || filesort->m_force_sort_rowids) return false;
+  if (filesort->m_force_sort_rowids) return false;
   if (filesort->sort_order_length() == 0 || filesort->tables.empty()) return false;
   for (uint i = 0; i < filesort->sort_order_length(); ++i) {
     const Item *item = filesort->sortorder[i].item;
@@ -89,6 +90,11 @@ bool VectorizedSortIterator::CanVectorize(const Filesort *filesort, bool unwrap_
     const Field *field = down_cast<const Item_field *>(item)->field;
     if (field == nullptr || field->table == nullptr ||
         std::find(filesort->tables.begin(), filesort->tables.end(), field->table) == filesort->tables.end())
+      return false;
+    // Deduplication needs complete equality keys, not a collation prefix or an
+    // IEEE bit pattern (notably +0/-0). Admit only exact fixed-width SQL keys.
+    if (filesort->m_remove_duplicates && !Utils::Util::is_integer(field->type()) && !is_temporal_type(field->type()) &&
+        field->type() != MYSQL_TYPE_NEWDECIMAL)
       return false;
     const size_t width = KeyPartWidth(field);
     if (width == 0 || width > kMaxKeyPartBytes) return false;
@@ -142,6 +148,9 @@ bool VectorizedSortIterator::ResetState() {
   decltype(m_row_storage)(&m_aux_memory).swap(m_row_storage);
   m_next = 0;
   m_emitted = 0;
+  m_have_distinct_key = false;
+  m_radix_runs = m_comparison_runs = 0;
+  decltype(m_distinct_key)(&m_aux_memory).swap(m_distinct_key);
   decltype(m_output_tail)(&m_aux_memory).swap(m_output_tail);
   decltype(m_output_columns)(&m_aux_memory).swap(m_output_columns);
   m_output_tail_start = m_output_tail_count = 0;
@@ -170,6 +179,8 @@ void VectorizedSortIterator::EncodeKey(uchar *to) const {
 }
 
 bool VectorizedSortIterator::CanUseTopN() const {
+  // The first N input rows can contain fewer than N distinct keys.
+  if (m_filesort->m_remove_duplicates) return false;
   if (m_limit == HA_POS_ERROR || m_limit > kMaxTopNRows) return false;
   if (m_limit == 0) return true;
   if (m_tables.has_blob_column()) return false;
@@ -183,7 +194,8 @@ bool VectorizedSortIterator::CanUseTopN() const {
   return static_cast<size_t>(m_limit) <= (m_memory_budget / 2) / slot_upper_bound;
 }
 
-// Sorts the buffered rows' indices by key; ties keep input order.
+// Sorts row indices; comparison sort preserves input order for ties. DISTINCT
+// may choose any representative, allowing an in-place radix partition instead.
 bool VectorizedSortIterator::SortBuffered() {
   const size_t rows = m_payload_offsets.size() - 1;
   const size_t width = m_key_width;
@@ -191,10 +203,32 @@ bool VectorizedSortIterator::SortBuffered() {
   if (!ShannonBase::Utils::Reserve(m_order, rows)) return AllocationError("Rapid sort order buffer allocation failed");
   m_order.resize(rows);
   std::iota(m_order.begin(), m_order.end(), 0u);
-  std::sort(m_order.begin(), m_order.end(), [keys, width](uint32_t a, uint32_t b) {
-    const int c = memcmp(keys + size_t{a} * width, keys + size_t{b} * width, width);
-    return c < 0 || (c == 0 && a < b);
-  });
+  bool radix = m_filesort->m_remove_duplicates && UseRadixForDistinct(rows, width);
+  DBUG_EXECUTE_IF("rapid_sort_compare_distinct", { radix = false; });
+  {
+    // At most 8 KiB, charged to the AP grant and released before spill/merge.
+    // If the grant cannot fit scratch, retain the comparison-sort path.
+    std::pmr::vector<size_t> scratch(&m_aux_memory);
+    radix = radix && Utils::Reserve(scratch, FixedKeySortScratchSize(width));
+    if (radix) {
+      scratch.resize(FixedKeySortScratchSize(width));
+      SortFixedDistinctKeys(m_order.data(), rows, keys, width, scratch.data());
+      ++m_radix_runs;
+    } else {
+      std::sort(m_order.begin(), m_order.end(), [keys, width](uint32_t a, uint32_t b) {
+        const int c = memcmp(keys + size_t{a} * width, keys + size_t{b} * width, width);
+        return c < 0 || (c == 0 && a < b);
+      });
+      ++m_comparison_runs;
+    }
+  }
+  if (m_filesort->m_remove_duplicates) {
+    m_order.erase(std::unique(m_order.begin(), m_order.end(),
+                              [keys, width](uint32_t a, uint32_t b) {
+                                return memcmp(keys + size_t{a} * width, keys + size_t{b} * width, width) == 0;
+                              }),
+                  m_order.end());
+  }
   return false;
 }
 
@@ -1030,27 +1064,58 @@ bool VectorizedSortIterator::InitImpl() {
   if (!ShannonBase::Utils::Reserve(m_row_image, m_row_width))
     return AllocationError("Rapid sort row image allocation failed");
   m_limit = m_filesort->limit;
+  if (m_filesort->m_remove_duplicates) {
+    if (!ShannonBase::Utils::Reserve(m_distinct_key, m_key_width))
+      return AllocationError("Rapid sort distinct key allocation failed");
+    m_distinct_key.resize(m_key_width);
+  }
 
-  if (CanUseTopN()) return SinkTopN();
-  return Sink();
+  const bool top_n = CanUseTopN();
+  const bool failed = top_n ? SinkTopN() : Sink();
+  if (!failed) {
+    Opt_trace_object wrapper(&thd()->opt_trace);
+    Opt_trace_object trace(&thd()->opt_trace, "rapid_vectorized_sort");
+    trace.add("remove_duplicates", m_filesort->m_remove_duplicates)
+        .add("memory_grant_bytes", static_cast<ulonglong>(m_memory_reservation.bytes()))
+        .add("key_bytes", static_cast<ulonglong>(m_key_width))
+        .add("top_n", top_n)
+        .add("radix_runs", static_cast<ulonglong>(m_radix_runs))
+        .add("comparison_runs", static_cast<ulonglong>(m_comparison_runs))
+        .add("spilled", m_spool_run_count != 0);
+  }
+  return failed;
 }
 
 int VectorizedSortIterator::NextPayload(const uchar **row) {
   if (m_emitted >= m_limit) return -1;
-
-  if (!m_runs.empty()) {
-    const int result = ReadMerged(row);
-    if (result == 0) ++m_emitted;
-    return result;
+  for (;;) {
+    if (m_filesort->m_remove_duplicates && thd()->killed) {
+      thd()->send_kill_message();
+      return 1;
+    }
+    const uchar *key;
+    if (!m_runs.empty()) {
+      const int result = ReadMerged(row);
+      if (result != 0) return result;
+      key = m_runs[m_last_run].key.data();
+    } else {
+      if (m_next >= m_order.size()) return -1;
+      const uint32_t index = m_order[m_next++];
+      key = m_keys.data() + size_t{index} * m_key_width;
+      *row = m_topn_payload.empty() ? m_payload.data() + m_payload_offsets[index]
+                                    : pointer_cast<const uchar *>(m_topn_payload[index].data());
+    }
+    // Per-run compaction alone misses duplicates in different spill runs.
+    // Keep the previous emitted key across Read/ReadBatch calls and count LIMIT
+    // only after deduplication. ReadMerged retains this row until the next call.
+    if (m_filesort->m_remove_duplicates) {
+      if (m_have_distinct_key && memcmp(key, m_distinct_key.data(), m_key_width) == 0) continue;
+      memcpy(m_distinct_key.data(), key, m_key_width);
+      m_have_distinct_key = true;
+    }
+    ++m_emitted;
+    return 0;
   }
-
-  if (m_next >= m_order.size()) return -1;
-
-  const uint32_t index = m_order[m_next++];
-  *row = m_topn_payload.empty() ? m_payload.data() + m_payload_offsets[index]
-                                : pointer_cast<const uchar *>(m_topn_payload[index].data());
-  ++m_emitted;
-  return 0;
 }
 
 bool VectorizedSortIterator::LoadTailRow() {

@@ -1,0 +1,4 @@
+# Q14 range, date boundaries, NULLs, zero and incomplete dates.
+# Numeric gaps/fractions, NULL bounds and IN keep generic comparison semantics.
+# Narrow signed/unsigned integers, YEAR and DATETIME(0) use native batch comparisons.
+# Updated DATE cells still pass through snapshot/version selection.

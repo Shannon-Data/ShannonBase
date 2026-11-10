@@ -62,7 +62,7 @@ std::shared_ptr<const std::vector<uint8_t>> Simple_Predicate::dictionary_mask(
   if (!dictionary || value.is_null()) return {};
   // Keep the kernel's own admission no wider than the production callers'
   // safety checks. String range comparisons remain on the scalar Item path.
-  switch (op) {
+  switch (m_oper) {
     case PredicateOperator::EQUAL:
     case PredicateOperator::NOT_EQUAL:
       if (m_like_oper || value.type != PredicateValueType::STRING || !field_meta.load(std::memory_order_acquire))
@@ -238,9 +238,9 @@ static inline uint8_t neon_mask2_from_f64x2(uint64x2_t m) { return neon_mask2_fr
 #endif  // SHANNON_ARM_VECT_SUPPORTED
 
 void Simple_Predicate::init_regex_if_needed() const {
-  if (op == PredicateOperator::REGEXP || op == PredicateOperator::NOT_REGEXP) {
+  if (m_oper == PredicateOperator::REGEXP || m_oper == PredicateOperator::NOT_REGEXP) {
     get_regex();  // Force compilation
-  } else if (op == PredicateOperator::LIKE || op == PredicateOperator::NOT_LIKE) {
+  } else if (m_oper == PredicateOperator::LIKE || m_oper == PredicateOperator::NOT_LIKE) {
     get_like_regex();                    // Force compilation
     analyze_pattern(value.as_string());  // Analyze for fast path
   }
@@ -399,10 +399,202 @@ bool Simple_Predicate::evaluate_regexp(const std::string &str, const std::string
   return std::regex_search(str, re);
 }
 
+template <class Read, class Pack>
+bool Simple_Predicate::EvaluateOrderedBatch(const std::vector<const uchar *> &cells, size_t rows, bit_array_t &result,
+                                            Read read, Pack pack) const {
+  if (rows > cells.size() || rows > result.rows || !result.data || result.size < rows / 8 + (rows % 8 != 0))
+    return false;
+
+  // Specialize the comparison outside the row loop. Write one mask byte at a
+  // time, preserving bits outside the caller's requested prefix.
+  const auto evaluate = [&](auto matches) {
+    for (size_t first = 0; first < rows; first += 8) {
+      const size_t count = std::min<size_t>(8, rows - first);
+      uint8_t mask = 0;
+      for (size_t lane = 0; lane < count; ++lane)
+        if (matches(cells[first + lane])) mask |= static_cast<uint8_t>(1u << lane);
+      const auto valid = static_cast<uint8_t>((1u << count) - 1);
+      auto &byte = result.data[first / 8];
+      byte = static_cast<uint8_t>((byte & ~valid) | mask);
+    }
+  };
+  if (m_oper == PredicateOperator::IS_NULL) {
+    evaluate([](const uchar *cell) { return cell == nullptr; });
+    return true;
+  }
+  if (m_oper == PredicateOperator::IS_NOT_NULL) {
+    evaluate([](const uchar *cell) { return cell != nullptr; });
+    return true;
+  }
+
+  int64_t lower = 0, upper = 0;
+  if (!pack(value, lower)) return false;
+  if ((m_oper == PredicateOperator::BETWEEN || m_oper == PredicateOperator::NOT_BETWEEN) && !pack(value2, upper)) return false;
+  switch (m_oper) {
+    case PredicateOperator::EQUAL:
+      evaluate([=](const uchar *cell) { return cell && read(cell) == lower; });
+      break;
+    case PredicateOperator::NOT_EQUAL:
+      evaluate([=](const uchar *cell) { return cell && read(cell) != lower; });
+      break;
+    case PredicateOperator::LESS_THAN:
+      evaluate([=](const uchar *cell) { return cell && read(cell) < lower; });
+      break;
+    case PredicateOperator::LESS_EQUAL:
+      evaluate([=](const uchar *cell) { return cell && read(cell) <= lower; });
+      break;
+    case PredicateOperator::GREATER_THAN:
+      evaluate([=](const uchar *cell) { return cell && read(cell) > lower; });
+      break;
+    case PredicateOperator::GREATER_EQUAL:
+      evaluate([=](const uchar *cell) { return cell && read(cell) >= lower; });
+      break;
+    case PredicateOperator::BETWEEN:
+      evaluate([=](const uchar *cell) {
+        if (!cell) return false;
+        const auto date = read(cell);
+        return date >= lower && date <= upper;
+      });
+      break;
+    case PredicateOperator::NOT_BETWEEN:
+      evaluate([=](const uchar *cell) {
+        if (!cell) return false;
+        const auto date = read(cell);
+        return date < lower || date > upper;
+      });
+      break;
+    default:
+      return false;
+  }
+  return true;
+}
+
+bool Simple_Predicate::IntegerBound(const PredicateValue &value, int64_t &bound) {
+  if (value.type != PredicateValueType::INT64 || value.unsigned_int64) return false;
+  bound = value.int_value;
+  return true;
+}
+
+bool Simple_Predicate::PackDateBound(const PredicateValue &value, int64_t &packed) {
+  if (value.type != PredicateValueType::INT64 || value.unsigned_int64 || value.int_value < 0 ||
+      value.int_value > 99991231)
+    return false;
+  const auto date = static_cast<uint32_t>(value.int_value);
+  const uint32_t day = date % 100;
+  const uint32_t month = (date / 100) % 100;
+  const uint32_t year = date / 10000;
+  // A numeric bound in a gap (e.g. 19950899) cannot be packed losslessly.
+  // Keep the generic comparator for it rather than rounding the boundary.
+  if (month > 12 || day > 31) return false;
+  packed = (year << 9) | (month << 5) | day;
+  return true;
+}
+
+bool Simple_Predicate::PackYearBound(const PredicateValue &value, int64_t &packed) {
+  if (!IntegerBound(value, packed)) return false;
+  if (packed == 0) return true;
+  if (packed < 1901 || packed > 2155) return false;
+  packed -= 1900;
+  return true;
+}
+
+int64_t Simple_Predicate::ReadDatetime0(const uchar *cell) {
+  // DATETIME2 is order-preserving big-endian, unlike the little-endian DATE.
+  return (static_cast<int64_t>(cell[0]) << 32) | (static_cast<int64_t>(cell[1]) << 24) |
+         (static_cast<int64_t>(cell[2]) << 16) | (static_cast<int64_t>(cell[3]) << 8) | cell[4];
+}
+
+bool Simple_Predicate::PackDatetime0Bound(const PredicateValue &value, int64_t &packed) {
+  int64_t number{0};
+  if (!IntegerBound(value, number) || number < 0 || number > 99991231235959LL) return false;
+
+  const auto date = number / 1000000;
+  const auto clock = number % 1000000;
+  
+  MYSQL_TIME time{};
+  time.year = static_cast<uint>(date / 10000);
+  time.month = static_cast<uint>((date / 100) % 100);
+  time.day = static_cast<uint>(date % 100);
+  time.hour = static_cast<uint>(clock / 10000);
+  time.minute = static_cast<uint>((clock / 100) % 100);
+  time.second = static_cast<uint>(clock % 100);
+  time.time_type = MYSQL_TIMESTAMP_DATETIME;
+  
+  if (time.month > 12 || time.day > 31 || time.hour > 23 || time.minute > 59 || time.second > 59) return false;
+  
+  uchar bytes[5]={0};
+  my_datetime_packed_to_binary(TIME_to_longlong_datetime_packed(time), bytes, 0);
+  packed = ReadDatetime0(bytes);
+  return true;
+}
+
+template <bool Unsigned, bool LowByteFirst>
+int64_t Simple_Predicate::ReadShort(const uchar *cell) {
+  if constexpr (Unsigned)
+    return LowByteFirst ? uint2korr(cell) : static_cast<uint16_t>(shortget(cell));
+  else
+    return LowByteFirst ? sint2korr(cell) : shortget(cell);
+}
+
+bool Simple_Predicate::EvaluateStorageBatch(enum_field_types type, const std::vector<const uchar *> &cells, size_t rows,
+                                            bit_array_t &result) const {
+  // Existing INT/BIGINT/float/DECIMAL kernels and all other layouts are left to
+  // their current dispatch. In particular, dictionary IDs are not sort keys.
+  if (!Utils::Util::is_datetime(type) && !Utils::Util::is_integer(type)) return false;
+
+  const Field *field = field_meta.load(std::memory_order_acquire);
+  if (!field) return false;
+
+  const size_t width = field->pack_length();
+  const bool unsigned_column = field->is_flag_set(UNSIGNED_FLAG);
+  const auto evaluate_integer = [&](auto read) {
+    return EvaluateOrderedBatch(cells, rows, result, read, IntegerBound);
+  };
+
+  switch (type) {
+    case MYSQL_TYPE_DATE:
+    case MYSQL_TYPE_NEWDATE:
+      return field->real_type() == MYSQL_TYPE_NEWDATE && width == 3 &&
+             EvaluateOrderedBatch(
+                 cells, rows, result, [](const uchar *cell) -> int64_t { return uint3korr(cell); }, PackDateBound);
+    case MYSQL_TYPE_DATETIME:
+      // The scalar representation truncates fractional seconds. Comparing the
+      // full fractional binary image would change its semantics, so admit fsp=0 only.
+      return field->real_type() == MYSQL_TYPE_DATETIME2 && width == 5 && field->decimals() == 0 &&
+             EvaluateOrderedBatch(
+                 cells, rows, result, [](const uchar *cell) { return ReadDatetime0(cell); }, PackDatetime0Bound);
+    case MYSQL_TYPE_YEAR:
+      return width == 1 &&
+             EvaluateOrderedBatch(
+                 cells, rows, result, [](const uchar *cell) -> int64_t { return cell[0]; }, PackYearBound);
+    case MYSQL_TYPE_TINY:
+      if (width != 1) return false;
+      if (unsigned_column) return evaluate_integer([](const uchar *cell) -> int64_t { return cell[0]; });
+      return evaluate_integer(
+          [](const uchar *cell) -> int64_t { return reinterpret_cast<const signed char *>(cell)[0]; });
+    case MYSQL_TYPE_SHORT:
+      if (width != 2) return false;
+      if (low_order.load(std::memory_order_acquire)) {
+        if (unsigned_column) return evaluate_integer([](const uchar *cell) { return ReadShort<true, true>(cell); });
+        return evaluate_integer([](const uchar *cell) { return ReadShort<false, true>(cell); });
+      }
+      if (unsigned_column) return evaluate_integer([](const uchar *cell) { return ReadShort<true, false>(cell); });
+      return evaluate_integer([](const uchar *cell) { return ReadShort<false, false>(cell); });
+    case MYSQL_TYPE_INT24:
+      if (width != 3) return false;
+      if (unsigned_column) return evaluate_integer([](const uchar *cell) -> int64_t { return uint3korr(cell); });
+      return evaluate_integer([](const uchar *cell) -> int64_t { return sint3korr(cell); });
+    default:
+      return false;
+  }
+}
+
 void Simple_Predicate::evaluate(const std::vector<const uchar *> &col_data, size_t num_rows, bit_array_t &result) {
   if (col_data.empty()) return;
-  auto simd_eligible [[maybe_unused]] = [](PredicateOperator o) -> bool {
-    switch (o) {
+  const auto type = column_type.load(std::memory_order_acquire);
+  if (EvaluateStorageBatch(type, col_data, num_rows, result)) return;
+  auto simd_eligible [[maybe_unused]] = [](PredicateOperator oper) -> bool {
+    switch (oper) {
       case PredicateOperator::EQUAL:
       case PredicateOperator::NOT_EQUAL:
       case PredicateOperator::LESS_THAN:
@@ -419,18 +611,18 @@ void Simple_Predicate::evaluate(const std::vector<const uchar *> &col_data, size
     }
   };
 #if defined(SHANNON_VECTORIZE_SUPPORT)
-  if (simd_eligible(op)) {
+  if (simd_eligible(m_oper)) {
     // A NULL bound must never reach the vectorized kernels: they take the
     // comparison constant through as_int()/as_double(), where NULL reads as 0 and
     // would match the rows where the column is zero. IS NULL / IS NOT NULL carry
     // no bound, so they are the only operators that may proceed. The optimizer
     // also declines to push these, and both guards are wanted: this one holds for
     // any caller, that one saves the work entirely.
-    if (value.is_null() && op != PredicateOperator::IS_NULL && op != PredicateOperator::IS_NOT_NULL) {
+    if (value.is_null() && m_oper != PredicateOperator::IS_NULL && m_oper != PredicateOperator::IS_NOT_NULL) {
       result.reset();
       return;
     }
-    switch (column_type.load(std::memory_order_acquire)) {
+    switch (type) {
       case MYSQL_TYPE_LONG:
         evaluate_int32_vectorized(col_data, num_rows, result);
         return;
@@ -487,7 +679,7 @@ void Simple_Predicate::evaluate_int32_vectorized(const std::vector<const uchar *
 
     __m256i vdata = _mm256_xor_si256(_mm256_setr_epi32(v0, v1, v2, v3, v4, v5, v6, v7), sign_flip_vec);
     __m256i mask;
-    switch (op) {
+    switch (m_oper) {
       case PredicateOperator::EQUAL:
         mask = _mm256_cmpeq_epi32(vdata, target_vec);
         break;
@@ -540,9 +732,9 @@ void Simple_Predicate::evaluate_int32_vectorized(const std::vector<const uchar *
 
     for (size_t j = 0; j < simd_width; ++j) {
       bool set;
-      if (op == PredicateOperator::IS_NULL)
+      if (m_oper == PredicateOperator::IS_NULL)
         set = (null_mask >> j) & 1u;
-      else if (op == PredicateOperator::IS_NOT_NULL)
+      else if (m_oper == PredicateOperator::IS_NOT_NULL)
         set = !((null_mask >> j) & 1u);
       else
         set = ((lane_mask >> j) & 1u) && !((null_mask >> j) & 1u);
@@ -574,7 +766,7 @@ void Simple_Predicate::evaluate_int32_vectorized(const std::vector<const uchar *
 
     __m128i vdata = _mm_xor_si128(_mm_load_si128(reinterpret_cast<const __m128i *>(vals)), sign_flip_vec);
     __m128i mask;
-    switch (op) {
+    switch (m_oper) {
       case PredicateOperator::EQUAL:
         mask = _mm_cmpeq_epi32(vdata, target_vec);
         break;
@@ -625,9 +817,9 @@ void Simple_Predicate::evaluate_int32_vectorized(const std::vector<const uchar *
 
     for (size_t j = 0; j < simd_width; ++j) {
       bool set{false};
-      if (op == PredicateOperator::IS_NULL)
+      if (m_oper == PredicateOperator::IS_NULL)
         set = (null_mask >> j) & 1u;
-      else if (op == PredicateOperator::IS_NOT_NULL)
+      else if (m_oper == PredicateOperator::IS_NOT_NULL)
         set = !((null_mask >> j) & 1u);
       else
         set = ((lane_mask >> j) & 1u) && !((null_mask >> j) & 1u);
@@ -659,7 +851,7 @@ void Simple_Predicate::evaluate_int32_vectorized(const std::vector<const uchar *
 
     int32x4_t vdata = veorq_s32(vld1q_s32(vals), sign_flip_vec);
     uint32x4_t mask;
-    switch (op) {
+    switch (m_oper) {
       case PredicateOperator::EQUAL:
         mask = vceqq_s32(vdata, target_vec);
         break;
@@ -703,9 +895,9 @@ void Simple_Predicate::evaluate_int32_vectorized(const std::vector<const uchar *
 
     for (size_t j = 0; j < simd_width; ++j) {
       bool set{false};
-      if (op == PredicateOperator::IS_NULL)
+      if (m_oper == PredicateOperator::IS_NULL)
         set = (null_mask >> j) & 1u;
-      else if (op == PredicateOperator::IS_NOT_NULL)
+      else if (m_oper == PredicateOperator::IS_NOT_NULL)
         set = !((null_mask >> j) & 1u);
       else
         set = ((lane_mask >> j) & 1u) && !((null_mask >> j) & 1u);
@@ -754,7 +946,7 @@ void Simple_Predicate::evaluate_int64_vectorized(const std::vector<const uchar *
 
     __m256i vdata = _mm256_xor_si256(_mm256_load_si256(reinterpret_cast<const __m256i *>(vals)), sign_flip_vec);
     __m256i mask;
-    switch (op) {
+    switch (m_oper) {
       case PredicateOperator::EQUAL:
         mask = _mm256_cmpeq_epi64(vdata, target_vec);
         break;
@@ -806,9 +998,9 @@ void Simple_Predicate::evaluate_int64_vectorized(const std::vector<const uchar *
 
     for (size_t j = 0; j < simd_width; ++j) {
       bool set{false};
-      if (op == PredicateOperator::IS_NULL)
+      if (m_oper == PredicateOperator::IS_NULL)
         set = (null_mask >> j) & 1u;
-      else if (op == PredicateOperator::IS_NOT_NULL)
+      else if (m_oper == PredicateOperator::IS_NOT_NULL)
         set = !((null_mask >> j) & 1u);
       else
         set = ((lane_mask >> j) & 1u) && !((null_mask >> j) & 1u);
@@ -840,7 +1032,7 @@ void Simple_Predicate::evaluate_int64_vectorized(const std::vector<const uchar *
 
     __m128i vdata = _mm_xor_si128(_mm_load_si128(reinterpret_cast<const __m128i *>(vals)), sign_flip_vec);
     __m128i mask;
-    switch (op) {
+    switch (m_oper) {
       case PredicateOperator::EQUAL:
         mask = _mm_cmpeq_epi64(vdata, target_vec);  // SSE4.1
         break;
@@ -891,9 +1083,9 @@ void Simple_Predicate::evaluate_int64_vectorized(const std::vector<const uchar *
 
     for (size_t j = 0; j < simd_width; ++j) {
       bool set{false};
-      if (op == PredicateOperator::IS_NULL)
+      if (m_oper == PredicateOperator::IS_NULL)
         set = (null_mask >> j) & 1u;
-      else if (op == PredicateOperator::IS_NOT_NULL)
+      else if (m_oper == PredicateOperator::IS_NOT_NULL)
         set = !((null_mask >> j) & 1u);
       else
         set = ((lane_mask >> j) & 1u) && !((null_mask >> j) & 1u);
@@ -926,7 +1118,7 @@ void Simple_Predicate::evaluate_int64_vectorized(const std::vector<const uchar *
 
     int64x2_t vdata = veorq_s64(vld1q_s64(vals), sign_flip_vec);
     uint64x2_t mask;
-    switch (op) {
+    switch (m_oper) {
       case PredicateOperator::EQUAL:
         mask = vceqq_s64(vdata, target_vec);
         break;
@@ -970,9 +1162,9 @@ void Simple_Predicate::evaluate_int64_vectorized(const std::vector<const uchar *
 
     for (size_t j = 0; j < simd_width; ++j) {
       bool set{false};
-      if (op == PredicateOperator::IS_NULL)
+      if (m_oper == PredicateOperator::IS_NULL)
         set = (null_mask >> j) & 1u;
-      else if (op == PredicateOperator::IS_NOT_NULL)
+      else if (m_oper == PredicateOperator::IS_NOT_NULL)
         set = !((null_mask >> j) & 1u);
       else
         set = ((lane_mask >> j) & 1u) && !((null_mask >> j) & 1u);
@@ -986,9 +1178,9 @@ void Simple_Predicate::evaluate_int64_vectorized(const std::vector<const uchar *
   // scalar remainder below cover every row: the old `default: mask =
   // vdupq_n_u64(0)` wrote all-false lanes and never revisited those rows, so
   // `<, <=, >, >=` on a BIGINT silently matched nothing on ARMv7 NEON.
-  const bool simd_op_supported = op == PredicateOperator::EQUAL || op == PredicateOperator::NOT_EQUAL ||
-                                 op == PredicateOperator::BETWEEN || op == PredicateOperator::NOT_BETWEEN ||
-                                 op == PredicateOperator::IS_NULL || op == PredicateOperator::IS_NOT_NULL;
+  const bool simd_op_supported = m_oper == PredicateOperator::EQUAL || m_oper == PredicateOperator::NOT_EQUAL ||
+                                 m_oper == PredicateOperator::BETWEEN || m_oper == PredicateOperator::NOT_BETWEEN ||
+                                 m_oper == PredicateOperator::IS_NULL || m_oper == PredicateOperator::IS_NOT_NULL;
   for (; simd_op_supported && i + simd_width <= num_rows; i += simd_width) {
     SHANNON_SIMD_ALIGNAS int64_t vals[simd_width];
     for (size_t j = 0; j < simd_width; ++j)
@@ -996,7 +1188,7 @@ void Simple_Predicate::evaluate_int64_vectorized(const std::vector<const uchar *
 
     int64x2_t vdata = veorq_s64(vld1q_s64(vals), sign_flip_vec);
     uint64x2_t mask;
-    switch (op) {
+    switch (m_oper) {
       case PredicateOperator::EQUAL:
         mask = vceqq_s64(vdata, target_vec);
         break;
@@ -1027,9 +1219,9 @@ void Simple_Predicate::evaluate_int64_vectorized(const std::vector<const uchar *
 
     for (size_t j = 0; j < 2; ++j) {
       bool set{false};
-      if (op == PredicateOperator::IS_NULL)
+      if (m_oper == PredicateOperator::IS_NULL)
         set = (null_mask >> j) & 1u;
-      else if (op == PredicateOperator::IS_NOT_NULL)
+      else if (m_oper == PredicateOperator::IS_NOT_NULL)
         set = !((null_mask >> j) & 1u);
       else
         set = ((lane_mask >> j) & 1u) && !((null_mask >> j) & 1u);
@@ -1050,9 +1242,10 @@ void Simple_Predicate::evaluate_int64_vectorized(const std::vector<const uchar *
 
 void Simple_Predicate::evaluate_double_vectorized(const std::vector<const uchar *> &col_data, size_t num_rows,
                                                   bit_array_t &result) {
+  const bool float_column = column_type.load(std::memory_order_acquire) == MYSQL_TYPE_FLOAT;
   auto load_fp [[maybe_unused]] = [&](const uchar *p) -> double {
     if (!p) return std::numeric_limits<double>::quiet_NaN();
-    if (column_type.load(std::memory_order_acquire) == MYSQL_TYPE_FLOAT) {
+    if (float_column) {
       float f;
       memcpy(&f, p, 4);
       return static_cast<double>(f);
@@ -1075,7 +1268,7 @@ void Simple_Predicate::evaluate_double_vectorized(const std::vector<const uchar 
 
     __m256d vdata = _mm256_load_pd(vals);
     __m256d mask;
-    switch (op) {
+    switch (m_oper) {
       case PredicateOperator::EQUAL:
         mask = _mm256_cmp_pd(vdata, target_vec, _CMP_EQ_OQ);
         break;
@@ -1119,9 +1312,9 @@ void Simple_Predicate::evaluate_double_vectorized(const std::vector<const uchar 
 
     for (size_t j = 0; j < simd_width; ++j) {
       bool set{false};
-      if (op == PredicateOperator::IS_NULL)
+      if (m_oper == PredicateOperator::IS_NULL)
         set = (null_mask >> j) & 1u;
-      else if (op == PredicateOperator::IS_NOT_NULL)
+      else if (m_oper == PredicateOperator::IS_NOT_NULL)
         set = !((null_mask >> j) & 1u);
       else
         set = ((lane_mask >> j) & 1u) && !((null_mask >> j) & 1u);
@@ -1149,7 +1342,7 @@ void Simple_Predicate::evaluate_double_vectorized(const std::vector<const uchar 
 
     __m128d vdata = _mm_load_pd(vals);
     __m128d mask;
-    switch (op) {
+    switch (m_oper) {
       case PredicateOperator::EQUAL:
         mask = _mm_cmpeq_pd(vdata, target_vec);
         break;
@@ -1191,9 +1384,9 @@ void Simple_Predicate::evaluate_double_vectorized(const std::vector<const uchar 
 
     for (size_t j = 0; j < simd_width; ++j) {
       bool set{false};
-      if (op == PredicateOperator::IS_NULL)
+      if (m_oper == PredicateOperator::IS_NULL)
         set = (null_mask >> j) & 1u;
-      else if (op == PredicateOperator::IS_NOT_NULL)
+      else if (m_oper == PredicateOperator::IS_NOT_NULL)
         set = !((null_mask >> j) & 1u);
       else
         set = ((lane_mask >> j) & 1u) && !((null_mask >> j) & 1u);
@@ -1223,7 +1416,7 @@ void Simple_Predicate::evaluate_double_vectorized(const std::vector<const uchar 
 
     float64x2_t vdata = vld1q_f64(vals);
     uint64x2_t mask;
-    switch (op) {
+    switch (m_oper) {
       case PredicateOperator::EQUAL:
         mask = vceqq_f64(vdata, target_vec);
         break;
@@ -1267,9 +1460,9 @@ void Simple_Predicate::evaluate_double_vectorized(const std::vector<const uchar 
 
     for (size_t j = 0; j < simd_width; ++j) {
       bool set{false};
-      if (op == PredicateOperator::IS_NULL)
+      if (m_oper == PredicateOperator::IS_NULL)
         set = (null_mask >> j) & 1u;
-      else if (op == PredicateOperator::IS_NOT_NULL)
+      else if (m_oper == PredicateOperator::IS_NOT_NULL)
         set = !((null_mask >> j) & 1u);
       else
         set = ((lane_mask >> j) & 1u) && !((null_mask >> j) & 1u);
@@ -1382,7 +1575,7 @@ size_t Simple_Predicate::packed_decimal_bounds(const Field *field) const {
     const int bin_size = my_decimal_get_binary_size(static_cast<uint>(precision), static_cast<uint>(scale));
     if (bin_size <= 0 || static_cast<size_t>(bin_size) > kMaxDecimalBinarySize) return;
     if (!PackDecimalBound(value, precision, scale, m_packed_lower_bound)) return;
-    const bool two_bounds = (op == PredicateOperator::BETWEEN || op == PredicateOperator::NOT_BETWEEN);
+    const bool two_bounds = (m_oper == PredicateOperator::BETWEEN || m_oper == PredicateOperator::NOT_BETWEEN);
     if (two_bounds && !PackDecimalBound(value2, precision, scale, m_packed_upper_bound)) return;
     m_packed_bin_size = static_cast<size_t>(bin_size);
   });
@@ -1392,20 +1585,20 @@ size_t Simple_Predicate::packed_decimal_bounds(const Field *field) const {
 void Simple_Predicate::evaluate_decimal_packed(const std::vector<const uchar *> &col_data, size_t num_rows,
                                                bit_array_t &result) {
   const size_t bin_size = m_packed_bin_size;
-  const bool has_bounds = (op == PredicateOperator::BETWEEN || op == PredicateOperator::NOT_BETWEEN);
+  const bool has_bounds = (m_oper == PredicateOperator::BETWEEN || m_oper == PredicateOperator::NOT_BETWEEN);
   for (size_t i = 0; i < num_rows; ++i) {
     const uchar *cell = col_data[i];
     bool row_matches{false};
     if (cell == nullptr) {
-      row_matches = (op == PredicateOperator::IS_NULL);
+      row_matches = (m_oper == PredicateOperator::IS_NULL);
     } else if (has_bounds) {
       const int lower_order = memcmp(cell, m_packed_lower_bound, bin_size);
       const int upper_order = memcmp(cell, m_packed_upper_bound, bin_size);
-      row_matches = InsideBounds(op, lower_order, upper_order);
-    } else if (op == PredicateOperator::IS_NOT_NULL) {
+      row_matches = InsideBounds(m_oper, lower_order, upper_order);
+    } else if (m_oper == PredicateOperator::IS_NOT_NULL) {
       row_matches = true;
     } else {
-      row_matches = OrderingMatches(op, memcmp(cell, m_packed_lower_bound, bin_size));
+      row_matches = OrderingMatches(m_oper, memcmp(cell, m_packed_lower_bound, bin_size));
     }
     if (row_matches) {
       Utils::Util::bit_array_set(&result, i);
@@ -1434,7 +1627,7 @@ void Simple_Predicate::evaluate_decimal_vectorized(const std::vector<const uchar
     }
   };
 
-  if (!is_simd_comparable(op)) {
+  if (!is_simd_comparable(m_oper)) {
     evaluate(col_data, result, num_rows);
     return;
   }
@@ -1469,7 +1662,7 @@ void Simple_Predicate::evaluate_decimal_vectorized(const std::vector<const uchar
 
       __m256d vdata = _mm256_load_pd(decoded);
       __m256d mask;
-      switch (op) {
+      switch (m_oper) {
         case PredicateOperator::EQUAL:
           mask = _mm256_cmp_pd(vdata, target_vec, _CMP_EQ_OQ);
           break;
@@ -1511,9 +1704,9 @@ void Simple_Predicate::evaluate_decimal_vectorized(const std::vector<const uchar
 
       for (size_t j = 0; j < simd_width; ++j) {
         bool set{false};
-        if (op == PredicateOperator::IS_NULL)
+        if (m_oper == PredicateOperator::IS_NULL)
           set = (null_mask >> j) & 1u;
-        else if (op == PredicateOperator::IS_NOT_NULL)
+        else if (m_oper == PredicateOperator::IS_NOT_NULL)
           set = !((null_mask >> j) & 1u);
         else
           set = ((lane_mask >> j) & 1u) && !((null_mask >> j) & 1u);
@@ -1543,7 +1736,7 @@ void Simple_Predicate::evaluate_decimal_vectorized(const std::vector<const uchar
 
       __m128d vdata = _mm_load_pd(decoded);
       __m128d mask;
-      switch (op) {
+      switch (m_oper) {
         case PredicateOperator::EQUAL:
           mask = _mm_cmpeq_pd(vdata, target_vec);
           break;
@@ -1585,9 +1778,9 @@ void Simple_Predicate::evaluate_decimal_vectorized(const std::vector<const uchar
 
       for (size_t j = 0; j < simd_width; ++j) {
         bool set{false};
-        if (op == PredicateOperator::IS_NULL)
+        if (m_oper == PredicateOperator::IS_NULL)
           set = (null_mask >> j) & 1u;
-        else if (op == PredicateOperator::IS_NOT_NULL)
+        else if (m_oper == PredicateOperator::IS_NOT_NULL)
           set = !((null_mask >> j) & 1u);
         else
           set = ((lane_mask >> j) & 1u) && !((null_mask >> j) & 1u);
@@ -1618,7 +1811,7 @@ void Simple_Predicate::evaluate_decimal_vectorized(const std::vector<const uchar
 
       float64x2_t vdata = vld1q_f64(decoded);
       uint64x2_t mask;
-      switch (op) {
+      switch (m_oper) {
         case PredicateOperator::EQUAL:
           mask = vceqq_f64(vdata, target_vec);
           break;
@@ -1660,9 +1853,9 @@ void Simple_Predicate::evaluate_decimal_vectorized(const std::vector<const uchar
 
       for (size_t j = 0; j < simd_width; ++j) {
         bool set{false};
-        if (op == PredicateOperator::IS_NULL)
+        if (m_oper == PredicateOperator::IS_NULL)
           set = (null_mask >> j) & 1u;
-        else if (op == PredicateOperator::IS_NOT_NULL)
+        else if (m_oper == PredicateOperator::IS_NOT_NULL)
           set = !((null_mask >> j) & 1u);
         else
           set = ((lane_mask >> j) & 1u) && !((null_mask >> j) & 1u);
@@ -1712,7 +1905,7 @@ TruthValue Simple_Predicate::evaluate(const uchar *input_value, size_t input_len
 TruthValue Simple_Predicate::evaluate_impl(const uchar *input_value, size_t input_length, bool has_input_length) const {
   // Handle NULL
   if (!input_value) {
-    switch (op) {
+    switch (m_oper) {
       case PredicateOperator::IS_NULL:
         return TruthValue::TRUE_VALUE;
       case PredicateOperator::IS_NOT_NULL:
@@ -1722,7 +1915,7 @@ TruthValue Simple_Predicate::evaluate_impl(const uchar *input_value, size_t inpu
     }
   }
   if (value.is_null()) {
-    switch (op) {
+    switch (m_oper) {
       case PredicateOperator::IS_NULL:
       case PredicateOperator::IS_NOT_NULL:
         break;  // these are handled normally below
@@ -1734,7 +1927,7 @@ TruthValue Simple_Predicate::evaluate_impl(const uchar *input_value, size_t inpu
   if (m_like_oper && has_input_length) {
     const std::string_view text(reinterpret_cast<const char *>(input_value), input_length);
     const bool matched = m_like_oper->matches(text, value.string_value);
-    return matched != (op == PredicateOperator::NOT_LIKE) ? TruthValue::TRUE_VALUE : TruthValue::FALSE_VALUE;
+    return matched != (m_oper == PredicateOperator::NOT_LIKE) ? TruthValue::TRUE_VALUE : TruthValue::FALSE_VALUE;
   }
 
   // Extract column value
@@ -1742,7 +1935,7 @@ TruthValue Simple_Predicate::evaluate_impl(const uchar *input_value, size_t inpu
       extract_value(input_value, low_order.load(std::memory_order_acquire), input_length, has_input_length);
   // Evaluate based on operator. String comparisons must use the same MySQL
   // collation as the ART key codec and the primary engine comparator.
-  switch (op) {
+  switch (m_oper) {
     case PredicateOperator::EQUAL:
       return col_value == value ? TruthValue::TRUE_VALUE : TruthValue::FALSE_VALUE;
     case PredicateOperator::NOT_EQUAL:
@@ -1816,7 +2009,7 @@ bool same_operand(const PredicateValue &lhs, const PredicateValue &rhs) {
 }  // namespace
 
 bool Simple_Predicate::equals(const Predicate &other) const {
-  if (other.is_compound() || other.op != op) return false;
+  if (other.is_compound() || other.m_oper != m_oper) return false;
 
   const auto &rhs = static_cast<const Simple_Predicate &>(other);
   if (column_id != rhs.column_id) return false;
@@ -1842,7 +2035,7 @@ std::string Simple_Predicate::to_string() const {
     oss << "col_" << column_id << " ";
   }
 
-  switch (op) {
+  switch (m_oper) {
     case PredicateOperator::EQUAL:
       oss << "= ";
       break;
@@ -1898,7 +2091,7 @@ std::optional<std::pair<int64_t, int64_t>> Simple_Predicate::integer_range(int64
   };
 
   int64_t low = 0, high = 0, bound = 0;
-  switch (op) {
+  switch (m_oper) {
     case PredicateOperator::EQUAL:
       if (!as_int(value, bound)) return std::nullopt;
       low = high = bound;
@@ -1946,7 +2139,7 @@ std::optional<std::pair<int64_t, int64_t>> Simple_Predicate::integer_range(int64
 double Simple_Predicate::estimate_selectivity(const StorageIndex *storage_index) const {
   if (!storage_index) {
     // No statistics, use empirical defaults
-    switch (op) {
+    switch (m_oper) {
       case PredicateOperator::EQUAL:
         return 0.1;  // 10%
       case PredicateOperator::NOT_EQUAL:
@@ -1992,7 +2185,7 @@ double Simple_Predicate::estimate_selectivity(const StorageIndex *storage_index)
   double pred_value = 0.0;
   double range = max_val - min_val;
 
-  switch (op) {
+  switch (m_oper) {
     case PredicateOperator::EQUAL: {
       pred_value = value.as_double();
 
@@ -2122,12 +2315,12 @@ double Simple_Predicate::estimate_selectivity(const StorageIndex *storage_index)
       // Pattern analysis could be done here
       // For now, use rough estimate
       double like_sel = 0.2;  // 20% for LIKE
-      return (op == PredicateOperator::LIKE) ? like_sel : (1.0 - like_sel);
+      return (m_oper == PredicateOperator::LIKE) ? like_sel : (1.0 - like_sel);
     } break;
     case PredicateOperator::REGEXP:
     case PredicateOperator::NOT_REGEXP: {
       double regexp_sel = 0.15;  // 15% for REGEXP
-      return (op == PredicateOperator::REGEXP) ? regexp_sel : (1.0 - regexp_sel);
+      return (m_oper == PredicateOperator::REGEXP) ? regexp_sel : (1.0 - regexp_sel);
     } break;
     default:
       return 0.5;
@@ -2255,7 +2448,7 @@ PredicateValue Simple_Predicate::extract_value(const uchar *data, bool low_order
 }
 
 TruthValue Compound_Predicate::evaluate(const uchar *&input_value) const {
-  switch (op) {
+  switch (m_oper) {
     case PredicateOperator::AND: {
       TruthValue result = TruthValue::TRUE_VALUE;
       for (const auto &child : children) {
@@ -2297,7 +2490,7 @@ void Compound_Predicate::evaluate(const std::vector<const uchar *> &input_values
   if (children.empty()) return;
 
   auto input_sz = input_values.size();
-  switch (op) {
+  switch (m_oper) {
     case PredicateOperator::AND: {
       // Initialize to all 1s
       for (size_t i = 0; i < input_sz; i++) Utils::Util::bit_array_set(&result, i);
@@ -2366,7 +2559,7 @@ std::vector<uint32> Compound_Predicate::get_columns() const {
 }
 
 std::unique_ptr<Predicate> Compound_Predicate::clone() const {
-  auto cloned = std::make_unique<Compound_Predicate>(op);
+  auto cloned = std::make_unique<Compound_Predicate>(m_oper);
   for (const auto &child : children) {
     cloned->add_child(child->clone());
   }
@@ -2374,7 +2567,7 @@ std::unique_ptr<Predicate> Compound_Predicate::clone() const {
 }
 
 bool Compound_Predicate::equals(const Predicate &other) const {
-  if (!other.is_compound() || other.op != op) return false;
+  if (!other.is_compound() || other.m_oper != m_oper) return false;
 
   const auto &rhs = static_cast<const Compound_Predicate &>(other);
   if (children.size() != rhs.children.size()) return false;
@@ -2388,7 +2581,7 @@ std::string Compound_Predicate::to_string() const {
   if (children.empty()) return "()";
 
   std::ostringstream oss;
-  switch (op) {
+  switch (m_oper) {
     case PredicateOperator::AND:
       oss << "(";
       for (size_t i = 0; i < children.size(); i++) {
@@ -2419,7 +2612,7 @@ std::string Compound_Predicate::to_string() const {
 double Compound_Predicate::estimate_selectivity(const StorageIndex *storage_index) const {
   if (children.empty()) return 1.0;
 
-  switch (op) {
+  switch (m_oper) {
     case PredicateOperator::AND: {
       // AND: Multiply selectivities
       double selectivity = 1.0;

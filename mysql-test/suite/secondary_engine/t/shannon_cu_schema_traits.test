@@ -1,0 +1,69 @@
+# Runtime CU schema caches must preserve all storage layouts and NULL semantics.
+--source include/no_ps_protocol.inc
+--disable_warnings
+--disable_query_log
+--disable_result_log
+SET NAMES utf8mb4;
+SET use_secondary_engine=OFF;
+CREATE TABLE cu_trait_seed(i INT PRIMARY KEY);
+INSERT INTO cu_trait_seed WITH RECURSIVE n AS
+ (SELECT 0 i UNION ALL SELECT i+1 FROM n WHERE i<99)
+ SELECT a.i*1000+b.i*10+c.i FROM n a JOIN n b JOIN n c ON c.i<10;
+--let $case = 4
+while ($case) {
+ --let $rows = 0
+ if ($case == 3) {
+  --let $rows = 1
+ }
+ if ($case == 2) {
+  --let $rows = 257
+ }
+ if ($case == 1) {
+  --let $rows = 100000
+ }
+ CREATE TABLE cu_traits(
+  id INT PRIMARY KEY,
+  t TINYINT NOT NULL COMMENT 'RAPID_COLUMN=ENCODING=BITPACK',
+  s SMALLINT COMMENT 'RAPID_COLUMN=ENCODING=BITPACK',
+  m MEDIUMINT NOT NULL COMMENT 'RAPID_COLUMN=ENCODING=BITPACK',
+  v INT COMMENT 'RAPID_COLUMN=ENCODING=BITPACK',
+  b BIGINT NOT NULL COMMENT 'RAPID_COLUMN=ENCODING=BITPACK',
+  u BIGINT UNSIGNED NOT NULL COMMENT 'RAPID_COLUMN=ENCODING=BITPACK',
+  z INT COMMENT 'RAPID_COLUMN=ENCODING=BITPACK',
+  c CHAR(12), s_low VARCHAR(40), s_high VARCHAR(80), raw VARBINARY(40),
+  e ENUM('alpha','beta'), flags SET('alpha','beta'),
+  payload BLOB, d DECIMAL(18,3), dt DATE
+ ) SECONDARY_ENGINE=rapid;
+ --eval INSERT INTO cu_traits SELECT i,MOD(i,7)-3,IF(MOD(i,2)=0,NULL,MOD(i,19)-9),MOD(i,10000)-5000,IF(MOD(i,100)<90,NULL,i-50000),1000000000000+i,2000000000000+i,NULL,IF(MOD(i,11)=0,NULL,'alpha'),IF(MOD(i,17)=0,NULL,IF(MOD(i,100)<95,'alpha','猫')),CONCAT('key-',i),IF(MOD(i,13)=0,NULL,CONCAT('raw-',i)),IF(MOD(i,5)=0,NULL,IF(MOD(i,2)=0,'alpha','beta')),IF(MOD(i,7)=0,NULL,IF(MOD(i,2)=0,'alpha','alpha,beta')),IF(MOD(i,19)=0,NULL,REPEAT('x',IF(MOD(i,2)=0,3,300))),i*1.125,DATE_ADD('2020-01-01',INTERVAL MOD(i,365) DAY) FROM cu_trait_seed WHERE i<$rows
+ ALTER TABLE cu_traits SECONDARY_LOAD;
+ SET use_secondary_engine=FORCED;
+ --echo # Empty, singleton, partial batch, and multiple IMCUs: packed NULL/non-NULL reductions.
+ --let $assert_digest = SELECT COUNT(*),COUNT(s),COUNT(v),COUNT(z),SUM(t),SUM(s),SUM(m),SUM(v),SUM(b),SUM(u),SUM(z),MIN(s),MAX(v) FROM cu_traits
+ --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+ --disable_query_log
+ --disable_result_log
+ # Dense/skewed and high-cardinality dictionaries, ENUM/SET, inline/pool BLOB.
+ --let $assert_digest = SELECT COUNT(*),SUM(id),SUM(d),MIN(dt),MAX(dt) FROM cu_traits WHERE s_low<>'猫' AND s_high>'key-1' AND c='alpha'
+ --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+ --disable_query_log
+ --disable_result_log
+ --let $assert_digest = SELECT COUNT(*),SUM(id),SUM(LENGTH(payload)),MIN(raw),MAX(raw) FROM cu_traits WHERE e='alpha' AND flags LIKE 'alpha%' AND LENGTH(payload)>0
+ --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+ --disable_query_log
+ --disable_result_log
+ # A new TABLE/Field binding must refresh cached physical types correctly.
+ SET use_secondary_engine=OFF;
+ FLUSH TABLES cu_traits;
+ SET use_secondary_engine=FORCED;
+ --let $assert_digest = SELECT COUNT(*),SUM(id),MIN(c),MAX(s_high) FROM cu_traits WHERE e LIKE 'a%' OR flags='alpha,beta' OR s_low IS NULL
+ --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+ --disable_query_log
+ --disable_result_log
+ SET use_secondary_engine=OFF;
+ DROP TABLE cu_traits;
+ --dec $case
+}
+DROP TABLE cu_trait_seed;
+--enable_query_log
+--enable_result_log
+--enable_warnings

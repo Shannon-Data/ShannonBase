@@ -101,6 +101,9 @@ class PredicatePushDown : public Rule {
   void apply(Plan &root) override;
   std::string name() override { return std::string("PredicatePushDown"); }
 
+  // True only if NULL-complementing these tables prevents the predicate being TRUE.
+  bool is_null_rejecting(Item *predicate, const std::unordered_set<TABLE *> &null_tables) const;
+
  private:
   /**
    * @brief recursively process plan nodes

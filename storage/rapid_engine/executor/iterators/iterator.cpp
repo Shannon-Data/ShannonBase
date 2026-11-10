@@ -1268,7 +1268,7 @@ void VectorizedFilterIterator::CompileSimplePredicate() {
     }
   }
 
-  m_simple_predicate.op = op;
+  m_simple_predicate.m_oper = op;
   m_simple_predicate.field = field;
   m_simple_predicate.integer_constant = constant_value;
   m_simple_predicate.valid = true;
@@ -1285,7 +1285,7 @@ bool VectorizedFilterIterator::EvaluateSimplePredicateBatch(const std::pmr::vect
     return false;
   }
   Utils::SIMD::CompareOp op;
-  switch (m_simple_predicate.op) {
+  switch (m_simple_predicate.m_oper) {
     case SimplePredicateOp::EQ:
       op = Utils::SIMD::CompareOp::EQ;
       break;
@@ -1843,7 +1843,7 @@ int VectorizedFilterIterator::ReadSelectedBatchImpl(std::pmr::vector<ColumnChunk
     if (late) {
       // The dense boundary below copies every surviving row's every column, so
       // a high survival rate makes the second pass a net loss. Deferring W bytes
-      // per row saves W*(input-kept) and costs (W + cost) per kept row, so the
+      // per row costs W*input eagerly and (W + cost)*kept in two phases, so the
       // break-even survival rate is W / (W + cost): a 400-byte VARCHAR tolerates
       // a rate a 16-byte column cannot.
       // Decide once the sample is wide enough, then hold it: a skewed tail must
@@ -1859,7 +1859,7 @@ int VectorizedFilterIterator::ReadSelectedBatchImpl(std::pmr::vector<ColumnChunk
           // a width of zero.
           m_late_disabled = m_late_kept_rows * 2 >= m_late_input_rows;
         } else {
-          const uint64_t saved = static_cast<uint64_t>(m_late_width) * (m_late_input_rows - m_late_kept_rows);
+          const uint64_t saved = static_cast<uint64_t>(m_late_width) * m_late_input_rows;
           const uint64_t extra = static_cast<uint64_t>(m_late_width + kLateSecondPassCost) * m_late_kept_rows;
           m_late_disabled = extra >= saved;
         }

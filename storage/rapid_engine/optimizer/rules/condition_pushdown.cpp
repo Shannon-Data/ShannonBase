@@ -62,8 +62,8 @@ const Imcs::Simple_Predicate *as_simple(const Imcs::Predicate *pred) {
  */
 bool is_between_range_pair(const Imcs::Predicate &between_pred, const Imcs::Predicate &range_pred) {
   const auto *between = as_simple(&between_pred);
-  if (!between || between->op != Imcs::PredicateOperator::BETWEEN) return false;
-  if (!range_pred.is_compound() || range_pred.op != Imcs::PredicateOperator::AND) return false;
+  if (!between || between->m_oper != Imcs::PredicateOperator::BETWEEN) return false;
+  if (!range_pred.is_compound() || range_pred.m_oper != Imcs::PredicateOperator::AND) return false;
 
   const auto &bounds = static_cast<const Imcs::Compound_Predicate &>(range_pred).children;
   if (bounds.size() != 2) return false;
@@ -71,9 +71,9 @@ bool is_between_range_pair(const Imcs::Predicate &between_pred, const Imcs::Pred
   const auto *lower = as_simple(bounds[0].get());
   const auto *upper = as_simple(bounds[1].get());
   if (!lower || !upper) return false;
-  if (lower->op == Imcs::PredicateOperator::LESS_EQUAL) std::swap(lower, upper);
+  if (lower->m_oper == Imcs::PredicateOperator::LESS_EQUAL) std::swap(lower, upper);
 
-  return lower->op == Imcs::PredicateOperator::GREATER_EQUAL && upper->op == Imcs::PredicateOperator::LESS_EQUAL &&
+  return lower->m_oper == Imcs::PredicateOperator::GREATER_EQUAL && upper->m_oper == Imcs::PredicateOperator::LESS_EQUAL &&
          lower->column_id == between->column_id && upper->column_id == between->column_id &&
          lower->value == between->value && upper->value == between->value2;
 }
@@ -168,6 +168,73 @@ Plan PredicatePushDown::push_down_recursive(Plan &node, std::vector<Item *> &pen
 }
 
 namespace {
+// Prove NULL propagation, rather than merely rejection: NOT(FALSE) is TRUE,
+// whereas NOT(NULL) remains NULL. In particular NOT(AND(...)) cannot use the
+// "any conjunct" rule used for a top-level WHERE below.
+bool returns_null_on_complement(Item *item, const std::unordered_set<TABLE *> &tables) {
+  if (!item || item->has_subquery() || (item->used_tables() & (RAND_TABLE_BIT | OUTER_REF_TABLE_BIT))) return false;
+  item = item->real_item();
+  if (item->type() == Item::FIELD_ITEM) {
+    const auto *field = static_cast<Item_field *>(item)->field;
+    return field && tables.count(field->table) != 0;
+  }
+  if (item->type() == Item::COND_ITEM) {
+    auto *cond = static_cast<Item_cond *>(item);
+    if (cond->functype() != Item_func::COND_AND_FUNC && cond->functype() != Item_func::COND_OR_FUNC) return false;
+    List_iterator<Item> args(*cond->argument_list());
+    Item *arg;
+    while ((arg = args++)) {
+      if (!returns_null_on_complement(arg, tables)) return false;
+    }
+    return !cond->argument_list()->is_empty();
+  }
+  if (item->type() != Item::FUNC_ITEM) return false;
+  const auto *func = static_cast<Item_func *>(item);
+  if (!func->is_null_on_null()) return false;  // IS NULL, COALESCE, <=>, CASE, etc.
+  // BETWEEN and IN keep null_on_null set, but a NULL bound/list member
+  // does not force NULL (e.g. 1 IN (NULL, 1), or 1 BETWEEN NULL AND 0).
+  // Only their scalar left operand offers a propagation guarantee.
+  if (func->functype() == Item_func::BETWEEN || func->functype() == Item_func::IN_FUNC)
+    return func->argument_count() > 0 && returns_null_on_complement(func->arguments()[0], tables);
+  // This branch's legacy null_on_null flag is also left at its default by
+  // some non-strict functions (FIELD, ELT, MAKE_SET, ...). Limit the proof to
+  // known strict operators; unknown functions remain above the outer join.
+  switch (func->functype()) {
+    case Item_func::EQ_FUNC:
+    case Item_func::NE_FUNC:
+    case Item_func::LT_FUNC:
+    case Item_func::LE_FUNC:
+    case Item_func::GE_FUNC:
+    case Item_func::GT_FUNC:
+    case Item_func::LIKE_FUNC:
+    case Item_func::NOT_FUNC:
+    case Item_func::XOR_FUNC:
+    case Item_func::COLLATE_FUNC:
+    case Item_func::TYPECAST_FUNC:
+    case Item_func::NEG_FUNC:
+    case Item_func::PLUS_FUNC:
+    case Item_func::MINUS_FUNC:
+    case Item_func::MUL_FUNC:
+    case Item_func::DIV_FUNC:
+    case Item_func::ABS_FUNC:
+    case Item_func::SQRT_FUNC:
+    case Item_func::FLOOR_FUNC:
+    case Item_func::CEILING_FUNC:
+    case Item_func::SIGN_FUNC:
+    case Item_func::MOD_FUNC:
+    case Item_func::LEAST_FUNC:
+    case Item_func::GREATEST_FUNC:
+    case Item_func::STRCMP_FUNC:
+      break;
+    default:
+      return false;
+  }
+  for (uint i = 0; i < func->argument_count(); ++i) {
+    if (returns_null_on_complement(func->arguments()[i], tables)) return true;
+  }
+  return false;
+}
+
 enum class JoinPushKind { kNone, kOuterOnly, kOuterAndInner };
 
 // What a WHERE conjunct above this join may be pushed into, and which input an
@@ -206,9 +273,80 @@ JoinPushKind classify_join_push(const PlanNode *join, bool *preserved_is_left) {
 }
 }  // namespace
 
+bool PredicatePushDown::is_null_rejecting(Item *item, const std::unordered_set<TABLE *> &tables) const {
+  if (!item || item->has_subquery() || (item->used_tables() & (RAND_TABLE_BIT | OUTER_REF_TABLE_BIT))) return false;
+  item = item->real_item();
+  if (item->type() == Item::COND_ITEM) {
+    auto *cond = static_cast<Item_cond *>(item);
+    const bool is_and = cond->functype() == Item_func::COND_AND_FUNC;
+    if (!is_and && cond->functype() != Item_func::COND_OR_FUNC) return false;
+    List_iterator<Item> args(*cond->argument_list());
+    Item *arg;
+    while ((arg = args++)) {
+      const bool rejects = is_null_rejecting(arg, tables);
+      if (is_and && rejects) return true;
+      if (!is_and && !rejects) return false;
+    }
+    return !is_and && !cond->argument_list()->is_empty();
+  }
+  return returns_null_on_complement(item, tables);
+}
+
 Plan PredicatePushDown::push_below_join(Plan &join, std::vector<Item *> &pending_filters) {
-  // Pushing a WHERE predicate below OUTER/SEMI/ANTI would change NULL-complementation or match
-  // semantics; only a provably INNER join is safe to push through.
+  // Own the simplification when the SQL optimizer left a LEFT JOIN behind.
+  // Copy its metadata: the original AccessPath/expression can be shared with
+  // other candidates or a native fallback, whose outer semantics must survive.
+  bool preserved_is_left{true};
+  const auto kind_before = classify_join_push(join.get(), &preserved_is_left);
+  if (kind_before == JoinPushKind::kOuterOnly) {
+    AccessPath *source = join->original_path;
+    const JoinPredicate *predicate = source->type == AccessPath::HASH_JOIN ? source->hash_join().join_predicate
+                                                                           : source->nested_loop_join().join_predicate;
+    if (predicate && predicate->expr && predicate->expr->type == RelationalExpression::LEFT_JOIN) {
+      const auto null_tables = get_available_tables(join->children[preserved_is_left ? 1 : 0]);
+      size_t referencing{0}, rejecting{0};
+      for (Item *filter : pending_filters) {
+        const auto referenced = get_referenced_tables(filter);
+        if (std::none_of(referenced.begin(), referenced.end(),
+                         [&](TABLE *table) { return null_tables.count(table) != 0; }))
+          continue;
+        ++referencing;
+        if (is_null_rejecting(filter, null_tables)) ++rejecting;
+      }
+      const bool simplify = referencing > 0 && referencing == rejecting;
+      if (simplify) {
+        auto *path = new (current_thd->mem_root) AccessPath(*source);
+        // Like MoveFilterPredicatesIntoHashJoinCondition(), rebuild the
+        // execution metadata; the SQL join graph is no longer being planned.
+        auto *copy = new (current_thd->mem_root) JoinPredicate{};
+        copy->expr = new (current_thd->mem_root) RelationalExpression(current_thd);
+        for (auto *condition : predicate->expr->equijoin_conditions)
+          copy->expr->equijoin_conditions.push_back(condition);
+        for (auto *condition : predicate->expr->join_conditions) copy->expr->join_conditions.push_back(condition);
+        copy->expr->companion_set = predicate->expr->companion_set;
+        copy->expr->conditions_used_tables = predicate->expr->conditions_used_tables;
+        copy->expr->join_conditions_reject_all_rows = predicate->expr->join_conditions_reject_all_rows;
+        copy->expr->type = RelationalExpression::INNER_JOIN;
+        if (path->type == AccessPath::HASH_JOIN) {
+          path->hash_join().join_predicate = copy;
+        } else {
+          path->nested_loop_join().join_predicate = copy;
+          path->nested_loop_join().join_type = JoinType::INNER;
+        }
+        join->original_path = path;
+        if (join->type() == PlanNode::Type::HASH_JOIN)
+          static_cast<HashJoin *>(join.get())->join_type = JoinType::INNER;
+        else
+          static_cast<NestLoopJoin *>(join.get())->source_join_predicate = copy;
+      }
+      Opt_trace_object trace(&current_thd->opt_trace);
+      trace.add_alnum("decision", "rapid_predicate_pushdown");
+      trace.add_alnum("cause", simplify ? "null_rejecting_outer_join_to_inner" : "outer_join_not_null_rejecting")
+          .add("null_side_predicates", referencing)
+          .add("null_rejecting_predicates", rejecting)
+          .add("simplified", simplify);
+    }
+  }
   const bool can_push_through_join = Utils::is_provably_inner_join(join.get());
 
   if (!can_push_through_join) {
@@ -218,8 +356,7 @@ Plan PredicatePushDown::push_below_join(Plan &join, std::vector<Item *> &pending
     //   * the preserved side of an OUTER JOIN is filtered exactly as written;
     //   * a SEMI join filters its inner side before the existence test;
     //   * an ANTI join keeps its inner side untouched;
-    //   * the null-supplying side of an OUTER JOIN needs null-rejection
-    //     analysis, which this rule does not attempt.
+    //   * an OUTER join still present here failed the null-rejection proof.
     bool preserved_is_left{true};
     const JoinPushKind kind = classify_join_push(join.get(), &preserved_is_left);
     if (kind == JoinPushKind::kNone) {

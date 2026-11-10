@@ -36,7 +36,8 @@
 
 #include "field_types.h"  //for MYSQL_TYPE_XXX
 #include "my_inttypes.h"
-#include "my_list.h"    //for LIST
+#include "my_list.h"  //for LIST
+#include "sql/debug_sync.h"
 #include "sql/table.h"  //for TABLE
 
 #include "storage/innobase/include/univ.i"  //UNIV_SQL_NULL
@@ -540,13 +541,6 @@ class Imcu : public MemoryObject {
     std::vector<size_t> &packed_widths = context->packed_widths;
     packed_scratch.resize(proj_size);
     packed_widths.assign(proj_size, 0);
-    bool any_packed = false;
-    for (size_t j = 0; j < proj_size; ++j) {
-      if (proj_cus[j] != nullptr && proj_cus[j]->is_bitpacked()) {
-        packed_widths[j] = proj_cus[j]->get_normalized_length();
-        any_packed = true;
-      }
-    }
 
     uint32_t batch_offsets[SHANNON_BATCH_NUM];
     uint32_t batch_lengths[SHANNON_BATCH_NUM];
@@ -557,10 +551,20 @@ class Imcu : public MemoryObject {
     size_t scanned = 0;
 
     for (size_t chunk_start = 0; chunk_start < row_offsets.size(); chunk_start += SHANNON_BATCH_NUM) {
+      if (context->m_thd) {
+        DEBUG_SYNC(context->m_thd, "rapid_before_gather_chunk");
+      }
       // Keep version selection, NULL bits, predicates and the callback's
       // copies in one read critical section. Publishing a new slot atomically
       // does not make an unsynchronized memcpy of that slot safe.
       std::shared_lock mutation_lock(m_mutation_mutex);
+      // UPDATE may unpack a CU between batches. Inspect its encoding only
+      // inside the same read critical section as the decode and callback.
+      bool any_packed = false;
+      for (size_t j = 0; j < proj_size; ++j) {
+        packed_widths[j] = proj_cus[j] && proj_cus[j]->is_bitpacked() ? proj_cus[j]->get_normalized_length() : 0;
+        any_packed = any_packed || packed_widths[j] != 0;
+      }
       size_t batch_size = std::min<size_t>(SHANNON_BATCH_NUM, row_offsets.size() - chunk_start);
       ids.assign(row_offsets.begin() + chunk_start, row_offsets.begin() + chunk_start + batch_size);
 
@@ -601,13 +605,17 @@ class Imcu : public MemoryObject {
           const size_t packed_width = packed_widths[j];
           if (packed_width != 0) {
             uchar *slot = packed_scratch[j].data() + i * packed_width;
-            if (!current_is_null && cu->decode_packed_slot(local_row_id, slot)) {
+            if (current_is_null) {
+              row_buffer[j] = nullptr;
+              continue;
+            }
+            if (cu->decode_packed_slot(local_row_id, slot)) {
               row_buffer[j] = slot;
               ++unpacked_rows;
-            } else {
-              row_buffer[j] = nullptr;
+              continue;
             }
-            continue;
+            // A failed decode is not SQL NULL: let the canonical/MVCC path
+            // select the visible cell instead.
           }
 
           if (!cu || !cu->get_visible_cell(local_row_id, current_is_null, context->m_extra_info.m_trxid,
@@ -972,16 +980,16 @@ class Imcu : public MemoryObject {
     std::vector<size_t> &packed_widths = context->packed_widths;
     packed_scratch.resize(proj_size);
     packed_widths.assign(proj_size, 0);
-    bool any_packed = false;
-    for (size_t j = 0; j < proj_size; ++j) {
-      if (proj_cus[j] != nullptr && proj_cus[j]->is_bitpacked()) {
-        packed_widths[j] = proj_cus[j]->get_normalized_length();
-        any_packed = true;
-      }
-    }
 
     for (size_t chunk_start = start_offset; chunk_start < end; chunk_start += SHANNON_BATCH_NUM) {
       std::shared_lock mutation_lock(m_mutation_mutex);
+      // UPDATE may unpack a CU between batches. Inspect its encoding only
+      // inside the same read critical section as the decode and callback.
+      bool any_packed = false;
+      for (size_t j = 0; j < proj_size; ++j) {
+        packed_widths[j] = proj_cus[j] && proj_cus[j]->is_bitpacked() ? proj_cus[j]->get_normalized_length() : 0;
+        any_packed = any_packed || packed_widths[j] != 0;
+      }
       size_t batch_size = std::min<size_t>(SHANNON_BATCH_NUM, end - chunk_start);
 
       bit_array_t &visibility_mask = Rapid_scan_context::reuse_mask(context->visibility_mask, batch_size);

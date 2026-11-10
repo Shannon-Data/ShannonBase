@@ -1,0 +1,102 @@
+--source include/no_ps_protocol.inc
+--disable_warnings
+SET use_secondary_engine=OFF;
+CREATE TABLE distinct_sort(id INT PRIMARY KEY,k INT,g INT,u BIGINT UNSIGNED,d DATE,n DECIMAL(18,3),w DECIMAL(65,0))
+ SECONDARY_ENGINE=rapid;
+INSERT INTO distinct_sort WITH RECURSIVE seq(i) AS
+ (SELECT 0 UNION ALL SELECT i+1 FROM seq WHERE i<999)
+ SELECT a.i*100+b.i,IF(MOD(a.i+b.i,17)=0,NULL,MOD(a.i+b.i,37)),MOD(a.i,3),
+ IF(MOD(a.i,2)=0,18446744073709551615,0),
+ IF(MOD(a.i,13)=0,NULL,DATE_ADD('1995-01-01',INTERVAL MOD(a.i,20) DAY)),
+ MOD(a.i,5)*1.125,IF(MOD(a.i,2)=0,-99999999999999999999999999999999999999999999999999999999999999999,
+ 99999999999999999999999999999999999999999999999999999999999999999) FROM seq a JOIN seq b ON b.i<100;
+ALTER TABLE distinct_sort SECONDARY_LOAD;
+SET optimizer_switch='hypergraph_optimizer=on';
+SET use_secondary_engine=FORCED;
+--echo # DISTINCT sorts preserve NULL, signed/unsigned keys, direction and unique-row LIMIT.
+--let $rapid_stats_action = begin
+--source suite/secondary_engine/include/rapid_stats_check.inc
+SELECT COUNT(*) FROM distinct_sort c LEFT JOIN (SELECT DISTINCT k FROM distinct_sort) d ON c.id=d.k WHERE d.k IS NULL;
+--let $rapid_stats_field = sort_rows
+--let $rapid_stats_action = end
+--source suite/secondary_engine/include/rapid_stats_check.inc
+--let $assert_query = SELECT DISTINCT k FROM distinct_sort ORDER BY k
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_query = SELECT DISTINCT k FROM distinct_sort ORDER BY k DESC LIMIT 3,7
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_query = SELECT DISTINCT g,k FROM distinct_sort ORDER BY g DESC,k LIMIT 30
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_query = SELECT DISTINCT u FROM distinct_sort ORDER BY u
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_query = SELECT DISTINCT d,n FROM distinct_sort ORDER BY d,n
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_query = SELECT DISTINCT k FROM distinct_sort WHERE id<0 ORDER BY k
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_query = SELECT DISTINCT k FROM distinct_sort ORDER BY k LIMIT 0
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--echo # Count the materialized DISTINCT output so retained duplicates are observable.
+--let $assert_digest = SELECT COUNT(*),SUM(k),SUM(k IS NULL) FROM (SELECT DISTINCT k FROM distinct_sort) d
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_digest = SELECT COUNT(*) FROM (SELECT DISTINCT g,k FROM distinct_sort) d
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--echo # Wide exact keys retain comparison sort; small inputs preserve LIMIT.
+--let $assert_query = SELECT DISTINCT w,k FROM distinct_sort ORDER BY w,k
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--let $assert_query = SELECT DISTINCT k FROM distinct_sort WHERE id<40 ORDER BY k LIMIT 2,3
+--let $assert_ordered = 1
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+--echo # Q22-style materialized distinct keys retain anti-join semantics.
+SET optimizer_trace_max_mem_size=1048576;
+SET optimizer_trace='enabled=on';
+--let $assert_digest = SELECT COUNT(*) FROM distinct_sort c LEFT JOIN (SELECT DISTINCT k FROM distinct_sort) d ON c.id=d.k WHERE d.k IS NULL
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+# The parity helper restores session settings, which can replace the last trace.
+SELECT COUNT(*),SUM(k),SUM(k IS NULL) FROM (SELECT DISTINCT k FROM distinct_sort) d;
+SET optimizer_trace='enabled=off';
+SET use_secondary_engine=OFF;
+SELECT EXISTS(SELECT 1 FROM JSON_TABLE(TRACE,'$**.rapid_vectorized_sort'
+ COLUMNS(dedup BOOL PATH '$.remove_duplicates',grant_bytes BIGINT PATH '$.memory_grant_bytes',
+ top_n BOOL PATH '$.top_n',radix_runs BIGINT PATH '$.radix_runs')) AS s
+ WHERE dedup=1 AND grant_bytes>=65536 AND top_n=0 AND radix_runs>0)
+ INTO @distinct_ap_sort FROM information_schema.optimizer_trace;
+--let $distinct_ap_sort = `SELECT @distinct_ap_sort`
+if (!$distinct_ap_sort) {
+ --die DISTINCT did not execute in the AP-budgeted vector sort
+}
+SET use_secondary_engine=FORCED;
+--echo # Wide DISTINCT executes comparison sort under the same AP memory accounting.
+--let $assert_digest = SELECT COUNT(*) FROM distinct_sort c LEFT JOIN (SELECT DISTINCT w FROM distinct_sort) d ON c.w=d.w WHERE d.w IS NULL
+--source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
+SET optimizer_trace='enabled=on';
+SELECT COUNT(*) FROM (SELECT DISTINCT w FROM distinct_sort) d;
+SET optimizer_trace='enabled=off';
+SET use_secondary_engine=OFF;
+SELECT EXISTS(SELECT 1 FROM JSON_TABLE(TRACE,'$**.rapid_vectorized_sort'
+ COLUMNS(dedup BOOL PATH '$.remove_duplicates',key_bytes INT PATH '$.key_bytes',
+ radix_runs BIGINT PATH '$.radix_runs',comparison_runs BIGINT PATH '$.comparison_runs')) AS s
+ WHERE dedup=1 AND key_bytes>16 AND radix_runs=0 AND comparison_runs>0)
+ INTO @distinct_wide_sort FROM information_schema.optimizer_trace;
+--let $distinct_wide_sort = `SELECT @distinct_wide_sort`
+if (!$distinct_wide_sort) {
+ --die Wide DISTINCT did not retain comparison sort
+}
+SET use_secondary_engine=FORCED;
+PREPARE distinct_statement FROM 'SELECT DISTINCT k FROM distinct_sort WHERE id<? ORDER BY k LIMIT 7';
+SET @distinct_limit=0;
+EXECUTE distinct_statement USING @distinct_limit;
+SET @distinct_limit=5000;
+EXECUTE distinct_statement USING @distinct_limit;
+EXECUTE distinct_statement USING @distinct_limit;
+DEALLOCATE PREPARE distinct_statement;
+
+SET use_secondary_engine=OFF;
+DROP TABLE distinct_sort;
+--enable_warnings

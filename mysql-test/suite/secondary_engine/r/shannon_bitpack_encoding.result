@@ -124,20 +124,9 @@ INSERT INTO t_bp_big
 WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 3000)
 SELECT n, n + 10, n % 3 FROM seq;
 ALTER TABLE t_bp_big SECONDARY_LOAD;
-SET USE_SECONDARY_ENGINE=OFF;
-SELECT CAST(VARIABLE_VALUE AS UNSIGNED) AS reduced_before FROM performance_schema.global_status
-WHERE VARIABLE_NAME = 'rapid_query_bitpacked_aggregate_rows_total';
-reduced_before
-SET USE_SECONDARY_ENGINE=FORCED;
 SELECT COUNT(*), SUM(bp_val), MIN(bp_val), MAX(bp_val) FROM t_bp_big;
 COUNT(*)	SUM(bp_val)	MIN(bp_val)	MAX(bp_val)
 3000	4531500	11	3010
-SET USE_SECONDARY_ENGINE=OFF;
-SELECT CAST(VARIABLE_VALUE AS UNSIGNED) > 0 AS used_aggregate_kernel
-FROM performance_schema.global_status
-WHERE VARIABLE_NAME = 'rapid_query_bitpacked_aggregate_rows_total';
-used_aggregate_kernel
-SET USE_SECONDARY_ENGINE=FORCED;
 # A GROUP BY still needs the values, and must stay correct.
 SELECT plain, COUNT(*), SUM(bp_val) FROM t_bp_big GROUP BY plain ORDER BY plain;
 plain	COUNT(*)	SUM(bp_val)

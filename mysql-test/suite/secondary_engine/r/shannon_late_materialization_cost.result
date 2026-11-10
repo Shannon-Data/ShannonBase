@@ -1,0 +1,9 @@
+SELECT EXISTS(SELECT 1 FROM JSON_TABLE(TRACE,'$**.rapid_late_materialization'
+ COLUMNS(enabled BOOL PATH '$.enabled',decided BOOL PATH '$.decided',
+width INT PATH '$.deferred_bytes_per_row',observed DOUBLE PATH '$.observed_selectivity',
+threshold DOUBLE PATH '$.break_even_selectivity')) AS d
+WHERE decided=1 AND enabled=1 AND width=8 AND observed<threshold) INTO @late_cost_agrees
+FROM information_schema.optimizer_trace;
+SELECT @late_cost_agrees AS cost_and_trace_agree;
+cost_and_trace_agree
+1

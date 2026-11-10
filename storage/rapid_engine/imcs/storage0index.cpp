@@ -145,10 +145,10 @@ bool StorageIndex::can_skip_simple_predicate(const Simple_Predicate *pred) const
   // Deciding them here is also what makes this pruning reachable at all:
   // PredicateValue::null_value() is typed NULL_VALUE, which matches neither the
   // numeric nor the string dispatch arm further down.
-  if (pred->op == PredicateOperator::IS_NULL)
+  if (pred->m_oper == PredicateOperator::IS_NULL)
     return !get_has_null(col_idx);  // No NULL was ever recorded, so no row can satisfy `col IS NULL`.
 
-  if (pred->op == PredicateOperator::IS_NOT_NULL) {
+  if (pred->m_oper == PredicateOperator::IS_NOT_NULL) {
     // Every live row is NULL, so no row can satisfy `col IS NOT NULL`.
     // Owner-less is a valid state for this class (see the m_owner guard at the
     // top of can_skip_imcu); 0 rows keeps the decision conservative.
@@ -174,7 +174,7 @@ bool StorageIndex::can_skip_simple_predicate(const Simple_Predicate *pred) const
     const double max_val = get_max_value(col_idx);
     const size_t null_cnt = get_null_count(col_idx);
     // Evaluate based on operator
-    switch (pred->op) {
+    switch (pred->m_oper) {
       case PredicateOperator::EQUAL: {
         // pattern: col = value: Can skip if value is outside [min, max] range
         double target = pred->value.as_double();
@@ -243,7 +243,7 @@ bool StorageIndex::can_skip_simple_predicate(const Simple_Predicate *pred) const
         break;
       }
       default:
-        DBUG_PRINT("storage_index", ("Unknown operator %d, cannot use Storage Index", static_cast<int>(pred->op)));
+        DBUG_PRINT("storage_index", ("Unknown operator %d, cannot use Storage Index", static_cast<int>(pred->m_oper)));
         break;
     }
   } else if (pred->value.type == PredicateValueType::STRING) {
@@ -253,7 +253,7 @@ bool StorageIndex::can_skip_simple_predicate(const Simple_Predicate *pred) const
     const std::string min_str = get_min_string(col_idx);
     const std::string max_str = get_max_string(col_idx);
 
-    switch (pred->op) {
+    switch (pred->m_oper) {
       case PredicateOperator::EQUAL: {
         const std::string &target = pred->value.as_string();
         if (target < min_str || target > max_str) return true;
@@ -329,7 +329,7 @@ bool StorageIndex::can_skip_simple_predicate(const Simple_Predicate *pred) const
 bool StorageIndex::can_skip_compound_predicate(const Compound_Predicate *pred) const {
   if (!pred || pred->children.empty()) return false;
 
-  switch (pred->op) {
+  switch (pred->m_oper) {
     case PredicateOperator::AND: {
       for (const auto &child : pred->children) {
         if (can_skip_predicate(child.get())) {
@@ -363,7 +363,7 @@ bool StorageIndex::can_skip_compound_predicate(const Compound_Predicate *pred) c
       return false;
     } break;
     default:
-      DBUG_PRINT("storage_index", ("Unknown compound operator %d", static_cast<int>(pred->op)));
+      DBUG_PRINT("storage_index", ("Unknown compound operator %d", static_cast<int>(pred->m_oper)));
       return false;
   }
 }

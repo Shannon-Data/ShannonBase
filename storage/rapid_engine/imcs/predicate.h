@@ -447,7 +447,7 @@ class Predicate {
     size_t num_rows;                         // Batch size
   };
 
-  Predicate(PredicateOperator oper, bool compound = false) : op(oper), compound_pred(compound) {}
+  Predicate(PredicateOperator oper, bool compound = false) : m_oper(oper), m_compound_pred(compound) {}
   virtual ~Predicate() = default;
 
   /** Three-valued evaluation (SQL semantics): TRUE_VALUE / FALSE_VALUE / UNKNOWN. */
@@ -470,11 +470,11 @@ class Predicate {
    */
   virtual bool equals(const Predicate &other) const = 0;
 
-  virtual bool is_compound() const { return compound_pred; }
+  virtual bool is_compound() const { return m_compound_pred; }
   virtual double estimate_selectivity(const StorageIndex *storage_index = nullptr) const = 0;
 
-  PredicateOperator op;  // AND, OR, NOT
-  bool compound_pred{false};
+  PredicateOperator m_oper;  // AND, OR, NOT
+  bool m_compound_pred{false};
 };
 
 /**
@@ -511,7 +511,7 @@ class Simple_Predicate : public Predicate {
         column_type(type) {}
 
   Simple_Predicate(const Simple_Predicate &other)
-      : Predicate(other.op, false),
+      : Predicate(other.m_oper, false),
         column_id(other.column_id),
         column_name(other.column_name),
         value(other.value),
@@ -589,6 +589,68 @@ class Simple_Predicate : public Predicate {
   void evaluate_int64_vectorized(const std::vector<const uchar *> &col_data, size_t num_rows, bit_array_t &result);
   void evaluate_double_vectorized(const std::vector<const uchar *> &col_data, size_t num_rows, bit_array_t &result);
   void evaluate_decimal_vectorized(const std::vector<const uchar *> &col_data, size_t num_rows, bit_array_t &result);
+
+  /**
+   * Batch evaluator for the fixed-width storage layouts (DATE, DATETIME, YEAR
+   * and the small integers). `pack` converts this predicate's bound(s) into the
+   * column's on-disk integer image once per batch and `read` decodes a cell the
+   * same way, so the per-row loop has neither a Field call nor a PredicateValue
+   * dispatch.
+   *
+   * Both are defined in predicate.cpp: only that translation unit instantiates
+   * them.
+   */
+  template <class Read, class Pack>
+  bool EvaluateOrderedBatch(const std::vector<const uchar *> &cells, size_t rows, bit_array_t &result, Read read,
+                            Pack pack) const;
+
+  /**
+   * Evaluates a batch of values for a specific storage type.
+   * @param type The field type.
+   * @param cells The vector of cell pointers.
+   * @param rows The number of rows.
+   * @param result The result bit array.
+   * @return true if the evaluation was successful, false otherwise.
+   */
+  bool EvaluateStorageBatch(enum_field_types type, const std::vector<const uchar *> &cells, size_t rows,
+                            bit_array_t &result) const;
+
+  // Bound packers. Each returns false when the bound cannot be represented
+  // exactly in the target image, in which case the generic comparator runs.
+
+  /* Fixed integer shapes decode with a type selected once per batch. Unlike the
+   * generic scalar path, these loops have no Field calls or PredicateValue cells.
+   */
+  static bool IntegerBound(const PredicateValue &value, int64_t &bound);
+
+  /** NEWDATE stores (year << 9) | (month << 5) | day, in three little-endian
+   bytes. Its integer order agrees with YYYYMMDD, including zero components
+   and dates accepted under ALLOW_INVALID_DATES. Convert exact bounds once;
+   do not construct a PredicateValue or dispatch through Field for each row.
+   */
+  static bool PackDateBound(const PredicateValue &value, int64_t &packed);
+
+  /**
+   * Packs a year value into the column's on-disk integer image.
+   * @param value The predicate value to pack.
+   * @param packed The packed integer image.
+   * @return true if the bound can be represented exactly, false otherwise.
+   */
+  static bool PackYearBound(const PredicateValue &value, int64_t &packed);
+
+  /**
+   * Packs a DATETIME0 value into the column's on-disk integer image.
+   * @param value The predicate value to pack.
+   * @param packed The packed integer image.
+   * @return true if the bound can be represented exactly, false otherwise.
+   */
+  static bool PackDatetime0Bound(const PredicateValue &value, int64_t &packed);
+
+  // Cell readers for the same layouts.
+  static int64_t ReadDatetime0(const uchar *cell);
+
+  template <bool Unsigned, bool LowByteFirst>
+  static int64_t ReadShort(const uchar *cell);
 
   /**
     The bound(s) in the column's own (precision, scale), so a DECIMAL cell
