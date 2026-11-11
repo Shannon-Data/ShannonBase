@@ -729,6 +729,10 @@ bool Item::aggregate_type(const char *name, Item **items, uint count) {
       set_data_type_json();
       break;
 
+    case MYSQL_TYPE_VECTOR:
+      set_data_type_vector(new_length);
+      break;
+
     case MYSQL_TYPE_STRING:
     case MYSQL_TYPE_VARCHAR:
     case MYSQL_TYPE_TINY_BLOB:

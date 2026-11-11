@@ -41,8 +41,8 @@ Example
 mysql> SELECT sys.ML_GENERATE("What is AI?", JSON_OBJECT("task", "generation", "model_id", "mistral-7b-instruct-v3", "language", "en"));
 '
     SQL SECURITY INVOKER
-    DETERMINISTIC
-    CONTAINS SQL
+    NOT DETERMINISTIC
+    READS SQL DATA
 BEGIN
 
   DECLARE v_generate_res TEXT;

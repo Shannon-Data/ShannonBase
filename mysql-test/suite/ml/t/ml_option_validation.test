@@ -21,6 +21,10 @@ ALTER DATABASE shannon_ml_opt CHARACTER SET ascii COLLATE ascii_bin;
 USE shannon_ml_opt;
 --enable_warnings
 
+# LightGBM warns while growing trees on this 20-row dataset; harmless here.
+--disable_query_log
+CALL mtr.add_suppression("\\[LightGBM\\] \\[Warning\\]");
+--enable_query_log
 CREATE TABLE t_clf (
     f1 INT, f2 INT, f3 DOUBLE, label INT
 );

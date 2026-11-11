@@ -587,13 +587,13 @@ int ML_anomaly_detection::predict_row(THD *, Json_wrapper &input_data, std::stri
   OPTION_VALUE_T meta_infos_model, input_values;
   if ((!input_data.empty() && Utils::parse_json(input_data, input_values, keystr, 0)) ||
       (!model_meta.empty() && Utils::parse_json(model_meta, meta_infos_model, keystr, 0))) {
-    my_error(ER_ML_FAIL, MYF(0), "invalid input data or model meta info.");
+    my_error(ER_ML_FAIL, MYF(0), "invalid input data or model meta info");
     return HA_ERR_GENERIC;
   }
 
   auto feature_names = meta_infos_model[ML_KEYWORDS::column_names];
   if (feature_names.size() != input_values.size()) {
-    my_error(ER_ML_FAIL, MYF(0), "input column count does not match model feature count.");
+    my_error(ER_ML_FAIL, MYF(0), "input column count does not match model feature count");
     return HA_ERR_GENERIC;
   }
   for (auto &feature_name : feature_names) {

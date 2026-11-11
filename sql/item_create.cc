@@ -93,6 +93,16 @@
 
 namespace {
 
+// Used by sys routines before DDL or START TRANSACTION could commit caller work.
+class Item_func_ml_session_in_transaction final : public Item_int_func {
+ public:
+  explicit Item_func_ml_session_in_transaction(const POS &pos) : Item_int_func(pos) {}
+  const char *func_name() const override { return "ML_SESSION_IN_TRANSACTION"; }
+  bool resolve_type(THD *) override { set_nullable(false); return false; }
+  table_map get_initial_pseudo_tables() const override { return RAND_TABLE_BIT; }
+  longlong val_int() override { return current_thd->in_active_multi_stmt_transaction(); }
+};
+
 /**
   @defgroup Instantiators Instantiator functions
 
@@ -1511,6 +1521,7 @@ static const std::pair<const char *, Create_func *> func_array[] = {
     {"MD5", SQL_FN(Item_func_md5, 1)},
     {"ML_MODEL_ACTIVE", SQL_FN_ODD(Item_func_ml_active, 1, 2)},
     {"ML_MODEL_TRAIN", SQL_FN_V_LIST(Item_func_ml_train, 5, 6)},
+    {"ML_SESSION_IN_TRANSACTION", SQL_FN(Item_func_ml_session_in_transaction, 0)},
     {"ML_MODEL_LOAD", SQL_FN(Item_func_ml_model_load, 1)},
     {"ML_MODEL_UNLOAD", SQL_FN(Item_func_ml_model_unload, 1)},
     {"ML_MODEL_IMPORT", SQL_FN(Item_func_ml_model_import, 3)},

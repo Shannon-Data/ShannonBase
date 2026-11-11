@@ -64,7 +64,7 @@ mysql> CALL sys.ML_RAG_TABLE("demo_db.input_table.Input", "demo_db.output_table.
        JSON_OBJECT("vector_store", JSON_ARRAY("demo_db.demo_embeddings"), "batch_size", 10));
 '
 SQL SECURITY INVOKER
-READS SQL DATA
+NOT DETERMINISTIC
 MODIFIES SQL DATA
 BEGIN
     -- =========================
@@ -139,7 +139,7 @@ BEGIN
     -- Parse options
     IF JSON_VALID(in_options) AND in_options IS NOT NULL THEN
         SET v_batch_size = COALESCE(CAST(JSON_UNQUOTE(JSON_EXTRACT(in_options, '$.batch_size')) AS UNSIGNED), 1000);
-        SET v_fail_on_embedding_error = COALESCE(CAST(JSON_UNQUOTE(JSON_EXTRACT(in_options, '$.fail_on_embedding_error')) AS UNSIGNED), TRUE);
+        SET v_fail_on_embedding_error = COALESCE(JSON_UNQUOTE(JSON_EXTRACT(in_options, '$.fail_on_embedding_error')) IN ('true','1'), TRUE);
         SET v_embed_column = JSON_UNQUOTE(JSON_EXTRACT(in_options, '$.embed_column'));
     END IF;
 
@@ -353,7 +353,9 @@ BEGIN
                 -- Call ML_RAG for single query
                 CALL sys.ML_RAG(v_current_query_text, v_current_rag_output, @rag_options);
 
-                SET v_total_processed = v_total_processed + 1;
+                IF NOT JSON_CONTAINS_PATH(v_current_rag_output,'one','$.error') THEN
+                    SET v_total_processed = v_total_processed + 1;
+                END IF;
 
             END;
 

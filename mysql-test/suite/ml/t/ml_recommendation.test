@@ -72,8 +72,9 @@ CALL sys.ML_SCORE('shannon_ml_rec.user_ratings', 'rating', @rec_model, 'balanced
 --echo ########################################################################
 --error ER_ML_FAIL
 CALL sys.ML_EXPLAIN('shannon_ml_rec.user_ratings', 'rating', @rec_model, NULL);
---echo # the sys.ML_EXPLAIN_ROW wrapper swallows the unsupported-task error and returns NULL
-SELECT sys.ML_EXPLAIN_ROW(@row_input, @rec_model, NULL) IS NULL AS explain_row_is_null;
+--echo # unsupported explanations must propagate the native error
+--error ER_ML_FAIL
+SELECT sys.ML_EXPLAIN_ROW(@row_input, @rec_model, NULL);
 
 CALL sys.ML_MODEL_UNLOAD(@rec_model);
 

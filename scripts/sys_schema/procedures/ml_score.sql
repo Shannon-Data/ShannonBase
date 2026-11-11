@@ -19,7 +19,7 @@ DROP PROCEDURE IF EXISTS ml_score;
 DELIMITER $$
 
 CREATE DEFINER='mysql.sys'@'localhost' PROCEDURE ml_score (
-        IN in_sch_tb_name VARCHAR(64), IN in_target_name VARCHAR(64), IN in_handle_name VARCHAR(64),
+        IN in_sch_tb_name VARCHAR(256), IN in_target_name VARCHAR(64), IN in_handle_name VARCHAR(255),
         IN in_metric_name VARCHAR(64), OUT in_score_var FLOAT, IN in_option JSON
     )
     COMMENT '
@@ -45,7 +45,6 @@ mysql> CALL sys.ML_SCORE(\'ml_data.iris_validate\', \'class\', @iris_model, \'ba
     NOT DETERMINISTIC
     MODIFIES SQL DATA
 BEGIN
-    DECLARE in_user_name VARCHAR(64);
     DECLARE v_user_name VARCHAR(64);
     DECLARE v_sys_schema_name VARCHAR(64);
     DECLARE v_train_test_schema_name VARCHAR(64);
@@ -53,6 +52,7 @@ BEGIN
 
     DECLARE v_db_err_msg TEXT;
     DECLARE v_train_test_obj_check INT;
+    DECLARE v_catalog_exists INT DEFAULT 0;
     DECLARE v_model_id INT;
 
    IF in_sch_tb_name NOT REGEXP '^[^.]+\.[^.]+$' THEN
@@ -60,18 +60,27 @@ BEGIN
         SET MESSAGE_TEXT = 'Invalid schema.table format, please using fully qualified name of the table.';
    END IF;
 
-   IF in_user_name IS NULL THEN
-     SELECT SUBSTRING_INDEX(CURRENT_USER(), '@', 1) INTO v_user_name;
-     SET v_sys_schema_name = CONCAT('ML_SCHEMA_', v_user_name);
-     SET in_user_name = v_user_name;
-   ELSE
-     SET v_sys_schema_name = CONCAT('ML_SCHEMA_', in_user_name);
+   SELECT SUBSTRING_INDEX(CURRENT_USER(), '@', 1) INTO v_user_name;
+   IF INSTR(v_user_name, '.') > 0 THEN
+      SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'ML routines do not support account names containing a period';
+   END IF;
+   SET v_sys_schema_name = CONCAT('ML_SCHEMA_', v_user_name);
+
+   SELECT COUNT(*) INTO v_catalog_exists
+   FROM INFORMATION_SCHEMA.TABLES
+   WHERE TABLE_SCHEMA = v_sys_schema_name AND TABLE_NAME = 'MODEL_CATALOG';
+   IF v_catalog_exists = 0 THEN
+      SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'No model catalog for the current user, train a model first';
    END IF;
 
-   SET @select_model_stm = CONCAT('SELECT MODEL_ID INTO @MODEL_ID FROM ',  v_sys_schema_name,
-                                  '.MODEL_CATALOG WHERE MODEL_HANDLE = \"', in_handle_name, '\";');
+   SET @MODEL_ID = NULL;
+   SET @score_handle = in_handle_name;
+   SET @select_model_stm = CONCAT('SELECT MODEL_ID INTO @MODEL_ID FROM `', REPLACE(v_sys_schema_name,'`','``'),
+                                  '`.MODEL_CATALOG WHERE MODEL_HANDLE = ?');
    PREPARE select_model_stmt FROM @select_model_stm;
-   EXECUTE select_model_stmt;
+   EXECUTE select_model_stmt USING @score_handle;
    SELECT @MODEL_ID into v_model_id;
    DEALLOCATE PREPARE select_model_stmt;
 
@@ -87,7 +96,7 @@ BEGIN
   FROM INFORMATION_SCHEMA.TABLES
   WHERE TABLE_SCHEMA = v_train_test_schema_name AND TABLE_NAME = v_train_test_table_name;
   IF v_train_test_obj_check = 0 THEN
-      SET v_db_err_msg = CONCAT(in_table_name, ' used to do training test does not exists.');
+      SET v_db_err_msg = CONCAT(in_sch_tb_name, ' used to do training test does not exists.');
         SIGNAL SQLSTATE 'HY000'
         SET MESSAGE_TEXT = v_db_err_msg;
   END IF;

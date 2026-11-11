@@ -150,6 +150,19 @@ CALL sys.shannon_agent_selfcheck('recall', 'cleanup', 'emb1');
 --echo # Cleanup
 --echo #
 CALL sys.shannon_agent_selfcheck('harness','trace_vector','emb1');
+--echo # HeatWave defaults, vector return type and separate-table embeddings.
+SELECT LENGTH(ML_MODEL_EMBED_ROW('omitted options')) AS default_vector_bytes;
+CREATE TABLE sh_agent_emb.row_type AS
+SELECT sys.ML_EMBED_ROW('type contract',NULL) AS embedding;
+SELECT DATA_TYPE FROM information_schema.COLUMNS
+WHERE TABLE_SCHEMA='sh_agent_emb' AND TABLE_NAME='row_type' AND COLUMN_NAME='embedding';
+CALL sys.ML_EMBED_TABLE('sh_agent_emb.docs.content','sh_agent_emb.copy.embedding',NULL);
+SELECT COUNT(*) AS copied_rows,SUM(embedding IS NOT NULL) AS embedded_rows FROM sh_agent_emb.copy;
+CREATE TABLE sh_agent_emb.boolean_options(id INT PRIMARY KEY,content TEXT);
+INSERT INTO sh_agent_emb.boolean_options VALUES(1,'boolean options');
+CALL sys.ML_EMBED_TABLE('sh_agent_emb.boolean_options.content',
+                      'sh_agent_emb.boolean_options.embedding',JSON_OBJECT('truncate',true));
+SELECT COUNT(*) AS embedded_boolean_rows FROM sh_agent_emb.boolean_options WHERE embedding IS NOT NULL;
 DROP DATABASE sh_agent_emb;
 SET @chat_options = NULL;
 

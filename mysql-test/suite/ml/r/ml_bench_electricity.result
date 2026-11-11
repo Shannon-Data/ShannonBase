@@ -67,7 +67,7 @@ SELECT `date`, consumption_mw FROM heatwaveml_bench.electricity_consumption_test
 ORDER BY id LIMIT 10;
 CALL sys.ML_PREDICT_TABLE('heatwaveml_bench.electricity_predict_in', @model_electricity,
 'heatwaveml_bench.electricity_test_predictions', NULL);
-ERROR HY000: ML operation failed. forecasting does not support predict_row..
+ERROR HY000: ML operation failed. forecasting does not support predict_row.
 CALL sys.ML_MODEL_UNLOAD(@model_electricity);
 ########################################################################
 # Cleanup

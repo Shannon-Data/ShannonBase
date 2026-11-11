@@ -40,11 +40,10 @@ CALL sys.ML_MODEL_LOAD(@fc_model, NULL);
 SELECT sys.ML_PREDICT_ROW(JSON_OBJECT('sale_date', '2024-05-01'), @fc_model, NULL);
 Got one of the listed errors
 CALL sys.ML_EXPLAIN('shannon_ml_fc.sales_ts', 'quantity', @fc_model, NULL);
-ERROR HY000: ML operation failed. forecasting does not support explain..
-# the sys.ML_EXPLAIN_ROW wrapper swallows the unsupported-task error and returns NULL
-SELECT sys.ML_EXPLAIN_ROW(JSON_OBJECT('sale_date', '2024-05-01'), @fc_model, NULL) IS NULL AS explain_row_is_null;
-explain_row_is_null
-1
+ERROR HY000: ML operation failed. forecasting does not support explain.
+# unsupported explanations must propagate the native error
+SELECT sys.ML_EXPLAIN_ROW(JSON_OBJECT('sale_date', '2024-05-01'), @fc_model, NULL);
+ERROR HY000: ML operation failed. forecasting does not support explain.
 ########################################################################
 # ML_SCORE for forecasting.
 ########################################################################

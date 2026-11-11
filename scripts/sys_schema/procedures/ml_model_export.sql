@@ -19,19 +19,21 @@ DROP PROCEDURE IF EXISTS ml_model_export;
 DELIMITER $$
 
 CREATE DEFINER='mysql.sys'@'localhost' PROCEDURE ml_model_export (
-        IN in_model_handle_name VARCHAR(256),
+        IN in_model_handle_name VARCHAR(255),
         IN in_output_table_name VARCHAR(256)
     )
     COMMENT '
 Description
 -----------
 Export an existing trained model from the model catalog to a user-defined
-table. This can be used for various purposes such as model backup, 
+table. This can be used for various purposes such as model backup,
 sharing the model with other users or tools, or migrating the model to a different environment.
+The output table must not already exist; it receives chunk_id, model_object and
+model_metadata columns that sys.ML_MODEL_IMPORT accepts as a source table.
 
 Parameters
 -----------
-in_model_handle_name (VARCHAR(256))
+in_model_handle_name (VARCHAR(255))
   The model handle identifying the model in MODEL_CATALOG.
 
 in_output_table_name (VARCHAR(256))
@@ -54,11 +56,26 @@ BEGIN
     DECLARE v_model_cnt          INT DEFAULT 0;
     DECLARE v_chunk_cnt          INT DEFAULT 0;
 
+    DECLARE v_saved_sql_mode TEXT;
+    DECLARE EXIT HANDLER FOR SQLEXCEPTION
+    BEGIN
+        IF v_saved_sql_mode IS NOT NULL THEN SET SESSION sql_mode=v_saved_sql_mode; END IF;
+        RESIGNAL;
+    END;
+
+    IF ML_SESSION_IN_TRANSACTION() OR @@SESSION.autocommit=0 THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='ML routine requires autocommit and no active transaction';
+    END IF;
+
     -- Step 1: resolve current user and catalog table names
     SELECT SUBSTRING_INDEX(CURRENT_USER(), '@', 1) INTO v_user_name;
+    IF INSTR(v_user_name, '.') > 0 THEN
+        SIGNAL SQLSTATE '45000'
+            SET MESSAGE_TEXT = 'ML routines do not support account names containing a period';
+    END IF;
 
-    SET v_catalog_fqn     = CONCAT('`ML_SCHEMA_', v_user_name, '`.`MODEL_CATALOG`');
-    SET v_obj_catalog_fqn = CONCAT('`ML_SCHEMA_', v_user_name, '`.`MODEL_OBJECT_CATALOG`');
+    SET v_catalog_fqn     = CONCAT('`ML_SCHEMA_', REPLACE(v_user_name,'`','``'), '`.`MODEL_CATALOG`');
+    SET v_obj_catalog_fqn = CONCAT('`ML_SCHEMA_', REPLACE(v_user_name,'`','``'), '`.`MODEL_OBJECT_CATALOG`');
 
     -- Step 2: verify the model handle exists in MODEL_CATALOG
     SET @sql_chk_model = CONCAT(
@@ -88,8 +105,18 @@ BEGIN
     SET v_chunk_cnt = @v_chunk_cnt;
 
     -- Step 4: parse and prepare output schema / table
+    IF INSTR(in_output_table_name, '.') = 0 THEN
+        SIGNAL SQLSTATE '45000'
+            SET MESSAGE_TEXT = 'A fully qualified output table name (schema.table) is required.';
+    END IF;
+
     SELECT SUBSTRING_INDEX(in_output_table_name, '.', 1)  INTO v_out_schema;
     SELECT SUBSTRING_INDEX(in_output_table_name, '.', -1) INTO v_out_table;
+
+    IF EXISTS (SELECT 1 FROM information_schema.TABLES
+               WHERE TABLE_SCHEMA = v_out_schema AND TABLE_NAME = v_out_table) THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Output table already exists.';
+    END IF;
 
     -- Create schema if absent
     SET @sql_create_db = CONCAT('CREATE DATABASE IF NOT EXISTS `', v_out_schema, '`;');
@@ -114,6 +141,9 @@ BEGIN
     DEALLOCATE PREPARE _stmt;
 
     IF v_chunk_cnt = 0 THEN
+        -- Metadata-only model: keep the chunk_id = 0 sentinel that import recognises.
+        SET v_saved_sql_mode=@@SESSION.sql_mode;
+        SET SESSION sql_mode=CONCAT_WS(',',v_saved_sql_mode,'NO_AUTO_VALUE_ON_ZERO');
 
         SET @sql_insert = CONCAT(
             'INSERT INTO `', v_out_schema, '`.`', v_out_table,
@@ -125,6 +155,7 @@ BEGIN
         PREPARE _stmt FROM @sql_insert;
         EXECUTE _stmt USING @_handle;
         DEALLOCATE PREPARE _stmt;
+        SET SESSION sql_mode=v_saved_sql_mode;
     ELSE
 
         SET @sql_insert = CONCAT(

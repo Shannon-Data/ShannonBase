@@ -20,7 +20,7 @@ DELIMITER $$
 
 CREATE DEFINER='mysql.sys'@'localhost' PROCEDURE ml_predict_table (
         in_sch_tb_name      VARCHAR(256),
-        in_model_handle_name VARCHAR(256),
+        in_model_handle_name VARCHAR(255),
         in_output_table_name VARCHAR(256),
         in_model_option      JSON
     )
@@ -36,7 +36,9 @@ in_model_handle_name VARCHAR(256):
   Model handle or session variable containing the model handle.
 in_output_table_name VARCHAR(256):
   Fully qualified output table name (schema_name.table_name).
-  Must not already exist.
+  Must not already exist. The table holds the input columns, a Prediction
+  column and the ml_results JSON column. When the input table has no primary
+  key, an auto-increment primary key named _4aad19ca6e_pk_id is added first.
 in_model_option JSON:
   Options forwarded to ml_predict_row (threshold, topk, recommend, etc.).
   Pass NULL if not needed.
@@ -50,8 +52,8 @@ mysql> CALL sys.ML_PREDICT_TABLE(
          NULL);
     '
     SQL SECURITY INVOKER
-    NOT DETERMINISTIC   -- performs DML; DETERMINISTIC would be incorrect
-    CONTAINS SQL
+    NOT DETERMINISTIC
+    MODIFIES SQL DATA
 BEGIN
     DECLARE v_db_err_msg   TEXT;
     DECLARE v_in_schema    VARCHAR(64);
@@ -60,11 +62,17 @@ BEGIN
     DECLARE v_out_table    VARCHAR(64);
     DECLARE v_table_count  INT DEFAULT 0;
 
+    DECLARE v_output_created BOOLEAN DEFAULT FALSE;
+    DECLARE v_ml_schema VARCHAR(64);
+    DECLARE v_catalog_exists INT DEFAULT 0;
+    DECLARE v_column_clash INT DEFAULT 0;
+    DECLARE v_saved_concat BIGINT UNSIGNED;
+
     DECLARE EXIT HANDLER FOR SQLEXCEPTION
     BEGIN
         GET DIAGNOSTICS CONDITION 1 v_db_err_msg = MESSAGE_TEXT;
 
-        IF v_out_schema IS NOT NULL AND v_out_table IS NOT NULL THEN
+        IF v_output_created THEN
             SET @_cleanup = CONCAT(
                 'DROP TABLE IF EXISTS `', v_out_schema, '`.`', v_out_table, '`;'
             );
@@ -73,9 +81,17 @@ BEGIN
             DEALLOCATE PREPARE _s;
         END IF;
 
-        SIGNAL SQLSTATE 'HY000' SET MESSAGE_TEXT = v_db_err_msg;
+        IF v_saved_concat IS NOT NULL THEN SET SESSION group_concat_max_len = v_saved_concat; END IF;
+        RESIGNAL;
     END;
 
+    -- These routines create persistent tables and cannot join a caller transaction.
+    IF ML_SESSION_IN_TRANSACTION() OR @@SESSION.autocommit = 0 THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'ML routine requires autocommit and no active transaction';
+    END IF;
+
+    SET v_saved_concat = @@SESSION.group_concat_max_len;
+    SET SESSION group_concat_max_len = 1000000;
     SET @pk_col = '_4aad19ca6e_pk_id';
 
     -- Validate name formats
@@ -115,6 +131,31 @@ BEGIN
         SIGNAL SQLSTATE 'HY000' SET MESSAGE_TEXT = v_db_err_msg;
     END IF;
 
+    -- Forecasting needs a task-specific table implementation, not row prediction.
+    SET v_ml_schema = CONCAT('ML_SCHEMA_', SUBSTRING_INDEX(CURRENT_USER(), '@', 1));
+    IF INSTR(SUBSTRING_INDEX(v_ml_schema, '.', 2), '.') > 0 THEN
+        SIGNAL SQLSTATE '45000'
+            SET MESSAGE_TEXT = 'ML routines do not support account names containing a period';
+    END IF;
+
+    SELECT COUNT(*) INTO v_catalog_exists
+    FROM information_schema.TABLES
+    WHERE TABLE_SCHEMA = v_ml_schema AND TABLE_NAME = 'MODEL_CATALOG';
+    IF v_catalog_exists = 0 THEN
+        SIGNAL SQLSTATE '45000'
+            SET MESSAGE_TEXT = 'No model catalog for the current user, train a model first';
+    END IF;
+
+    -- Forecasting models are rejected further down, by the native predict path.
+    SET @_task = NULL;
+    SET @_handle = in_model_handle_name;
+    SET @sql = CONCAT('SELECT TASK INTO @_task FROM `', REPLACE(v_ml_schema,'`','``'),
+                     '`.MODEL_CATALOG WHERE MODEL_HANDLE=?');
+    PREPARE stmt FROM @sql; EXECUTE stmt USING @_handle; DEALLOCATE PREPARE stmt;
+    IF @_task IS NULL THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Model handle does not exist in the model catalog';
+    END IF;
+
     -- Check for PK and reserved column name conflict
     SELECT COUNT(*) INTO @has_pk
     FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS
@@ -134,6 +175,17 @@ BEGIN
             SET MESSAGE_TEXT = 'Conflict: auto-PK column name already exists and is not a primary key.';
     END IF;
 
+    SELECT COUNT(*) INTO v_column_clash
+    FROM INFORMATION_SCHEMA.COLUMNS
+    WHERE TABLE_SCHEMA = v_in_schema
+      AND TABLE_NAME   = v_in_table
+      AND COLUMN_NAME IN ('Prediction', 'ml_results');
+
+    IF v_column_clash > 0 THEN
+        SIGNAL SQLSTATE '45000'
+            SET MESSAGE_TEXT = 'Input table already has a column named Prediction or ml_results';
+    END IF;
+
     -- Create output table (structure clone)
     SET @sql = CONCAT(
         'CREATE TABLE `', v_out_schema, '`.`', v_out_table, '`'
@@ -141,26 +193,27 @@ BEGIN
     );
     PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 
+    SET v_output_created = TRUE;
+
     -- Detach from HeatWave secondary engine
     SET @sql = CONCAT(
         'ALTER TABLE `', v_out_schema, '`.`', v_out_table, '` secondary_engine NULL;'
     );
     PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 
-    -- Add surrogate PK if input had none
+    -- Add the surrogate PK first, then the result columns, as documented.
     IF @has_pk = 0 THEN
         SET @sql = CONCAT(
             'ALTER TABLE `', v_out_schema, '`.`', v_out_table, '`'
-            ' ADD COLUMN `', @pk_col, '` INT AUTO_INCREMENT PRIMARY KEY;'
+            ' ADD COLUMN `', @pk_col, '` INT AUTO_INCREMENT PRIMARY KEY FIRST;'
         );
         PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
     END IF;
 
-    -- Add result columns
     SET @sql = CONCAT(
         'ALTER TABLE `', v_out_schema, '`.`', v_out_table, '`'
-        ' ADD COLUMN prediction VARCHAR(256),'
-        ' ADD COLUMN ml_results JSON;'
+        ' ADD COLUMN `Prediction` VARCHAR(256),'
+        ' ADD COLUMN `ml_results` JSON;'
     );
     PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 
@@ -213,7 +266,7 @@ BEGIN
     SET @_model_option = @_row_option;
     SET @sql = CONCAT(
         'INSERT INTO `', v_out_schema, '`.`', v_out_table, '`'
-        ' (', @col_list, ', prediction, ml_results) ',
+        ' (', @col_list, ', `Prediction`, ml_results) ',
         -- ml_predict_row returns {<features>, "Prediction": .., "ml_results": {..}}.
         -- The member is spelled "Prediction" and JSON paths are case sensitive,
         -- so '$.prediction' matched nothing and every prediction came out NULL.
@@ -237,6 +290,7 @@ BEGIN
     EXECUTE stmt;
     DEALLOCATE PREPARE stmt;
 
+    SET SESSION group_concat_max_len = v_saved_concat;
 END$$
 
 DELIMITER ;

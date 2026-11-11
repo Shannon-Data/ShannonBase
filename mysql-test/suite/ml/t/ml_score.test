@@ -54,7 +54,7 @@ ALTER TABLE census_train SECONDARY_LOAD;
 #train
 CALL sys.ML_TRAIN('shannon_ml.census_train', 'revenue', JSON_OBJECT('task', 'classification'), @census_model);
 
---ERROR 1054
+--error ER_SIGNAL_EXCEPTION
 CALL sys.ML_SCORE('heatwaveml_bench.census_test', 'revenue', @census_model, 'balanced_accuracy', @score_census, null);
 
 --ERROR ER_ML_FAIL

@@ -45,6 +45,7 @@
 #include "sql/sql_class.h"  //THD
 #include "sql/table.h"
 
+#include "ml_explanation.h"
 #include "ml_info.h"
 #include "ml_predict_adapter.h"
 #include "ml_utils.h"
@@ -742,6 +743,8 @@ int ML_regression::explain_row(THD * /*thd*/, Json_wrapper &exp_row, std::string
     return HA_ERR_GENERIC;
   }
 
+  if (!validate_explanation_features(feature_names, input_values)) return HA_ERR_GENERIC;
+
   // Shared handle: no copy of a large model and no deserialization per row.
   auto model = Utils::get_prepared_model(model_handle_name);
   if (!model) return HA_ERR_GENERIC;
@@ -811,14 +814,8 @@ int ML_regression::explain_row(THD * /*thd*/, Json_wrapper &exp_row, std::string
     } break;
   }
 
-  size_t top_idx = 0;
-  double max_abs = 0.0;
-  for (size_t i = 0; i < n_features; ++i) {
-    if (std::abs(attributions[i]) > max_abs) {
-      max_abs = std::abs(attributions[i]);
-      top_idx = i;
-    }
-  }
+  const auto selected_features = explanation_feature_order(attributions);
+  const size_t top_idx = selected_features.front();
 
   const std::string &top_feature = feature_names[top_idx];
   std::string top_value = "0";
@@ -867,8 +864,10 @@ int ML_regression::explain_row(THD * /*thd*/, Json_wrapper &exp_row, std::string
   if (!attributions_obj) {
     return HA_ERR_GENERIC;
   }
-  for (size_t i = 0; i < n_features; ++i)
+  for (const size_t i : selected_features) {
     attributions_obj->add_alias(feature_names[i], new (std::nothrow) Json_double(attributions[i]));
+    root_obj->add_alias(feature_names[i] + "_attribution", new (std::nothrow) Json_double(attributions[i]));
+  }
   ml_results->add_alias("attributions", attributions_obj.get());
 
   root_obj->add_alias(ML_KEYWORDS::ml_results, ml_results.get());
@@ -895,13 +894,13 @@ int ML_regression::predict_row(THD *, Json_wrapper &input_data, std::string &mod
 
   if ((!input_data.empty() && Utils::parse_json(input_data, input_values, keystr, 0)) ||
       (!model_meta.empty() && Utils::parse_json(model_meta, meta_feature_names, keystr, 0))) {
-    my_error(ER_ML_FAIL, MYF(0), "invalid input data or model meta info.");
+    my_error(ER_ML_FAIL, MYF(0), "invalid input data or model meta info");
     return HA_ERR_GENERIC;
   }
 
   auto feature_names = meta_feature_names[ML_KEYWORDS::column_names];
   if (feature_names.size() != input_values.size()) {
-    my_error(ER_ML_FAIL, MYF(0), "input data column count does not match the model feature count.");
+    my_error(ER_ML_FAIL, MYF(0), "input data column count does not match the model feature count");
     return HA_ERR_GENERIC;
   }
 
@@ -966,7 +965,7 @@ constexpr size_t kPredictBatchRows = 4096;
 }  // namespace
 
 // The one task implemented here, for the native ML_MODEL_PREDICT_TABLE(). It
-// only writes rows: the output table must already exist with its `prediction`
+// only writes rows: the output table must already exist with its `Prediction`
 // and `ml_results` columns. See ML_algorithm::predict_table.
 int ML_regression::predict_table(THD *, std::string &sch_tb_name, std::string &model_handle_name,
                                  std::string &out_sch_tb_name, Json_wrapper &options) {
@@ -1039,16 +1038,17 @@ int ML_regression::predict_table(THD *, std::string &sch_tb_name, std::string &m
     return HA_ERR_GENERIC;
   }
 
-  // Locate output-table columns by name
+  // Locate output-table columns by name. Column names are matched
+  // case-insensitively because `Prediction` keeps its declared spelling.
   int prediction_field_idx = -1;
   int ml_results_field_idx = -1;
   for (uint i = 0; i < out_tg.get()->s->fields; i++) {
     const char *fn = out_tg.get()->field[i]->field_name;
-    if (strcmp(fn, "prediction") == 0) prediction_field_idx = (int)i;
+    if (my_strcasecmp(system_charset_info, fn, "Prediction") == 0) prediction_field_idx = (int)i;
     if (strcmp(fn, "ml_results") == 0) ml_results_field_idx = (int)i;
   }
   if (prediction_field_idx == -1 || ml_results_field_idx == -1) {
-    my_error(ER_ML_FAIL, MYF(0), "Output table missing required 'prediction' or 'ml_results' column");
+    my_error(ER_ML_FAIL, MYF(0), "Output table missing required 'Prediction' or 'ml_results' column");
     return HA_ERR_GENERIC;
   }
 
@@ -1064,7 +1064,7 @@ int ML_regression::predict_table(THD *, std::string &sch_tb_name, std::string &m
   std::vector<Mapped_column> mapped_columns;
   for (uint oi = 0; oi < out_tg.get()->s->fields; oi++) {
     const char *out_fn = out_tg.get()->field[oi]->field_name;
-    if (strcmp(out_fn, "prediction") == 0 || strcmp(out_fn, "ml_results") == 0) continue;
+    if (my_strcasecmp(system_charset_info, out_fn, "Prediction") == 0 || strcmp(out_fn, "ml_results") == 0) continue;
     auto it = in_field_map.find(out_fn);
     if (it == in_field_map.end()) continue;
     mapped_columns.push_back({oi, it->second});

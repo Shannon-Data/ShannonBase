@@ -19,10 +19,10 @@ DROP PROCEDURE IF EXISTS ml_train;
 DELIMITER $$
 
 CREATE DEFINER='mysql.sys'@'localhost' PROCEDURE ml_train (
-        IN in_table_name VARCHAR(64),
+        IN in_table_name VARCHAR(256),
         IN in_target_name VARCHAR(64),
         IN in_option JSON,
-        INOUT in_model_handle VARCHAR(64)
+        INOUT in_model_handle VARCHAR(255)
     )
     COMMENT '
 Description
@@ -30,9 +30,12 @@ Description
 
 Run the ML_TRAIN routine on a labeled training dataset to produce a trained machine learning model.
 
+The model explainer is not trained here: unlike HeatWave, run sys.ML_EXPLAIN after
+loading the model to populate MODEL_CATALOG.MODEL_EXPLANATION.
+
 Parameters
 -----------
-in_table_name (VARCHAR(64)):
+in_table_name (VARCHAR(256)):
   fully qualified name of the table containing the training dataset.
 in_target_name (VARCHAR(64)):
   name of the column in \'table_name\' representing the target, i.e. ground truth values (required for some tasks)
@@ -40,7 +43,7 @@ in_option (JSON)
   optional training parameters as key-value pairs in JSON format.
     1: The most important parameter is \'task\', which specifies the ML task to be performed (if not specified, \'classification\' is assumed)
     2: Other parameters allow finer-grained control on the training task
-in_model_handle (VARCHAR(64))
+in_model_handle (VARCHAR(255))
    user-defined session variable storing the ML model handle for the duration of the connection
 Example
 -----------
@@ -74,10 +77,23 @@ BEGIN
 
     DECLARE v_model_object_size  BIGINT UNSIGNED DEFAULT 0;
     DECLARE v_model_object_text  LONGTEXT;
+    DECLARE v_notes              TEXT DEFAULT '';
     DECLARE v_chunk_size         INT DEFAULT 16777216; -- 16MB
     DECLARE v_chunk_id           INT DEFAULT 1;
     DECLARE v_offset             BIGINT DEFAULT 0;
     DECLARE v_remain             BIGINT;
+
+    DECLARE v_tx BOOLEAN DEFAULT FALSE;
+    DECLARE EXIT HANDLER FOR SQLEXCEPTION
+    BEGIN
+        IF v_tx THEN ROLLBACK; END IF;
+        RESIGNAL;
+    END;
+
+    -- These routines create persistent tables and cannot join a caller transaction.
+    IF ML_SESSION_IN_TRANSACTION() OR @@SESSION.autocommit = 0 THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'ML routine requires autocommit and no active transaction';
+    END IF;
 
     -- Step 1-3 : Basic Validation (table name, size, rows, columns)
     IF in_table_name NOT REGEXP '^[^.]+\.[^.]+$' THEN
@@ -114,62 +130,56 @@ BEGIN
         SIGNAL SQLSTATE '45002' SET MESSAGE_TEXT = 'Table cannot exceed 1017 columns';
     END IF;
 
-    -- Step 4 : Create User-specific ML_SCHEMA_xxx
     SELECT SUBSTRING_INDEX(CURRENT_USER(),'@',1) INTO v_user_name;
+    IF INSTR(v_user_name, '.') > 0 THEN
+        SIGNAL SQLSTATE '45000'
+            SET MESSAGE_TEXT = 'ML routines do not support account names containing a period';
+    END IF;
     SET v_sys_schema_name = CONCAT('ML_SCHEMA_', v_user_name);
 
-    SELECT SCHEMA_NAME INTO v_db_name_check
-    FROM INFORMATION_SCHEMA.SCHEMATA
-    WHERE SCHEMA_NAME = v_sys_schema_name;
-
-    IF v_db_name_check IS NULL THEN
-        START TRANSACTION;
-
-        SET @sql = CONCAT('CREATE DATABASE ', v_sys_schema_name);
-        PREPARE s FROM @sql; EXECUTE s; DEALLOCATE PREPARE s;
-
-        -- -------- MODEL_CATALOG (latest official structure) ----------
-        SET @sql = CONCAT('
-            CREATE TABLE ', v_sys_schema_name, '.MODEL_CATALOG (
-                MODEL_ID            BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-                MODEL_HANDLE        VARCHAR(255) NOT NULL,
-                MODEL_OBJECT        JSON DEFAULT NULL COMMENT "Always NULL - stored in MODEL_OBJECT_CATALOG",
-                MODEL_OWNER         VARCHAR(255) DEFAULT NULL,
-                BUILD_TIMESTAMP     BIGINT UNSIGNED NOT NULL DEFAULT (unix_timestamp()),
-                TARGET_COLUMN_NAME  VARCHAR(64)  DEFAULT NULL,
-                TRAIN_TABLE_NAME    VARCHAR(255) NOT NULL,
-                MODEL_OBJECT_SIZE   BIGINT UNSIGNED NOT NULL DEFAULT 0,
-                MODEL_TYPE          VARCHAR(128) DEFAULT NULL,
-                TASK                VARCHAR(64)  DEFAULT NULL,
-                COLUMN_NAMES        JSON         DEFAULT NULL,
-                MODEL_EXPLANATION   JSON         DEFAULT NULL,
-                LAST_ACCESSED       BIGINT UNSIGNED DEFAULT NULL,
-                MODEL_METADATA      JSON         DEFAULT NULL,
-                NOTES               TEXT         DEFAULT NULL,
-                PRIMARY KEY (MODEL_ID),
-                UNIQUE KEY uk_model_handle (MODEL_HANDLE),
-                KEY idx_owner (MODEL_OWNER),
-                KEY idx_train_table (TRAIN_TABLE_NAME),
-                KEY idx_task (TASK),
-                KEY idx_last_accessed (LAST_ACCESSED),
-                KEY idx_build_time (BUILD_TIMESTAMP)
-            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
-            COMMENT="ShannonBase ML Model Catalog"');
-        PREPARE s FROM @sql; EXECUTE s; DEALLOCATE PREPARE s;
-
-        -- -------- MODEL_OBJECT_CATALOG (store large models in chunks) ----------
-        SET @sql = CONCAT('
-            CREATE TABLE ', v_sys_schema_name, '.MODEL_OBJECT_CATALOG (
-                CHUNK_ID      INT UNSIGNED NOT NULL,
-                MODEL_HANDLE  VARCHAR(255) NOT NULL,
-                MODEL_OBJECT  LONGTEXT NOT NULL,
-                PRIMARY KEY uk_handle_chunk (MODEL_HANDLE, CHUNK_ID),
-                KEY idx_handle (MODEL_HANDLE)
-            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
-            COMMENT="Large model binaries stored in chunks"
-        ');
-        PREPARE s FROM @sql; EXECUTE s; DEALLOCATE PREPARE s;
-        COMMIT;
+    -- Step 4 : First training bootstraps this user's model catalog, as HeatWave does.
+    IF (SELECT COUNT(*) FROM information_schema.TABLES
+        WHERE TABLE_SCHEMA=v_sys_schema_name AND TABLE_NAME IN ('MODEL_CATALOG','MODEL_OBJECT_CATALOG')) < 2 THEN
+        SET @ml_catalog_ddl = CONCAT('CREATE DATABASE IF NOT EXISTS `', REPLACE(v_sys_schema_name,'`','``'), '`');
+        PREPARE ml_catalog_stmt FROM @ml_catalog_ddl;
+        EXECUTE ml_catalog_stmt; DEALLOCATE PREPARE ml_catalog_stmt;
+        SET @ml_catalog_ddl = CONCAT('CREATE TABLE IF NOT EXISTS `', REPLACE(v_sys_schema_name,'`','``'),
+            '`.MODEL_CATALOG (',
+            'MODEL_ID BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,',
+            'MODEL_HANDLE VARCHAR(255) NOT NULL,',
+            'MODEL_OBJECT JSON DEFAULT NULL,',
+            'MODEL_OWNER VARCHAR(255) DEFAULT NULL,',
+            'BUILD_TIMESTAMP BIGINT UNSIGNED NOT NULL DEFAULT (unix_timestamp()),',
+            'TARGET_COLUMN_NAME VARCHAR(64) DEFAULT NULL,',
+            'TRAIN_TABLE_NAME VARCHAR(255) NOT NULL,',
+            'MODEL_OBJECT_SIZE BIGINT UNSIGNED NOT NULL DEFAULT 0,',
+            'MODEL_TYPE VARCHAR(128) DEFAULT NULL,',
+            'TASK VARCHAR(64) DEFAULT NULL,',
+            'COLUMN_NAMES JSON DEFAULT NULL,',
+            'MODEL_EXPLANATION JSON DEFAULT NULL,',
+            'LAST_ACCESSED BIGINT UNSIGNED DEFAULT NULL,',
+            'MODEL_METADATA JSON DEFAULT NULL,',
+            'NOTES TEXT DEFAULT NULL,',
+            'PRIMARY KEY (MODEL_ID),',
+            'UNIQUE KEY uk_model_handle (MODEL_HANDLE),',
+            'KEY idx_owner (MODEL_OWNER),',
+            'KEY idx_train_table (TRAIN_TABLE_NAME),',
+            'KEY idx_task (TASK),',
+            'KEY idx_last_accessed (LAST_ACCESSED),',
+            'KEY idx_build_time (BUILD_TIMESTAMP)',
+            ') ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci');
+        PREPARE ml_catalog_stmt FROM @ml_catalog_ddl;
+        EXECUTE ml_catalog_stmt; DEALLOCATE PREPARE ml_catalog_stmt;
+        SET @ml_catalog_ddl = CONCAT('CREATE TABLE IF NOT EXISTS `', REPLACE(v_sys_schema_name,'`','``'),
+            '`.MODEL_OBJECT_CATALOG (',
+            'CHUNK_ID INT UNSIGNED NOT NULL,',
+            'MODEL_HANDLE VARCHAR(255) NOT NULL,',
+            'MODEL_OBJECT LONGTEXT NOT NULL,',
+            'PRIMARY KEY uk_handle_chunk (MODEL_HANDLE, CHUNK_ID),',
+            'KEY idx_handle (MODEL_HANDLE)',
+            ') ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci');
+        PREPARE ml_catalog_stmt FROM @ml_catalog_ddl;
+        EXECUTE ml_catalog_stmt; DEALLOCATE PREPARE ml_catalog_stmt;
     END IF;
 
     -- Step 5-7 : Table existence, handle, target column validation.
@@ -194,7 +204,9 @@ BEGIN
             SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Model handle already exists';
         END IF;
     ELSE
-        SET v_model_handle = CONCAT(in_table_name,'_',v_user_name,'_',SUBSTRING(MD5(RAND()),1,10));
+        -- Keep the generated handle inside MODEL_CATALOG.MODEL_HANDLE's VARCHAR(255).
+        SET v_model_handle = CONCAT(LEFT(CONCAT(in_table_name,'_',v_user_name),244),'_',
+                                    SUBSTRING(MD5(RAND()),1,10));
     END IF;
 
     IF in_target_name IS NOT NULL AND in_target_name != '' AND
@@ -213,6 +225,7 @@ BEGIN
 
     -- Step 9 : Call underlying native ML_MODEL_TRAIN
     START TRANSACTION;
+    SET v_tx=TRUE;
     SELECT ML_MODEL_TRAIN(in_table_name,
                     in_target_name,
                     in_option,
@@ -220,6 +233,7 @@ BEGIN
                     o_model_object,
                     o_model_metadata) INTO v_train_obj_check;
     COMMIT;
+    SET v_tx=FALSE;
 
     IF v_train_obj_check != 0 THEN
         SET v_err_msg = CONCAT('ML_TRAIN native function failed with code ', v_train_obj_check);
@@ -228,6 +242,7 @@ BEGIN
     END IF;
 
     START TRANSACTION;
+    SET v_tx=TRUE;
     SET @model_json_extracted = NULL;
     -- see the ref: `Utils::ML_train`
     SET @model_json_extracted = JSON_EXTRACT(o_model_object, '$.SHANNON_LIGHTGBM_CONTENT');
@@ -237,6 +252,7 @@ BEGIN
         SET v_model_object_text = JSON_UNQUOTE(o_model_object);
     END IF;
     SET v_model_object_size = LENGTH(v_model_object_text);
+    SET v_notes = COALESCE(JSON_UNQUOTE(JSON_EXTRACT(in_option,'$.notes')), '');
 
     -- insert into catalog
     SET @cat_sql = CONCAT(
@@ -250,7 +266,7 @@ BEGIN
         v_model_object_size, ',',
         QUOTE(v_task), ',',
         QUOTE(o_model_metadata), ',',
-        QUOTE('Model created by ml_train - compressed'),
+        IF(v_notes = '', 'NULL', QUOTE(v_notes)),
         ')'
     );
 
@@ -276,9 +292,7 @@ BEGIN
         SET v_remain = v_remain - v_chunk_size;
         SET v_chunk_id = v_chunk_id + 1;
     END WHILE chunk_loop;
-    /* Write back the actual handle (user-supplied or auto-generated) to the
-     * caller's session variable so that SELECT @_shannon_ml_handle after CALL
-     * returns the correct value. */
+    -- Write the actual handle (user-supplied or auto-generated) back to the caller's variable.
     SET in_model_handle = v_model_handle;
 COMMIT;
 END$$

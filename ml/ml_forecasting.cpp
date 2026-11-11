@@ -377,32 +377,29 @@ double ML_forecasting::score(THD * /*thd*/, std::string &sch_tb_name, std::strin
 
 int ML_forecasting::explain(THD * /*thd*/, std::string & /*sch_tb_name*/, std::string & /*target_column_name*/,
                             std::string & /*model_handle_name*/, Json_wrapper & /*exp_options*/) {
-  my_error(ER_ML_FAIL, MYF(0), "forecasting does not support explain.");
+  my_error(ER_ML_FAIL, MYF(0), "forecasting does not support explain");
   return HA_ERR_GENERIC;
 }
 
 int ML_forecasting::explain_row(THD *, Json_wrapper &, std::string &, Json_wrapper &, Json_wrapper &) {
-  my_error(ER_ML_FAIL, MYF(0), "forecasting does not support explain.");
+  my_error(ER_ML_FAIL, MYF(0), "forecasting does not support explain");
   return HA_ERR_GENERIC;
 }
 
 int ML_forecasting::explain_table(THD *) {
-  my_error(ER_ML_FAIL, MYF(0), "forecasting does not support explain.");
+  my_error(ER_ML_FAIL, MYF(0), "forecasting does not support explain");
   return HA_ERR_GENERIC;
 }
 
 int ML_forecasting::predict_row(THD * /*thd*/, Json_wrapper &, std::string &, Json_wrapper &, Json_wrapper &) {
-  std::ostringstream err;
-  err << "forecasting does not support predict_row.";
-  my_error(ER_ML_FAIL, MYF(0), err.str().c_str());
+  my_error(ER_ML_FAIL, MYF(0), "forecasting does not support predict_row");
   return HA_ERR_GENERIC;
 }
 
 int ML_forecasting::predict_table(THD * /*thd*/, std::string & /*sch_tb_name*/, std::string & /*model_handle_name*/,
                                   std::string & /*out_sch_tb_name*/, Json_wrapper & /*options*/) {
-  // Scaffolding: sys.ML_PREDICT_TABLE covers this from SQL by calling
-  // sys.ml_predict_row per row. See ML_algorithm::predict_table.
-  return 0;
+  my_error(ER_ML_FAIL, MYF(0), "ML_PREDICT_TABLE forecasting is not supported");
+  return HA_ERR_GENERIC;
 }
 }  // namespace ML
 }  // namespace ShannonBase
