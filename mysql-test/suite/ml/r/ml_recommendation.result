@@ -53,10 +53,9 @@ ERROR HY000: ML operation failed. BALANCED_ACCURACY is invalid for recommendatio
 ########################################################################
 CALL sys.ML_EXPLAIN('shannon_ml_rec.user_ratings', 'rating', @rec_model, NULL);
 ERROR HY000: ML operation failed. recommendation does not support explain operation.
-# the sys.ML_EXPLAIN_ROW wrapper swallows the unsupported-task error and returns NULL
-SELECT sys.ML_EXPLAIN_ROW(@row_input, @rec_model, NULL) IS NULL AS explain_row_is_null;
-explain_row_is_null
-1
+# unsupported explanations must propagate the native error
+SELECT sys.ML_EXPLAIN_ROW(@row_input, @rec_model, NULL);
+ERROR HY000: ML operation failed. recommendation does not support explain operation.
 CALL sys.ML_MODEL_UNLOAD(@rec_model);
 DROP DATABASE IF EXISTS ML_SCHEMA_root;
 ALTER TABLE user_ratings SECONDARY_UNLOAD;

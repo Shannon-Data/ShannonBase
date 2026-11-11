@@ -20,7 +20,7 @@ DELIMITER $$
 
 CREATE DEFINER='mysql.sys'@'localhost' FUNCTION ml_explain_row (
     input_data JSON,
-    model_handle VARCHAR(64),
+    model_handle VARCHAR(255),
     options JSON
 ) RETURNS JSON
 COMMENT '
@@ -46,7 +46,7 @@ input_data (JSON):
   The data to generate explanations for in JSON format.
   Column names must match the feature column names used to train the model.
 
-model_handle (VARCHAR(64)):
+model_handle (VARCHAR(255)):
   The model handle or session variable containing the model handle.
 
 options (JSON):
@@ -60,20 +60,13 @@ Returns
 JSON object containing the prediction explanation results.
 '
     SQL SECURITY INVOKER
-    DETERMINISTIC
-    CONTAINS SQL
+    NOT DETERMINISTIC
+    READS SQL DATA
 BEGIN
     -- All DECLARE statements must be first
-    DECLARE v_error BOOLEAN DEFAULT FALSE;
     DECLARE v_prediction_explainer VARCHAR(64) DEFAULT 'permutation_importance';
-    DECLARE v_error_msg TEXT;
     DECLARE v_result JSON;
 
-    DECLARE CONTINUE HANDLER FOR SQLEXCEPTION
-    BEGIN
-        SET v_error = TRUE;
-        GET DIAGNOSTICS CONDITION 1 v_error_msg = MESSAGE_TEXT;
-    END;
 
     -- Validate parameters
     IF input_data IS NULL THEN

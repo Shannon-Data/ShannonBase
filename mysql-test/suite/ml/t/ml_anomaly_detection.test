@@ -98,8 +98,9 @@ SELECT count(*) AS predicted_rows FROM census_anom_out;
 --echo ########################################################################
 --error ER_ML_FAIL
 CALL sys.ML_EXPLAIN('shannon_ml_anom.census_train', '', @anom_model, NULL);
---echo # the sys.ML_EXPLAIN_ROW wrapper swallows the unsupported-task error and returns NULL
-SELECT sys.ML_EXPLAIN_ROW(@row_input, @anom_model, NULL) IS NULL AS explain_row_is_null;
+--echo # unsupported explanations must propagate the native error
+--error ER_ML_FAIL
+SELECT sys.ML_EXPLAIN_ROW(@row_input, @anom_model, NULL);
 
 CALL sys.ML_MODEL_UNLOAD(@anom_model);
 

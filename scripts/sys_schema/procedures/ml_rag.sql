@@ -71,15 +71,19 @@ READS SQL DATA
 BEGIN
     DECLARE v_vector_store       JSON;
     DECLARE v_schema             JSON;
+    DECLARE v_exclude_stores JSON;
+    DECLARE v_exclude_documents JSON;
+    DECLARE v_context_index INT DEFAULT 0;
+    DECLARE v_context_segment LONGTEXT;
     DECLARE v_n_citations        INT            DEFAULT 3;
     DECLARE v_distance_metric    VARCHAR(32)    DEFAULT 'COSINE';
     DECLARE v_document_name      JSON;
     DECLARE v_skip_generate      BOOLEAN        DEFAULT FALSE;
     DECLARE v_model_options      JSON;
     DECLARE v_embed_model_id     VARCHAR(255)   DEFAULT 'multilingual-e5-small';
-    DECLARE v_query_embedding    VECTOR(384);
-    DECLARE v_max_distance       DECIMAL(10,6)  DEFAULT 0.6;
-    DECLARE v_percentage_distance DECIMAL(5,2)  DEFAULT 20.0;
+    DECLARE v_query_embedding    VECTOR(16383);
+    DECLARE v_max_distance       DECIMAL(16,6)  DEFAULT 0.6;
+    DECLARE v_percentage_distance DECIMAL(16,6)  DEFAULT 20.0;
     DECLARE v_segment_overlap    INT            DEFAULT 1;
 
     DECLARE v_generated_text     LONGTEXT       DEFAULT '';
@@ -91,8 +95,8 @@ BEGIN
     DECLARE v_curr_schema        VARCHAR(64);
     DECLARE v_curr_table         VARCHAR(64);
     DECLARE v_vector_string      TEXT;
-    DECLARE v_min_distance       DECIMAL(10,6);
-    DECLARE v_max_allowed_distance DECIMAL(10,6);
+    DECLARE v_min_distance       DECIMAL(16,6);
+    DECLARE v_max_allowed_distance DECIMAL(16,6);
 
     DECLARE v_doc_filter         TEXT           DEFAULT '';
     DECLARE v_doc_count          INT            DEFAULT 0;
@@ -142,13 +146,23 @@ BEGIN
     IF JSON_VALID(in_options) AND in_options IS NOT NULL THEN
         SET v_vector_store    = JSON_EXTRACT(in_options, '$.vector_store');
         SET v_schema          = JSON_EXTRACT(in_options, '$.schema');
+        SET v_exclude_stores=JSON_EXTRACT(in_options,'$.exclude_vector_store');
+        SET v_exclude_documents=JSON_EXTRACT(in_options,'$.exclude_document_name');
         SET v_n_citations     = COALESCE(
             CAST(JSON_UNQUOTE(JSON_EXTRACT(in_options, '$.n_citations')) AS UNSIGNED), 3);
         SET v_distance_metric = UPPER(COALESCE(
             JSON_UNQUOTE(JSON_EXTRACT(in_options, '$.distance_metric')), 'COSINE'));
         SET v_document_name   = JSON_EXTRACT(in_options, '$.document_name');
-        SET v_skip_generate   = COALESCE(
-            CAST(JSON_UNQUOTE(JSON_EXTRACT(in_options, '$.skip_generate')) AS UNSIGNED), FALSE);
+        IF JSON_CONTAINS_PATH(in_options,'one','$.skip_generate') THEN
+            IF JSON_UNQUOTE(JSON_EXTRACT(in_options,'$.skip_generate')) NOT IN ('true','false','0','1') THEN
+                SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='skip_generate must be boolean';
+            END IF;
+            SET v_skip_generate=JSON_UNQUOTE(JSON_EXTRACT(in_options,'$.skip_generate')) IN ('true','1');
+        END IF;
+        IF JSON_UNQUOTE(JSON_EXTRACT(in_options,'$.semantic_search')) IN ('false','0')
+           OR JSON_UNQUOTE(JSON_EXTRACT(in_options,'$.keyword_search')) IN ('true','1') THEN
+            SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='Only semantic vector search is currently supported';
+        END IF;
         SET v_model_options   = JSON_EXTRACT(in_options, '$.model_options');
         SET v_embed_model_id  = COALESCE(
             JSON_UNQUOTE(JSON_EXTRACT(in_options, '$.embed_model_id')),
@@ -180,10 +194,10 @@ BEGIN
         IF JSON_EXTRACT(in_options, '$.retrieval_options') IS NOT NULL THEN
             SET v_max_distance = COALESCE(
                 CAST(JSON_UNQUOTE(JSON_EXTRACT(in_options, '$.retrieval_options.max_distance'))
-                     AS DECIMAL(10,6)), 0.6);
+                     AS DECIMAL(16,6)), 0.6);
             SET v_percentage_distance = COALESCE(
                 CAST(JSON_UNQUOTE(JSON_EXTRACT(in_options, '$.retrieval_options.percentage_distance'))
-                     AS DECIMAL(5,2)), 20.0);
+                     AS DECIMAL(16,6)), 20.0);
             SET v_segment_overlap = COALESCE(
                 CAST(JSON_UNQUOTE(JSON_EXTRACT(in_options, '$.retrieval_options.segment_overlap'))
                      AS UNSIGNED), 1);
@@ -195,6 +209,12 @@ BEGIN
                 JSON_UNQUOTE(JSON_EXTRACT(in_options, '$.query_embedding')));
         END IF;
     END IF;
+
+    IF (v_exclude_stores IS NOT NULL AND JSON_TYPE(v_exclude_stores)<>'ARRAY')
+       OR (v_exclude_documents IS NOT NULL AND JSON_TYPE(v_exclude_documents)<>'ARRAY') THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='RAG exclusion lists must be JSON arrays';
+    END IF;
+    SET @_rag_exclude_documents=COALESCE(v_exclude_documents,JSON_ARRAY());
 
     -- Parameter validation
     IF v_n_citations < 0 OR v_n_citations > 100 THEN
@@ -350,6 +370,10 @@ BEGIN
         END IF;
     END IF;
 
+    DELETE FROM temp_vector_stores
+    WHERE JSON_CONTAINS(COALESCE(v_exclude_stores,JSON_ARRAY()),JSON_QUOTE(store_name))
+       OR JSON_CONTAINS(COALESCE(v_exclude_stores,JSON_ARRAY()),JSON_QUOTE(table_name));
+
     -- Probe column existence for every registered store in one pass.
     -- We use a correlated EXISTS against information_schema.COLUMNS.
     UPDATE temp_vector_stores tvs
@@ -374,7 +398,7 @@ BEGIN
     DROP TEMPORARY TABLE IF EXISTS temp_citations_base;
     CREATE TEMPORARY TABLE temp_citations_base (
         segment       LONGTEXT     COLLATE utf8mb4_0900_ai_ci,
-        distance      DECIMAL(10,6),
+        distance      DECIMAL(16,6),
         document_name VARCHAR(255) COLLATE utf8mb4_0900_ai_ci,
         vector_store  VARCHAR(255) COLLATE utf8mb4_0900_ai_ci,
         segment_number INT,
@@ -446,6 +470,12 @@ BEGIN
             'AND `', v_col_segment_embedding, '` IS NOT NULL '
         );
 
+        IF v_has_document_name THEN
+            SET @sql=CONCAT(@sql,
+                'AND NOT JSON_CONTAINS(@_rag_exclude_documents, JSON_QUOTE(CAST(`',
+                v_col_document_name, '` AS CHAR CHARACTER SET utf8mb4))) ');
+        END IF;
+
         -- Optional document-name filter (skip when column absent)
         IF v_document_name IS NOT NULL
            AND JSON_LENGTH(v_document_name) > 0
@@ -484,7 +514,7 @@ BEGIN
         DROP TEMPORARY TABLE IF EXISTS temp_citations_overlap;
         CREATE TEMPORARY TABLE temp_citations_overlap (
             segment       LONGTEXT,
-            distance      DECIMAL(10,6),
+            distance      DECIMAL(16,6),
             document_name VARCHAR(255),
             vector_store  VARCHAR(255),
             segment_number INT,
@@ -580,7 +610,7 @@ BEGIN
         DROP TEMPORARY TABLE IF EXISTS temp_citations_final;
         CREATE TEMPORARY TABLE temp_citations_final (
             segment       LONGTEXT,
-            distance      DECIMAL(10,6),
+            distance      DECIMAL(16,6),
             document_name VARCHAR(255),
             vector_store  VARCHAR(255),
             segment_number INT,
@@ -604,8 +634,14 @@ BEGIN
     ELSE
         -- No overlap requested: promote base table directly
         DROP TEMPORARY TABLE IF EXISTS temp_citations_final;
-        RENAME TABLE temp_citations_base TO temp_citations_final;
+        CREATE TEMPORARY TABLE temp_citations_final LIKE temp_citations_base;
+        INSERT INTO temp_citations_final SELECT * FROM temp_citations_base;
+        DROP TEMPORARY TABLE temp_citations_base;
     END IF;
+
+    -- Apply exclusions to neighbors as well as the initial nearest matches.
+    DELETE FROM temp_citations_final
+    WHERE JSON_CONTAINS(@_rag_exclude_documents,JSON_QUOTE(document_name));
 
     -- 3. Distance filtering
     SELECT MIN(distance) INTO v_min_distance FROM temp_citations_final;
@@ -640,13 +676,17 @@ BEGIN
     END IF;
 
     -- 5. Generate response (or return raw context)
-    SELECT COALESCE(GROUP_CONCAT(segment SEPARATOR '\n\n'), '')
-    INTO @context
-    FROM (
-        SELECT segment FROM temp_citations_final
-        ORDER BY distance ASC
-        LIMIT v_n_citations
-    ) ctx;
+    -- JSON citations already contain the selected segments. Avoid GROUP_CONCAT's
+    -- session-dependent truncation when assembling the actual model context.
+    SET @context='';
+    WHILE v_context_index < JSON_LENGTH(v_citations) DO
+        SET v_context_segment=JSON_UNQUOTE(JSON_EXTRACT(v_citations,CONCAT('$[',v_context_index,'].segment')));
+        IF OCTET_LENGTH(@context)+OCTET_LENGTH(v_context_segment)+2 > @@max_allowed_packet THEN
+            SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='RAG context exceeds max_allowed_packet';
+        END IF;
+        SET @context=CONCAT(@context,IF(v_context_index=0,'','\n\n'),v_context_segment);
+        SET v_context_index=v_context_index+1;
+    END WHILE;
 
     IF NOT v_skip_generate THEN
         SET @prompt = CONCAT(

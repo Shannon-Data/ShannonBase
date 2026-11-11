@@ -115,7 +115,7 @@ ALTER TABLE census_train_10 ADD PRIMARY KEY (id);
 alter table shannon_ml.census_train_10 secondary_engine=rapid;
 alter table shannon_ml.census_train_10 secondary_load;
 # ML operation failed. input data column count does not match model feature count
---error 1644
+--error ER_ML_FAIL
 CALL sys.ML_PREDICT_TABLE('shannon_ml.census_train_10', @census_model, 'shannon_ml.census_train_predictions', NULL);
 
 ALTER TABLE census_train_10 SECONDARY_ENGINE=NULL;

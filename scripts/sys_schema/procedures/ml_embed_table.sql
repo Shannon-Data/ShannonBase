@@ -65,7 +65,7 @@ BEGIN
     DECLARE v_output_db VARCHAR(64);
     DECLARE v_output_table VARCHAR(64);
     DECLARE v_output_column VARCHAR(64);
-    DECLARE v_model_id VARCHAR(255);
+    DECLARE v_model_id VARCHAR(255) DEFAULT 'multilingual-e5-small';
     DECLARE v_truncate BOOLEAN DEFAULT TRUE;
     DECLARE v_batch_size INT DEFAULT 1000;
     DECLARE v_details_column VARCHAR(64) DEFAULT 'details';
@@ -86,6 +86,10 @@ BEGIN
             v_error_msg = MESSAGE_TEXT;
         RESIGNAL SET MESSAGE_TEXT = v_error_msg;
     END;
+
+    IF ML_SESSION_IN_TRANSACTION() OR @@SESSION.autocommit=0 THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='ML routine requires autocommit and no active transaction';
+    END IF;
 
     -- Parse input table column (DBName.TableName.ColumnName)
     IF CHAR_LENGTH(in_input_table_column) - CHAR_LENGTH(REPLACE(in_input_table_column, '.', '')) != 2 THEN
@@ -113,8 +117,13 @@ BEGIN
 
     -- Extract options from JSON
     IF in_options IS NOT NULL AND JSON_VALID(in_options) THEN
-        SET v_model_id = JSON_UNQUOTE(JSON_EXTRACT(in_options, '$.model_id'));
-        SET v_truncate = COALESCE(CAST(JSON_UNQUOTE(JSON_EXTRACT(in_options, '$.truncate')) AS UNSIGNED), TRUE);
+        SET v_model_id = COALESCE(JSON_UNQUOTE(JSON_EXTRACT(in_options, '$.model_id')),v_model_id);
+        IF JSON_CONTAINS_PATH(in_options,'one','$.truncate') THEN
+            IF JSON_UNQUOTE(JSON_EXTRACT(in_options,'$.truncate')) NOT IN ('true','false','0','1') THEN
+                SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='truncate must be boolean';
+            END IF;
+            SET v_truncate=JSON_UNQUOTE(JSON_EXTRACT(in_options,'$.truncate')) IN ('true','1');
+        END IF;
         SET v_batch_size = COALESCE(CAST(JSON_UNQUOTE(JSON_EXTRACT(in_options, '$.batch_size')) AS UNSIGNED), 1000);
         SET v_details_column = COALESCE(JSON_UNQUOTE(JSON_EXTRACT(in_options, '$.details_column')), 'details');
     END IF;
@@ -164,7 +173,7 @@ BEGIN
     -- Check if input column is part of primary key
     SELECT COUNT(*) INTO v_column_exists
     FROM information_schema.key_column_usage k
-    JOIN information_schema.table_constraints t ON k.constraint_name = t.constraint_name
+    JOIN information_schema.table_constraints t ON k.constraint_name = t.constraint_name AND k.table_schema=t.table_schema AND k.table_name=t.table_name
     WHERE k.table_schema = v_input_db 
     AND k.table_name = v_input_table 
     AND k.column_name = v_input_column
@@ -228,12 +237,12 @@ BEGIN
         SELECT GROUP_CONCAT(CONCAT('`', column_name, '`') ORDER BY ordinal_position)
         INTO @pk_columns
         FROM information_schema.key_column_usage k
-        JOIN information_schema.table_constraints t ON k.constraint_name = t.constraint_name
+        JOIN information_schema.table_constraints t ON k.constraint_name = t.constraint_name AND k.table_schema=t.table_schema AND k.table_name=t.table_name
         WHERE k.table_schema = v_input_db 
         AND k.table_name = v_input_table 
         AND t.constraint_type = 'PRIMARY KEY';
 
-        SET v_sql = CONCAT(v_sql, @pk_columns, ' FROM `', v_input_db, '`.`', v_input_table, '`');
+        SET v_sql = CONCAT(v_sql, @pk_columns, ' FROM `', v_input_db, '`.`', v_input_table, '` WHERE FALSE');
 
         SET @sql = v_sql;
         PREPARE stmt FROM @sql;
@@ -260,12 +269,14 @@ BEGIN
         DEALLOCATE PREPARE stmt;
     END IF;
 
+    SET @_embed_options=JSON_OBJECT('model_id',v_model_id,'truncate',IF(v_truncate,TRUE,FALSE));
+
     -- Process embeddings in batches using ML_EMBED_ROW
     IF v_input_same_as_output THEN
         -- Update same table with embeddings
         SET v_sql = CONCAT('UPDATE `', v_output_db, '`.`', v_output_table, '` 
                            SET `', v_output_column, '` = sys.ML_EMBED_ROW(`', v_input_column, '`, 
-                           JSON_OBJECT("model_id", "', v_model_id, '", "truncate", ', v_truncate, ')),
+                           @_embed_options),
                            `', v_details_column, '` = 
                            CASE 
                                WHEN `', v_input_column, '` IS NULL OR TRIM(`', v_input_column, '`) = "" 
@@ -278,7 +289,7 @@ BEGIN
         SELECT GROUP_CONCAT(CONCAT('s.`', column_name, '`') ORDER BY ordinal_position)
         INTO @pk_columns_prefixed
         FROM information_schema.key_column_usage k
-        JOIN information_schema.table_constraints t ON k.constraint_name = t.constraint_name
+        JOIN information_schema.table_constraints t ON k.constraint_name = t.constraint_name AND k.table_schema=t.table_schema AND k.table_name=t.table_name
         WHERE k.table_schema = v_input_db 
         AND k.table_name = v_input_table 
         AND t.constraint_type = 'PRIMARY KEY';
@@ -286,7 +297,7 @@ BEGIN
         SET v_sql = CONCAT('INSERT INTO `', v_output_db, '`.`', v_output_table, '` 
                            SELECT ', @pk_columns, ',
                            sys.ML_EMBED_ROW(s.`', v_input_column, '`, 
-                           JSON_OBJECT("model_id", "', v_model_id, '", "truncate", ', v_truncate, ')) as `', v_output_column, '`,
+                           @_embed_options) as `', v_output_column, '`,
                            CASE 
                                WHEN s.`', v_input_column, '` IS NULL OR TRIM(s.`', v_input_column, '`) = "" 
                                THEN "Empty or null input text"

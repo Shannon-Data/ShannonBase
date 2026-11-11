@@ -94,21 +94,24 @@ CREATE TABLE tt (score int, name char(10), id int primary key, gender char(1));
 INSERT INTO tt values(1, 'n1', 1, 'm'), (2, 'n2', 2, 'f'), (3, 'n3', 3, 'm');
 CALL sys.ML_EMBED_TABLE("sh_embedding.tt.name", "sh_embedding.tt.embed_vect", JSON_OBJECT("model_id", "multilingual-e5-small"));
 
-#duplicate column: Duplicate column name 'embed_vect
---ERROR 1060 
-CALL sys.ML_EMBED_TABLE("sh_embedding.tt.name", "test.tt.embed_vect", JSON_OBJECT("model_id", "aall-MiniLM-L12-v2"));
+# Reusing the output column is rejected before inference.
+--ERROR ER_SIGNAL_EXCEPTION
+CALL sys.ML_EMBED_TABLE('sh_embedding.tt.name','sh_embedding.tt.embed_vect',NULL);
 
-#wrong source table: Input table does not exist
---ERROR 1644 
-CALL sys.ML_EMBED_TABLE("test.tt.name", "test.tt.embed_vect", JSON_OBJECT("model_id", "aall-MiniLM-L12-v2"));
+# Missing input is a validation error, independent of the requested model.
+--ERROR ER_SIGNAL_EXCEPTION
+CALL sys.ML_EMBED_TABLE('sh_embedding.absent.name','sh_embedding.copy.embedding',NULL);
 
-# wrong option format: model_id is required in options
---ERROR 1644
-CALL sys.ML_EMBED_TABLE("test.tt.name", "test.tt.embed_vect", JSON_OBJECT("odel_id", "all-MiniLM-L12-v2"));
+# NULL options select the default model for a separate output table.
+CALL sys.ML_EMBED_TABLE('sh_embedding.tt.name','sh_embedding.copy.embedding',NULL);
+SELECT COUNT(*) AS copied_rows,SUM(embedding IS NOT NULL) AS embedded_rows FROM sh_embedding.copy;
 
-# wrong model name: ML operation failed. can not find the model:aall-MiniLM-L12-v2.
---ERROR 1644
-CALL sys.ML_EMBED_TABLE("test.tt.name", "test.tt.embed_vect1", JSON_OBJECT("model_id", "aall-MiniLM-L12-v2"));
+--ERROR ER_SIGNAL_EXCEPTION
+CALL sys.ML_EMBED_TABLE('sh_embedding.tt.name','sh_embedding.bad_options.embedding',JSON_OBJECT('truncate','invalid'));
+
+# A missing model must propagate the inference error, not a DDL error.
+--ERROR ER_ML_FAIL
+CALL sys.ML_EMBED_TABLE('sh_embedding.tt.name','sh_embedding.bad_model.embedding',JSON_OBJECT('model_id','__missing_embedding_model__'));
 
 SELECT score, name, id, gender FROM tt order by id;
 SHOW CREATE TABLE tt;

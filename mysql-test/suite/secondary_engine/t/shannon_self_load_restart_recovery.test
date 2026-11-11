@@ -35,7 +35,7 @@ SELECT COUNT(*), SUM(v) FROM t;
 SET use_secondary_engine=OFF;
 SET DEBUG_SYNC='now SIGNAL rapid_self_load_recovery_continue';
 SET DEBUG_SYNC='now SIGNAL rapid_restart_recovery_continue';
---let $wait_condition = SELECT CAST(VARIABLE_VALUE AS UNSIGNED)=1 FROM performance_schema.global_status WHERE VARIABLE_NAME='rapid_loaded_tables'
+--let $wait_condition = SELECT COUNT(*)=1 FROM performance_schema.rpd_table_id WHERE SCHEMA_NAME='sh_self_recovery' AND TABLE_NAME='t'
 --source include/wait_condition.inc
 SET use_secondary_engine=FORCED;
 SELECT COUNT(*), SUM(v) FROM t;

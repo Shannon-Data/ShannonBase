@@ -1,0 +1,69 @@
+# classification: choose the most relevant 100, not the first 100.
+SELECT JSON_LENGTH(JSON_EXTRACT(@row_result,'$.ml_results.attributions')) AS selected_features,
+JSON_CONTAINS_PATH(@row_result,'one','$.ml_results.attributions.f100') AS relevant_last_feature,
+ABS(JSON_EXTRACT(@row_result,'$.ml_results.attributions.f100'))>0 AS nonzero_contribution,
+JSON_CONTAINS_PATH(@row_result,'one','$.ml_results.attributions.f99') AS omitted_tie_feature;
+selected_features	relevant_last_feature	nonzero_contribution	omitted_tie_feature
+100	1	1	0
+SELECT sys.ML_EXPLAIN_ROW(JSON_OBJECT('other',1),@model,NULL);
+ERROR HY000: ML operation failed. Explanation input is missing model feature: f0.
+SELECT COUNT(*) AS output_rows,SUM(f100_attribution <=> JSON_EXTRACT(ml_results,'$.attributions.f100')) AS flat_matches_json,
+SUM(Notes <=> JSON_UNQUOTE(JSON_EXTRACT(ml_results,'$.notes'))) AS notes_match,
+SUM(f99_attribution IS NULL) AS omitted_flat_null,SUM(extra_column='extra input') AS extra_preserved FROM explained;
+output_rows	flat_matches_json	notes_match	omitted_flat_null	extra_preserved
+1	1	1	1	1
+SELECT COUNT(*) AS attribution_columns FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='ml_explanation_contract' AND TABLE_NAME='explained' AND COLUMN_NAME LIKE '%\_attribution';
+attribution_columns
+101
+CALL sys.ML_MODEL_UNLOAD(@model);
+ALTER TABLE train_c SECONDARY_UNLOAD;
+DROP TABLE one_row,explained;
+CREATE TABLE train_r(id INT PRIMARY KEY NOT SECONDARY,f0 DOUBLE,f1 DOUBLE,f2 DOUBLE,f3 DOUBLE,f4 DOUBLE,f5 DOUBLE,f6 DOUBLE,f7 DOUBLE,f8 DOUBLE,f9 DOUBLE,f10 DOUBLE,f11 DOUBLE,f12 DOUBLE,f13 DOUBLE,f14 DOUBLE,f15 DOUBLE,f16 DOUBLE,f17 DOUBLE,f18 DOUBLE,f19 DOUBLE,f20 DOUBLE,f21 DOUBLE,f22 DOUBLE,f23 DOUBLE,f24 DOUBLE,f25 DOUBLE,f26 DOUBLE,f27 DOUBLE,f28 DOUBLE,f29 DOUBLE,f30 DOUBLE,f31 DOUBLE,f32 DOUBLE,f33 DOUBLE,f34 DOUBLE,f35 DOUBLE,f36 DOUBLE,f37 DOUBLE,f38 DOUBLE,f39 DOUBLE,f40 DOUBLE,f41 DOUBLE,f42 DOUBLE,f43 DOUBLE,f44 DOUBLE,f45 DOUBLE,f46 DOUBLE,f47 DOUBLE,f48 DOUBLE,f49 DOUBLE,f50 DOUBLE,f51 DOUBLE,f52 DOUBLE,f53 DOUBLE,f54 DOUBLE,f55 DOUBLE,f56 DOUBLE,f57 DOUBLE,f58 DOUBLE,f59 DOUBLE,f60 DOUBLE,f61 DOUBLE,f62 DOUBLE,f63 DOUBLE,f64 DOUBLE,f65 DOUBLE,f66 DOUBLE,f67 DOUBLE,f68 DOUBLE,f69 DOUBLE,f70 DOUBLE,f71 DOUBLE,f72 DOUBLE,f73 DOUBLE,f74 DOUBLE,f75 DOUBLE,f76 DOUBLE,f77 DOUBLE,f78 DOUBLE,f79 DOUBLE,f80 DOUBLE,f81 DOUBLE,f82 DOUBLE,f83 DOUBLE,f84 DOUBLE,f85 DOUBLE,f86 DOUBLE,f87 DOUBLE,f88 DOUBLE,f89 DOUBLE,f90 DOUBLE,f91 DOUBLE,f92 DOUBLE,f93 DOUBLE,f94 DOUBLE,f95 DOUBLE,f96 DOUBLE,f97 DOUBLE,f98 DOUBLE,f99 DOUBLE,f100 DOUBLE,y DOUBLE);
+INSERT INTO train_r WITH RECURSIVE seq AS (SELECT 1 n UNION ALL SELECT n+1 FROM seq WHERE n<160) SELECT n,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,n,n*100 FROM seq;
+ALTER TABLE train_r SECONDARY_ENGINE=RAPID;
+ALTER TABLE train_r SECONDARY_LOAD;
+SET @model='contract_r';
+CALL sys.ML_TRAIN('ml_explanation_contract.train_r','y',JSON_OBJECT('task','regression','exclude_column_list',JSON_ARRAY('id')),@model);
+CALL sys.ML_MODEL_LOAD(@model,NULL);
+SET @row=JSON_OBJECT('f0',0,'f1',0,'f2',0,'f3',0,'f4',0,'f5',0,'f6',0,'f7',0,'f8',0,'f9',0,'f10',0,'f11',0,'f12',0,'f13',0,'f14',0,'f15',0,'f16',0,'f17',0,'f18',0,'f19',0,'f20',0,'f21',0,'f22',0,'f23',0,'f24',0,'f25',0,'f26',0,'f27',0,'f28',0,'f29',0,'f30',0,'f31',0,'f32',0,'f33',0,'f34',0,'f35',0,'f36',0,'f37',0,'f38',0,'f39',0,'f40',0,'f41',0,'f42',0,'f43',0,'f44',0,'f45',0,'f46',0,'f47',0,'f48',0,'f49',0,'f50',0,'f51',0,'f52',0,'f53',0,'f54',0,'f55',0,'f56',0,'f57',0,'f58',0,'f59',0,'f60',0,'f61',0,'f62',0,'f63',0,'f64',0,'f65',0,'f66',0,'f67',0,'f68',0,'f69',0,'f70',0,'f71',0,'f72',0,'f73',0,'f74',0,'f75',0,'f76',0,'f77',0,'f78',0,'f79',0,'f80',0,'f81',0,'f82',0,'f83',0,'f84',0,'f85',0,'f86',0,'f87',0,'f88',0,'f89',0,'f90',0,'f91',0,'f92',0,'f93',0,'f94',0,'f95',0,'f96',0,'f97',0,'f98',0,'f99',0,'f100',160);
+SET @row_result=sys.ML_EXPLAIN_ROW(@row,@model,JSON_OBJECT('prediction_explainer','shap'));
+# regression: choose the most relevant 100, not the first 100.
+SELECT JSON_LENGTH(JSON_EXTRACT(@row_result,'$.ml_results.attributions')) AS selected_features,
+JSON_CONTAINS_PATH(@row_result,'one','$.ml_results.attributions.f100') AS relevant_last_feature,
+ABS(JSON_EXTRACT(@row_result,'$.ml_results.attributions.f100'))>0 AS nonzero_contribution,
+JSON_CONTAINS_PATH(@row_result,'one','$.ml_results.attributions.f99') AS omitted_tie_feature;
+selected_features	relevant_last_feature	nonzero_contribution	omitted_tie_feature
+100	1	1	0
+SELECT sys.ML_EXPLAIN_ROW(JSON_OBJECT('other',1),@model,NULL);
+ERROR HY000: ML operation failed. Explanation input is missing model feature: f0.
+SELECT COUNT(*) AS output_rows,SUM(f100_attribution <=> JSON_EXTRACT(ml_results,'$.attributions.f100')) AS flat_matches_json,
+SUM(Notes <=> JSON_UNQUOTE(JSON_EXTRACT(ml_results,'$.notes'))) AS notes_match,
+SUM(f99_attribution IS NULL) AS omitted_flat_null,SUM(extra_column='extra input') AS extra_preserved FROM explained;
+output_rows	flat_matches_json	notes_match	omitted_flat_null	extra_preserved
+1	1	1	1	1
+SELECT COUNT(*) AS attribution_columns FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='ml_explanation_contract' AND TABLE_NAME='explained' AND COLUMN_NAME LIKE '%\_attribution';
+attribution_columns
+101
+CREATE TABLE missing_feature(id INT PRIMARY KEY,other DOUBLE);
+INSERT INTO missing_feature VALUES(1,5);
+CALL sys.ML_EXPLAIN_TABLE('ml_explanation_contract.missing_feature',@model,'ml_explanation_contract.bad_features',NULL);
+ERROR 45000: Input table is missing a model feature column
+CREATE TABLE empty_input LIKE missing_feature;
+SET @_task='classification';
+CALL sys.ML_EXPLAIN_TABLE('ml_explanation_contract.empty_input','absent','ml_explanation_contract.bad_model',NULL);
+ERROR 45000: Model handle does not exist in the model catalog
+SELECT COUNT(*) AS rejected_outputs FROM information_schema.TABLES
+WHERE TABLE_SCHEMA='ml_explanation_contract' AND TABLE_NAME IN ('bad_features','bad_model');
+rejected_outputs
+0
+SELECT _4aad19ca6e_pk_id FROM reused_explained;
+_4aad19ca6e_pk_id
+160
+SELECT COLUMN_NAME FROM information_schema.COLUMNS
+WHERE TABLE_SCHEMA='ml_explanation_contract' AND TABLE_NAME='new_pk_explained' AND ORDINAL_POSITION=1;
+COLUMN_NAME
+_4aad19ca6e_pk_id
+CREATE TABLE bad_pk LIKE one_row;
+ALTER TABLE bad_pk ADD _4aad19ca6e_pk_id INT;
+CALL sys.ML_EXPLAIN_TABLE('ml_explanation_contract.bad_pk',@model,'ml_explanation_contract.bad_pk_output',NULL);
+ERROR 45000: Input table has a conflicting explanation output column

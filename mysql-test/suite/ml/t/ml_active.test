@@ -6,6 +6,9 @@
 --disable_warnings
 DROP DATABASE IF EXISTS ML_SCHEMA_root;
 
+--disable_query_log
+SET @saved_local_infile = @@GLOBAL.local_infile;
+--enable_query_log
 SET GLOBAL local_infile = 1;
 DROP DATABASE IF EXISTS shannon_ml_active;
 CREATE DATABASE shannon_ml_active;
@@ -72,3 +75,7 @@ SELECT * FROM JSON_TABLE(
 DROP DATABASE IF EXISTS ML_SCHEMA_root;
 ALTER TABLE census_train SECONDARY_UNLOAD;
 DROP DATABASE IF EXISTS shannon_ml_active;
+
+--disable_query_log
+SET GLOBAL local_infile = @saved_local_infile;
+--enable_query_log

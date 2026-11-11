@@ -105,7 +105,7 @@ CALL sys.ML_SCORE('heatwaveml_bench.electricity_consumption_test', 'consumption_
 CREATE TABLE electricity_predict_in AS
   SELECT `date`, consumption_mw FROM heatwaveml_bench.electricity_consumption_test
   ORDER BY id LIMIT 10;
---error ER_SIGNAL_EXCEPTION
+--error ER_ML_FAIL
 CALL sys.ML_PREDICT_TABLE('heatwaveml_bench.electricity_predict_in', @model_electricity,
                           'heatwaveml_bench.electricity_test_predictions', NULL);
 

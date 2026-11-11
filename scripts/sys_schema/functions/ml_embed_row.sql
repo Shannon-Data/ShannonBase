@@ -22,7 +22,7 @@ CREATE DEFINER='mysql.sys'@'localhost' FUNCTION ml_embed_row (
         in_text TEXT,
         in_model_option JSON
     )
-    RETURNS BLOB
+    RETURNS VECTOR(16383)
     COMMENT '
 Description
 -----------
@@ -45,7 +45,7 @@ mysql> SELECT sys.ML_EMBED_ROW("What is artificial intelligence?", JSON_OBJECT("
     CONTAINS SQL
 BEGIN
 
-  DECLARE v_embed_row_res BLOB;
+  DECLARE v_embed_row_res VECTOR(16383);
 
   SELECT ML_MODEL_EMBED_ROW(in_text, in_model_option) INTO v_embed_row_res;
   RETURN v_embed_row_res;

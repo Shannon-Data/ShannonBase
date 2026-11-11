@@ -19,7 +19,7 @@ DROP PROCEDURE IF EXISTS ml_model_load;
 DELIMITER $$
 
 CREATE DEFINER='mysql.sys'@'localhost' PROCEDURE ml_model_load (
-        IN in_model_handle_name VARCHAR(64),
+        IN in_model_handle_name VARCHAR(255),
         IN in_user_name VARCHAR(64)
     )
     COMMENT '
@@ -31,7 +31,7 @@ Run the ML_MODEL_LOAD routine load the trained model into memory.
 Parameters
 -----------
 
-in_model_handle_name (VARCHAR(64)):
+in_model_handle_name (VARCHAR(255)):
    user-defined session variable storing the ML model handle for the duration of the connection
 in_user_name (VARCHAR(64)):
   name of user
@@ -51,7 +51,13 @@ BEGIN
     DECLARE v_db_err_msg TEXT;
     DECLARE v_load_obj_check INT;
     DECLARE v_model_id INT;
+    DECLARE v_catalog_exists INT DEFAULT 0;
 
+   IF in_user_name IS NOT NULL AND
+      BINARY in_user_name <> BINARY SUBSTRING_INDEX(CURRENT_USER(), '@', 1) THEN
+       SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Loading another model owner is not supported';
+   END IF;
+   SET @MODEL_ID = NULL;
    IF in_user_name IS NULL THEN
      SELECT SUBSTRING_INDEX(CURRENT_USER(), '@', 1) INTO v_user_name;
      SET v_sys_schema_name = CONCAT('ML_SCHEMA_', v_user_name);
@@ -60,10 +66,24 @@ BEGIN
      SET v_sys_schema_name = CONCAT('ML_SCHEMA_', in_user_name);
    END IF;
 
-   SET @select_model_stm = CONCAT('SELECT MODEL_ID INTO @MODEL_ID FROM ',  v_sys_schema_name,
-                                  '.MODEL_CATALOG WHERE MODEL_HANDLE = \"', in_model_handle_name, '\";');
+   IF INSTR(v_sys_schema_name, '.') > 0 THEN
+       SIGNAL SQLSTATE '45000'
+         SET MESSAGE_TEXT = 'ML routines do not support account names containing a period';
+   END IF;
+
+   SELECT COUNT(*) INTO v_catalog_exists
+   FROM INFORMATION_SCHEMA.TABLES
+   WHERE TABLE_SCHEMA = v_sys_schema_name AND TABLE_NAME = 'MODEL_CATALOG';
+   IF v_catalog_exists = 0 THEN
+       SIGNAL SQLSTATE '45000'
+         SET MESSAGE_TEXT = 'No model catalog for the current user, train a model first';
+   END IF;
+
+   SET @load_handle=in_model_handle_name;
+   SET @select_model_stm = CONCAT('SELECT MODEL_ID INTO @MODEL_ID FROM `', REPLACE(v_sys_schema_name,'`','``'),
+                                  '`.MODEL_CATALOG WHERE MODEL_HANDLE = ?');
    PREPARE select_model_stmt FROM @select_model_stm;
-   EXECUTE select_model_stmt;
+   EXECUTE select_model_stmt USING @load_handle;
    SELECT @MODEL_ID into v_model_id;
    DEALLOCATE PREPARE select_model_stmt;
 

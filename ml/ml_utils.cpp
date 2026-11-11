@@ -167,6 +167,8 @@ std::string Utils::read_file(std::string &file_path) {
 }
 
 int Utils::parse_json(Json_wrapper &options, OPTION_VALUE_T &option_value, std::string &key, size_t depth) {
+  // SQL NULL / omitted options are an empty wrapper, not a JSON type to inspect.
+  if (options.empty()) return 0;
   enum_json_type type = options.type();
   // Treat strings saved in opaque as plain json strings
   // @see val_json_func_field_subselect()

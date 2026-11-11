@@ -34,19 +34,13 @@ in_user_name VARCHAR(64):
   Scope of the query. Accepted values:
     current  - models owned by the invoking user (default).
     NULL     - equivalent to current.
-    all      - models for every user (requires SUPER or ML_ADMIN privilege).
+  Other scopes are rejected by the native routine: only the caller models are listed.
 
 out_model_info JSON:
   Output session variable. Receives a JSON array of two objects:
-    current/NULL mode:
       [
         {"total model size(bytes)": <N>},
         {"<model_handle>": <model_metadata>, ...}
-      ]
-    all mode:
-      [
-        {"total model size(bytes)": <N>},
-        {"<username>": [{"<model_handle>": <model_metadata>}, ...], ...}
       ]
 
 Example

@@ -40,8 +40,9 @@
 #include "include/my_inttypes.h"
 #include "include/mysqld_error.h"
 #include "include/thr_lock.h"  //TL_READ
+#include "ml_explanation.h"    //ml utils
 #include "ml_info.h"
-#include "ml_utils.h"  //ml utils
+#include "ml_utils.h"
 #include "sql/current_thd.h"
 #include "sql/dd/cache/dictionary_client.h"
 #include "sql/derror.h"  //ER_TH
@@ -760,13 +761,13 @@ int ML_classification::predict_row(THD * /*thd*/, Json_wrapper &input_data, std:
   OPTION_VALUE_T meta_infos_names, input_values;
   if ((!input_data.empty() && Utils::parse_json(input_data, input_values, keystr, 0)) ||
       (!model_meta.empty() && Utils::parse_json(model_meta, meta_infos_names, keystr, 0))) {
-    my_error(ER_ML_FAIL, MYF(0), "invalid input data or model meta info.");
+    my_error(ER_ML_FAIL, MYF(0), "invalid input data or model meta info");
     return HA_ERR_GENERIC;
   }
 
   auto feature_names = meta_infos_names[ML_KEYWORDS::column_names];
   if (feature_names.size() != input_values.size()) {
-    my_error(ER_ML_FAIL, MYF(0), "input data column count does not match model feature count.");
+    my_error(ER_ML_FAIL, MYF(0), "input data column count does not match model feature count");
     return HA_ERR_GENERIC;
   }
   for (auto &feature_name : feature_names) {
@@ -925,6 +926,8 @@ int ML_classification::explain_row(THD * /*thd*/, Json_wrapper &exp_row, std::st
     return HA_ERR_GENERIC;
   }
 
+  if (!validate_explanation_features(feature_names, input_values)) return HA_ERR_GENERIC;
+
   // Shared handle: no copy of a large model and no deserialization per row.
   auto model = Utils::get_prepared_model(model_handle_name);
   if (!model) return HA_ERR_GENERIC;
@@ -1005,14 +1008,8 @@ int ML_classification::explain_row(THD * /*thd*/, Json_wrapper &exp_row, std::st
     } break;
   }
 
-  size_t top_idx = 0;
-  double max_abs = 0.0;
-  for (size_t i = 0; i < n_features; ++i) {
-    if (std::abs(attributions[i]) > max_abs) {
-      max_abs = std::abs(attributions[i]);
-      top_idx = i;
-    }
-  }
+  const auto selected_features = explanation_feature_order(attributions);
+  const size_t top_idx = selected_features.front();
 
   const std::string &top_feature = feature_names[top_idx];
   std::string top_value = "0";
@@ -1064,8 +1061,10 @@ int ML_classification::explain_row(THD * /*thd*/, Json_wrapper &exp_row, std::st
     delete root_obj;
     return HA_ERR_GENERIC;
   }
-  for (size_t i = 0; i < n_features; ++i)
+  for (const size_t i : selected_features) {
     attributions_obj->add_alias(feature_names[i], new (std::nothrow) Json_double(attributions[i]));
+    root_obj->add_alias(feature_names[i] + "_attribution", new (std::nothrow) Json_double(attributions[i]));
+  }
 
   ml_results->add_alias("attributions", attributions_obj);
   root_obj->add_alias(ML_KEYWORDS::ml_results, ml_results);

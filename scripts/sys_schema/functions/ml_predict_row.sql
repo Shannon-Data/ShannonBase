@@ -20,7 +20,7 @@ DELIMITER $$
 
 CREATE DEFINER='mysql.sys'@'localhost' FUNCTION ml_predict_row (
         in_predict_data JSON,
-        in_model_handle_name VARCHAR(64),
+        in_model_handle_name VARCHAR(255),
         in_model_option JSON
     )
     RETURNS JSON
@@ -28,18 +28,18 @@ CREATE DEFINER='mysql.sys'@'localhost' FUNCTION ml_predict_row (
 Description
 -----------
 
-Run the ml_predict_row routine on a labeled training dataset to produce a trained machine learning model.
+Run the ML_PREDICT_ROW routine to generate a prediction for one row of unlabeled
+data with a loaded machine learning model.
 
 Parameters
 -----------
-
-in_input_data JSON:
-  the data to be predicted.
-in_model_handle_name (VARCHAR(64)):
-  user-defined session variable storing the ML model handle for the duration of the connection.
+in_predict_data JSON:
+  the row of data to be predicted, as JSON key-value pairs of column name and value.
+in_model_handle_name (VARCHAR(255)):
+  the model handle, or a session variable containing it. The model must be loaded.
 in_model_option JSON:
-  This parameter only supports the recommendation and anomaly_detection tasks.
-  For all other tasks, set this parameter to NULL.
+  Options for the recommendation and anomaly_detection tasks. For all other tasks,
+  set this parameter to NULL.
 Example
 -----------
 mysql> SELECT sys.ML_PREDICT_ROW(JSON_OBJECT(\'column_name\', value,
@@ -47,12 +47,10 @@ mysql> SELECT sys.ML_PREDICT_ROW(JSON_OBJECT(\'column_name\', value,
           model_handle, options);
 '
     SQL SECURITY INVOKER
-    DETERMINISTIC
-    CONTAINS SQL
+    NOT DETERMINISTIC
+    READS SQL DATA
 BEGIN
 
-  DECLARE v_db_err_msg TEXT;
-  DECLARE v_model_id INT;
   DECLARE v_pred_row_res JSON;
 
   SELECT ML_MODEL_PREDICT_ROW(in_predict_data, in_model_handle_name, in_model_option) INTO v_pred_row_res;

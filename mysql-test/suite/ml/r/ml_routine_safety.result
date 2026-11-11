@@ -1,0 +1,158 @@
+DROP DATABASE IF EXISTS ML_SCHEMA_root;
+DROP DATABASE IF EXISTS ml_safety;
+CREATE DATABASE ml_safety;
+USE ml_safety;
+CREATE TABLE src(id INT PRIMARY KEY, prompt TEXT);
+INSERT INTO src VALUES(1,'knowledge');
+CREATE TABLE victim(id INT PRIMARY KEY, note TEXT);
+INSERT INTO victim VALUES(99,'keep');
+# Validation failure must preserve pre-existing tables, including input=output.
+CALL sys.ML_PREDICT_TABLE('ml_safety.src','missing','ml_safety.victim',NULL);
+ERROR HY000: Output table ml_safety.victim already exists.
+CALL sys.ML_PREDICT_TABLE('ml_safety.src','missing','ml_safety.src',NULL);
+ERROR HY000: Output table ml_safety.src already exists.
+CALL sys.ML_EXPLAIN_TABLE('ml_safety.src','missing','ml_safety.victim',NULL);
+ERROR 45000: No model catalog for the current user, train a model first
+CALL sys.ML_EXPLAIN_TABLE('ml_safety.src','missing','ml_safety.src',NULL);
+ERROR 45000: Output table must differ from the input table
+SELECT * FROM victim;
+id	note
+99	keep
+SELECT COUNT(*) AS input_rows FROM src;
+input_rows
+1
+SET @concat_before=@@SESSION.group_concat_max_len;
+SELECT sys.ML_EXPLAIN_ROW(NULL,'missing',NULL);
+ERROR 45000: input_data parameter cannot be NULL
+SELECT sys.ML_EXPLAIN_ROW(JSON_OBJECT('a',1),'missing',JSON_OBJECT('prediction_explainer','bad'));
+ERROR 45000: prediction_explainer must be "permutation_importance" or "shap"
+# First import initializes both catalogs and preserves bytes and quoted handles.
+SET @bytes=CONCAT('a',CHAR(92),'n',CHAR(34),CHAR(39),'b');
+SET @handle=CONCAT('quoted',CHAR(34),CHAR(39),'handle');
+CALL sys.ML_MODEL_IMPORT(@bytes,JSON_OBJECT('task','classification'),@handle);
+SELECT HEX(MODEL_OBJECT)=HEX(@bytes) AS bytes_preserved
+FROM ML_SCHEMA_root.MODEL_OBJECT_CATALOG WHERE MODEL_HANDLE=@handle;
+bytes_preserved
+1
+# Inject failure after writing objects; neither catalog may retain a partial model.
+ALTER TABLE ML_SCHEMA_root.MODEL_CATALOG ADD CONSTRAINT reject_import CHECK (MODEL_HANDLE<>'reject');
+CALL sys.ML_MODEL_IMPORT('fake',JSON_OBJECT('task','classification'),'reject');
+ERROR HY000: Check constraint 'reject_import' is violated.
+SELECT COUNT(*) AS orphan_chunks FROM ML_SCHEMA_root.MODEL_OBJECT_CATALOG WHERE MODEL_HANDLE='reject';
+orphan_chunks
+0
+ALTER TABLE ML_SCHEMA_root.MODEL_CATALOG DROP CHECK reject_import;
+CREATE TABLE chunks(chunk_id INT PRIMARY KEY,model_object LONGTEXT,model_metadata JSON);
+INSERT INTO chunks VALUES(1,'first',JSON_OBJECT('task','classification')),(3,'third',NULL);
+CALL sys.ML_MODEL_IMPORT(NULL,JSON_OBJECT('schema','ml_safety','table','chunks'),'gap');
+ERROR 45000: Model chunks must be non-null and numbered consecutively from 1
+SELECT COUNT(*) AS gap_chunks FROM ML_SCHEMA_root.MODEL_OBJECT_CATALOG WHERE MODEL_HANDLE='gap';
+gap_chunks
+0
+DELETE FROM chunks WHERE chunk_id=3;
+INSERT INTO chunks VALUES(2,@bytes,NULL);
+CALL sys.ML_MODEL_IMPORT(NULL,JSON_OBJECT('schema','ml_safety','table','chunks'),'from_table');
+SELECT CHUNK_ID,HEX(MODEL_OBJECT) FROM ML_SCHEMA_root.MODEL_OBJECT_CATALOG WHERE MODEL_HANDLE='from_table' ORDER BY CHUNK_ID;
+CHUNK_ID	HEX(MODEL_OBJECT)
+1	6669727374
+2	615C6E222762
+CALL sys.ML_MODEL_EXPORT('from_table','ml_safety.exported');
+CALL sys.ML_MODEL_IMPORT(NULL,JSON_OBJECT('schema','ml_safety','table','exported'),'round_trip');
+SELECT COUNT(*) AS preserved_chunks FROM ML_SCHEMA_root.MODEL_OBJECT_CATALOG a
+JOIN ML_SCHEMA_root.MODEL_OBJECT_CATALOG b ON a.CHUNK_ID=b.CHUNK_ID
+WHERE a.MODEL_HANDLE='from_table' AND b.MODEL_HANDLE='round_trip' AND BINARY a.MODEL_OBJECT=BINARY b.MODEL_OBJECT;
+preserved_chunks
+2
+Warnings:
+Warning	1287	'BINARY expr' is deprecated and will be removed in a future release. Please use CAST instead
+Warning	1287	'BINARY expr' is deprecated and will be removed in a future release. Please use CAST instead
+INSERT INTO ML_SCHEMA_root.MODEL_CATALOG(MODEL_HANDLE,TRAIN_TABLE_NAME,MODEL_METADATA)
+VALUES('zero','imported_model',JSON_OBJECT('status','creating'));
+CALL sys.ML_MODEL_EXPORT('zero','ml_safety.zero_export');
+SELECT chunk_id,model_object FROM zero_export;
+chunk_id	model_object
+0	NULL
+CALL sys.ML_SCORE('ml_safety.absent','target','from_table','accuracy',@score,NULL);
+ERROR HY000: ml_safety.absent used to do training test does not exists.
+CALL sys.ML_MODEL_LOAD('from_table','another_owner');
+ERROR 45000: Loading another model owner is not supported
+# A failed batch prediction must not leave the output table behind.
+UPDATE ML_SCHEMA_root.MODEL_CATALOG SET TASK='forecasting' WHERE MODEL_HANDLE='from_table';
+CALL sys.ML_PREDICT_TABLE('ml_safety.src','from_table','ml_safety.forecast_output',NULL);
+ERROR HY000: ML operation failed. from_table has not been loaded.
+SELECT COUNT(*) AS forecast_outputs FROM information_schema.TABLES WHERE TABLE_SCHEMA='ml_safety' AND TABLE_NAME='forecast_output';
+forecast_outputs
+0
+# Routine transaction guards must preserve the caller's rollback boundary.
+CREATE TABLE tx_probe(id INT PRIMARY KEY);
+START TRANSACTION;
+INSERT INTO tx_probe VALUES(1);
+CALL sys.ML_GENERATE_TABLE('ml_safety.src.prompt','ml_safety.gen.answer',NULL);
+ERROR 45000: ML routine requires autocommit and no active transaction
+CALL sys.ML_MODEL_IMPORT('fake',JSON_OBJECT('task','classification'),'tx_import');
+ERROR 45000: ML routine requires autocommit and no active transaction
+CALL sys.ML_PREDICT_TABLE('ml_safety.src','missing','ml_safety.tx_predict',NULL);
+ERROR 45000: ML routine requires autocommit and no active transaction
+CALL sys.ML_EXPLAIN_TABLE('ml_safety.src','missing','ml_safety.tx_explain',NULL);
+ERROR 45000: ML routine requires autocommit and no active transaction
+SET @model='tx_train';
+CALL sys.ML_TRAIN('ml_safety.src','id',NULL,@model);
+ERROR 45000: ML routine requires autocommit and no active transaction
+SELECT ML_SESSION_IN_TRANSACTION() AS transaction_preserved;
+transaction_preserved
+1
+ROLLBACK;
+SELECT COUNT(*) AS committed_caller_rows FROM tx_probe;
+committed_caller_rows
+0
+# Failed inference still exercises new, existing and same-table batch paths.
+CREATE TABLE batch_src(id INT PRIMARY KEY,prompt TEXT);
+INSERT INTO batch_src VALUES(1,'first'),(2,'second');
+SET @missing_model=JSON_OBJECT('model_id','__missing_routine_test__','batch_size',1);
+CALL sys.ML_GENERATE_TABLE('ml_safety.batch_src.prompt','ml_safety.batch_results.answer',@missing_model);
+CALL sys.ML_GENERATE_TABLE('ml_safety.batch_src.prompt','ml_safety.batch_results.answer',@missing_model);
+CALL sys.ML_GENERATE_TABLE('ml_safety.batch_src.prompt','ml_safety.batch_src.answer',@missing_model);
+SELECT COUNT(*) AS failed_rows_written FROM batch_results;
+failed_rows_written
+0
+SELECT COUNT(*) AS input_rows_preserved,SUM(answer IS NOT NULL) AS failed_results FROM batch_src;
+input_rows_preserved	failed_results
+2	0
+SELECT @@SESSION.group_concat_max_len=@concat_before AS concat_restored;
+concat_restored
+1
+# Precomputed vectors keep RAG tests independent of any downloaded model.
+CREATE TABLE kb(segment LONGTEXT,segment_embedding VECTOR(2),document_name VARCHAR(255),segment_number INT);
+INSERT INTO kb VALUES(REPEAT('x',2000),STRING_TO_VECTOR('[1,0]'),'allowed',1),('exclude',STRING_TO_VECTOR('[1,0]'),'blocked',1);
+SET @opts=JSON_OBJECT('vector_store',JSON_ARRAY('ml_safety.kb'),'query_embedding','[1,0]','skip_generate',true,'exclude_document_name',JSON_ARRAY('blocked'),'retrieval_options',JSON_OBJECT('segment_overlap',0));
+SET SESSION group_concat_max_len=1024;
+CALL sys.ML_RAG('query',@rag,@opts);
+SELECT JSON_LENGTH(JSON_EXTRACT(@rag,'$.citations')) AS citations,LENGTH(JSON_UNQUOTE(JSON_EXTRACT(@rag,'$.text'))) AS context_bytes;
+citations	context_bytes
+1	2000
+SELECT @@SESSION.group_concat_max_len AS concat_unchanged;
+concat_unchanged
+1024
+SET @opts=JSON_SET(@opts,'$.retrieval_options.segment_overlap',1);
+CALL sys.ML_RAG('query',@rag,@opts);
+SELECT JSON_LENGTH(JSON_EXTRACT(@rag,'$.citations')) AS overlap_citations;
+overlap_citations
+1
+SET @opts=JSON_SET(@opts,'$.exclude_vector_store',JSON_ARRAY('ml_safety.kb'));
+CALL sys.ML_RAG('query',@rag,@opts);
+SELECT JSON_LENGTH(JSON_EXTRACT(@rag,'$.citations')) AS excluded_store_citations;
+excluded_store_citations
+0
+SET SESSION group_concat_max_len=@concat_before;
+# VECTOR expressions retain their type when SELECT branches are merged.
+CREATE TABLE vector_union AS
+SELECT STRING_TO_VECTOR('[1,2]') AS v UNION ALL SELECT STRING_TO_VECTOR('[3,4]');
+SELECT COUNT(*) AS vector_rows,SUM(OCTET_LENGTH(v)) AS vector_bytes FROM vector_union;
+vector_rows	vector_bytes
+2	16
+SELECT DATA_TYPE FROM information_schema.COLUMNS
+WHERE TABLE_SCHEMA='ml_safety' AND TABLE_NAME='vector_union' AND COLUMN_NAME='v';
+DATA_TYPE
+vector
+DROP DATABASE ml_safety;
+DROP DATABASE ML_SCHEMA_root;
