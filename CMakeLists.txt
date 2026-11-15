@@ -92,6 +92,15 @@ endif()
 # A missed rebuild here gives a host and an engine two different heap sizes.
 add_compile_definitions(SHANNONBASE_JERRY_HEAP_KB=${SHANNONBASE_JERRY_HEAP_KB})
 
+# GCC 15 warns on `char[3] = "Sun"` in the vendored C engine, which builds with -Werror.
+include(CheckCCompilerFlag)
+check_c_compiler_flag("-Wno-unterminated-string-initialization"
+                      SHANNONBASE_HAVE_WNO_UNTERMINATED_STRING_INIT)
+if(SHANNONBASE_HAVE_WNO_UNTERMINATED_STRING_INIT)
+  # C only: cc1plus rejects the option with a warning of its own.
+  add_compile_options("$<$<COMPILE_LANGUAGE:C>:-Wno-unterminated-string-initialization>")
+endif()
+
 add_subdirectory(extra/jerryscript/)
 
 IF(WIN32)

@@ -1,26 +1,22 @@
 # ShannonBase Workflow
 
-## Release
+CI lives in [./workflows](./workflows). There is no separate `release.yml`; builds are
+driven by the three workflows below.
 
-ShannonBase make new releases via workflow [Release](./workflows/release.yml).
+| Workflow | Triggers | Jobs |
+| --- | --- | --- |
+| [pull-requests.yaml](./workflows/pull-requests.yaml) | push to non-`main` branches, pull requests (Docs/markdown excluded) | lint, then x86/ARM Release(ASAN) and Debug builds, Rapid gunit tests, MTR suites |
+| [weekly.yaml](./workflows/weekly.yaml) | Saturday 06:30 Asia/Shanghai, tag push matching `*v*` | same matrix, weekly MTR collection |
+| [nightly.yaml](./workflows/nightly.yaml) | Daily 04:30 Asia/Shanghai, tag push matching `*v*` | same matrix, nightly build and MTR |
 
-There are three ways to trigger a new release:
+Notes:
 
-- Push a new tag
-- On Schedule (every day at 00:00 UTC+8)
-- Manually triggered
-
-If new tags pushed, we use this the new tag name as release name. Otherwise, we will generate a new nightly tag.
-
-For example:
-
-- If current latest release is `v0.2.0`, we will generate a nightly tag `v0.2.0-nightly`
-- If current latest release is `v0.2.0-nightly`, we will generate a new tag `v0.2.0-nightly`
-
-For every release, we will:
-
-- Create a new release on GitHub.
-- Build binaries and pack them on Linux and MacOS.
-- Upload built packages to GitHub Releases, AWS S3 bucket and Docker Registry.
-
-We are adopting github native release notes generation which controlled by [release.yml](./release.yml).
+- `lint` checks only changed lines under `storage/rapid_engine` and `ml` with clang-format 18
+  (the newest version both Ubuntu 24.04 and 26.04 ship), passing `-binary` so the pinned
+  tool is what actually formats. Locally: `sudo apt install clang-format-18`, then run
+  `clang-format-18 -i` on your files (or `git clang-format-18`) before pushing. Lint blocks
+  merge only for `pull_request` events, so a formatter hiccup never skips the build/test jobs.
+- ARM jobs use `ubuntu-24.04-arm`; GitHub has no `ubuntu-latest-arm` label, so the image
+  must be bumped by hand when that image is retired.
+- Build jobs install their own toolchain dependencies with unversioned `apt` packages and
+  install model assets via `python3 -m pip` (PEP 668 compatible when needed).

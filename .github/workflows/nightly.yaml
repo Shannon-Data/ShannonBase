@@ -13,7 +13,8 @@
 #   - Uses concurrency to cancel in-progress runs for the same workflow/ref
 #   - Includes disk space optimizations to prevent 'No space left on device' errors
 #   - Commented-out alternative test commands (collections/default.push, default.daily) for future use with faster runners
-#   - lint job may fail on non-PR events due to pull_request-specific variables; needs adjustment for tag push and schedule triggers
+#   - lint uses the distro default clang-format (not a pinned version), falls back to HEAD^
+#     as diff base on tag/schedule runs, and only blocks builds on pull_request events
 #
 #    Copyright (c) 2023, 2024, 2025 Shannon Data AI and/or its affiliates.
 name: nightly
@@ -33,7 +34,6 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   PROTOC: protoc
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true  # Add this to Node24
   # Per-run, per-job install/test tree so a nightly run and a concurrent PR/weekly run,
   # or two jobs of this run, never share binaries, mysql-test/var, or sockets.
   SHANNON_PREFIX: /home/shannon-bin-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
@@ -46,24 +46,42 @@ jobs:
   lint:
     name: lint
     runs-on: ubuntu-latest
+    # A formatter failure must not skip every build/test job; only PRs block on it.
+    continue-on-error: ${{ github.event_name != 'pull_request' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - name: Ensure clang-format is available
         run: |
-          command -v clang-format-14 > /dev/null || (sudo apt-get -o DPkg::Lock::Timeout=600 update && sudo apt-get -o DPkg::Lock::Timeout=600 install -y clang-format-14)
+          # Pinned to 18: the newest version Ubuntu 24.04 (dev) and 26.04 (CI) both ship.
+          command -v clang-format-18 > /dev/null || (
+            sudo apt-get -o DPkg::Lock::Timeout=600 update &&
+            sudo apt-get -o DPkg::Lock::Timeout=600 install -y clang-format-18
+          )
       - name: Format check
         run: |
-          git diff -U0 --no-color ${{ github.event.pull_request.base.sha }} HEAD storage/rapid_engine ml | /usr/share/clang/clang-format-14/clang-format-diff.py -p1 | tee /tmp/.clang-format-diff
-          [ -s /tmp/.clang-format-diff ] && exit 1 || true
+          # pull_request runs provide base.sha; tag/schedule runs fall back to origin/main.
+          BASE_SHA="${{ github.event.pull_request.base.sha }}"
+          if [ -z "$BASE_SHA" ]; then
+            BASE_SHA=$(git merge-base HEAD origin/main 2>/dev/null || git rev-parse --verify -q HEAD^ || echo HEAD)
+          fi
+          echo "Checking formatting of ${BASE_SHA}..HEAD"
+          # -binary matters: clang-format-diff defaults to the unversioned clang-format.
+          git diff -U0 --no-color "$BASE_SHA" HEAD storage/rapid_engine ml |
+            clang-format-diff-18 -p1 -binary "$(command -v clang-format-18)" |
+            tee /tmp/.clang-format-diff
+          if [ -s /tmp/.clang-format-diff ]; then
+            echo "::error::clang-format 18 reformatted the lines in the diff above"
+            exit 1
+          fi
 
   # x86
   build_x86:
     needs: lint
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
       with:
         submodules: recursive
         fetch-depth: 0    
@@ -76,7 +94,9 @@ jobs:
         sudo apt -o DPkg::Lock::Timeout=600 install -y libtirpc-dev && sudo apt -o DPkg::Lock::Timeout=600 install -y libboost-all-dev libexpect-perl
     - name: Download models
       run: |
-        pip install -q huggingface_hub
+        # PEP 668 boxes need the escape hatch; older pip rejects the flag.
+        python3 -m pip install -q --break-system-packages huggingface_hub \
+          || python3 -m pip install -q huggingface_hub
         hf download shannondata/multilingual-e5-small \
           --local-dir ${{ github.workspace }}/extra/llm-models/multilingual-e5-small
     - name: build_shannon_and_install
@@ -150,7 +170,7 @@ jobs:
     needs: lint
     runs-on: ubuntu-24.04-arm
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
           fetch-depth: 0
@@ -163,7 +183,9 @@ jobs:
           sudo apt -o DPkg::Lock::Timeout=600 install -y libtirpc-dev libboost-all-dev libjson-perl libexpect-perl
       - name: Download models
         run: |
-          pip install -q huggingface_hub
+          # PEP 668 boxes need the escape hatch; older pip rejects the flag.
+          python3 -m pip install -q --break-system-packages huggingface_hub \
+            || python3 -m pip install -q huggingface_hub
           hf download shannondata/multilingual-e5-small \
             --local-dir ${{ github.workspace }}/extra/llm-models/multilingual-e5-small
       - name: Build and install (ARM)
@@ -241,7 +263,7 @@ jobs:
     needs: lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
           fetch-depth: 0
@@ -254,7 +276,9 @@ jobs:
           sudo apt -o DPkg::Lock::Timeout=600 install -y libtirpc-dev libboost-all-dev libexpect-perl
       - name: Download models
         run: |
-          pip install -q huggingface_hub
+          # PEP 668 boxes need the escape hatch; older pip rejects the flag.
+          python3 -m pip install -q --break-system-packages huggingface_hub \
+            || python3 -m pip install -q huggingface_hub
           hf download shannondata/multilingual-e5-small \
             --local-dir ${{ github.workspace }}/extra/llm-models/multilingual-e5-small
       - name: Build and install (x86, Debug)
@@ -328,7 +352,7 @@ jobs:
     needs: lint
     runs-on: ubuntu-24.04-arm
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
           fetch-depth: 0
@@ -341,7 +365,9 @@ jobs:
           sudo apt -o DPkg::Lock::Timeout=600 install -y libtirpc-dev libboost-all-dev libjson-perl libexpect-perl
       - name: Download models
         run: |
-          pip install -q huggingface_hub
+          # PEP 668 boxes need the escape hatch; older pip rejects the flag.
+          python3 -m pip install -q --break-system-packages huggingface_hub \
+            || python3 -m pip install -q huggingface_hub
           hf download shannondata/multilingual-e5-small \
             --local-dir ${{ github.workspace }}/extra/llm-models/multilingual-e5-small
       - name: Build and install (ARM, Debug)
