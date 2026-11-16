@@ -13,10 +13,6 @@ _Briefly describe what this PR aims to solve. Include background context that wi
 - [ ] Benchmark Test
 - [ ] No Test  - _Explain why_
 
-## Formatting
-
-- [ ] Changed lines pass clang-format 18 (`git clang-format-18` before pushing)
-
 ## Type of change
 
 - [ ] Bug Fix (non-breaking change which fixes an issue)
