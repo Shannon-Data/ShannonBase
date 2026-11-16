@@ -520,6 +520,19 @@ FOREACH(test_target rapid_ml-t merge_large_tests-t)
   TARGET_LINK_LIBRARIES(${test_target} ${ONNXRUNTIME_LIBRARIES})
 ENDFOREACH()
 
+# Dynamic KV Concat graphs exercise the same ping-pong storage used by the
+# local ONNX generator, without requiring a downloaded model or tokenizer.
+MYSQL_ADD_EXECUTABLE(llm_kv_cache-t secondary_engine/llm_kv_cache-t.cc
+  ENABLE_EXPORTS
+  EXCLUDE_FROM_ALL
+  LINK_LIBRARIES gunit_small ${ONNXRUNTIME_LIBRARIES}
+  SKIP_INSTALL
+  ADD_TEST llm_kv_cache
+)
+TARGET_INCLUDE_DIRECTORIES(llm_kv_cache-t SYSTEM PRIVATE ${ONNXRUNTIME_INCLUDE_DIRS})
+TARGET_COMPILE_DEFINITIONS(llm_kv_cache-t PRIVATE
+  LLM_KV_TEST_MODEL_DIR="${CMAKE_CURRENT_SOURCE_DIR}/secondary_engine/fixtures/llm_kv")
+
 ADD_LIBRARY(rpl_channel_credentials_lib STATIC
   ${CMAKE_SOURCE_DIR}/sql/rpl_channel_credentials.cc
 )

@@ -19,6 +19,11 @@ SET use_secondary_engine=FORCED;
 SET optimizer_switch='hypergraph_optimizer=on';
 --enable_warnings
 SET secondary_engine_cost_threshold=0;
+# Dynamic scan claims need not divide the rows evenly. Phase tests need enough
+# private headroom to reach finalize even when one worker reads the whole build.
+--disable_query_log
+SET debug='+d,rapid_parallel_join_test_headroom';
+--enable_query_log
 --echo # Both build and finalize must execute, with composite keys, NULLs and encoded payloads.
 --let $workers = 2
 while ($workers <= 8) {
@@ -67,11 +72,17 @@ EXECUTE stmt;
 DEALLOCATE PREPARE stmt;
 --echo # A bounded build replays through the existing ordered spill implementation.
 SET join_buffer_size=1048576;
+--disable_query_log
+SET debug='-d,rapid_parallel_join_test_headroom';
+--enable_query_log
 SET debug='+d,rapid_operator_budget_floor,rapid_parallel_join_build_budget';
 --let $assert_query = SELECT SUM(b.v),COUNT(*) FROM p JOIN b ON p.k=b.k AND p.k2=b.k2
 --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SET debug='-d,rapid_operator_budget_floor,rapid_parallel_join_build_budget';
 SET join_buffer_size=DEFAULT;
+--disable_query_log
+SET debug='+d,rapid_parallel_join_test_headroom';
+--enable_query_log
 --echo # Cancellation at the finalize barrier cannot publish partial hash chains.
 SET DEBUG_SYNC='rapid_before_parallel_join_finalize SIGNAL finalize_ready WAIT_FOR finalize_continue';
 --let $victim = `SELECT CONNECTION_ID()`
@@ -115,4 +126,7 @@ SET DEBUG_SYNC='RESET';
 --let $assert_query = SELECT SUM(b.v),COUNT(*) FROM p JOIN b ON p.k=b.k AND p.k2=b.k2 WHERE b.s='absent'
 --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
 SET use_secondary_engine=OFF;
+--disable_query_log
+SET debug='-d,rapid_parallel_join_test_headroom';
+--enable_query_log
 DROP DATABASE rapid_join_build;

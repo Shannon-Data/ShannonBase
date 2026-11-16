@@ -29,7 +29,9 @@
 
 #include <cassert>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
+#include <stdexcept>
 #include <vector>
 
 namespace ShannonBase {
@@ -39,6 +41,11 @@ template <typename T>
 struct KVLayerCache {
   std::vector<T> key;
   std::vector<T> value;
+
+  // ORT may read all of past while producing present. Keep the two allocations
+  // separate even when the model-native layout is token-contiguous (BSHD).
+  std::vector<T> present_key;
+  std::vector<T> present_value;
 
   int heads = 0;
   int head_dim = 0;
@@ -57,6 +64,8 @@ struct KVLayerCache {
     try {
       key.resize(total);
       value.resize(total);
+      present_key.resize(total);
+      present_value.resize(total);
     } catch (const std::bad_alloc &e) {
       fprintf(stderr, "[ERROR] Failed to allocate cache memory: %s\n", e.what());
       throw;
@@ -192,6 +201,27 @@ class KVCacheManager {
   const T *key_data(int layer) const { return layers[layer].key.data(); }
 
   const T *value_data(int layer) const { return layers[layer].value.data(); }
+
+  T *present_key_data(int layer) { return layers[layer].present_key.data(); }
+
+  T *present_value_data(int layer) { return layers[layer].present_value.data(); }
+
+  // Publish only after a successful Run and after all expected KV outputs have
+  // been bound. Buffers contain compact model-native tensors, not token slices:
+  // swapping preserves BHSD/BHDS strides as the sequence length changes.
+  void commit_present(int seq) {
+    if (seq <= 0 || seq > max_seq_len) throw std::out_of_range("Invalid present KV sequence length");
+    for (const auto &layer : layers) {
+      const size_t count = static_cast<size_t>(seq) * layer.token_stride();
+      if (count > layer.present_key.size() || count > layer.present_value.size())
+        throw std::out_of_range("Present KV buffer capacity exceeded");
+    }
+    for (auto &layer : layers) {
+      layer.key.swap(layer.present_key);
+      layer.value.swap(layer.present_value);
+      layer.seq = seq;
+    }
+  }
 
   // Get pointer to specific token's keys
   T *key_ptr(int layer, int token_index) { return layers[layer].key_ptr(token_index); }

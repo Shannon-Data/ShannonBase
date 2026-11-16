@@ -30,6 +30,7 @@
 
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <optional>
 #include <random>
 #include <regex>
@@ -77,21 +78,6 @@ const KVCacheManager<Ort::Float16_t> *TextGenerator::get_cache_manager<Ort::Floa
 template <>
 const KVCacheManager<int8_t> *TextGenerator::get_cache_manager<int8_t>() const {
   return (m_cacheDataType == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8) ? &m_int8Cache : nullptr;
-}
-
-template <typename T>
-void TextGenerator::debug_print_cache(const KVCacheManager<T> &cache, int layer, const char *name) {
-  if (layer < cache.num_layers && cache.layer_seq(layer) > 0) {
-    const T *data = cache.key_data(layer);
-    size_t elements = cache.layer_elements(layer);
-    if (elements >= 5) {
-      fprintf(stderr, "[Debug] %s[%d] first 5: ", name, layer);
-      for (int i = 0; i < 5; i++) {
-        fprintf(stderr, "%f ", (float)data[i]);
-      }
-      fprintf(stderr, "\n");
-    }
-  }
 }
 
 // TextGenerator Implementation
@@ -331,90 +317,6 @@ std::vector<std::string> TextGenerator::GetModelSpecificStopTokens(const std::st
   return stopTokens;
 }
 
-void TextGenerator::ValidatePromptFormat(const std::vector<uint32_t> &token_ids) {
-  fprintf(stderr, "\n=== Prompt Format Validation ===\n");
-
-  bool has_im_start = false, has_im_end = false;
-  for (auto id : token_ids) {
-    if (m_bosTokenId > 0 && (int64_t)id == m_bosTokenId) has_im_start = true;
-    if (m_eosTokenId > 0 && (int64_t)id == m_eosTokenId) has_im_end = true;
-  }
-
-  fprintf(stderr, "Contains <|im_start|>(id=%ld): %s\n", m_bosTokenId, has_im_start ? "YES" : "NO");
-  fprintf(stderr, "Contains <|im_end|>(id=%ld): %s\n", m_eosTokenId, has_im_end ? "YES" : "NO");
-
-  std::vector<uint32_t> sample_ids;
-  size_t sample_size = std::min(size_t(50), token_ids.size());
-  for (size_t i = 0; i < sample_size; i++) {
-    sample_ids.push_back(token_ids[i]);
-  }
-
-  std::string sample_text = m_tokenizer->decode(sample_ids, false);
-  fprintf(stderr, "Sample decoded text (first 50 tokens):\n%s\n", sample_text.c_str());
-  fprintf(stderr, "================================\n");
-}
-
-void TextGenerator::TestTokenizerCompatibility() {
-  if (!m_tokenizer || !m_tokenizer->is_valid()) {
-    std::cout << "[ERROR] Tokenizer not initialized" << std::endl;
-    return;
-  }
-
-  std::cout << "\n=== Tokenizer Compatibility Test ===" << std::endl;
-
-  std::string testText = "Hello, how are you?";
-  auto encoding = m_tokenizer->encode(testText, false);
-  auto tokenIds = encoding.ids();
-
-  std::vector<uint32_t> decodeIds(tokenIds.begin(), tokenIds.end());
-  std::string decoded = m_tokenizer->decode(decodeIds, true);
-
-  std::cout << "Original: " << testText << std::endl;
-  std::cout << "Decoded:  " << decoded << std::endl;
-  std::cout << "Match: " << (testText == decoded ? "YES" : "NO") << std::endl;
-
-  std::vector<std::pair<std::string, std::string>> specialTokens = {{"<|im_start|>", "Chat template start token"},
-                                                                    {"<|im_end|>", "Chat template end token"},
-                                                                    {"<|endoftext|>", "End of text token"},
-                                                                    {"<|extra_0|>", "Extra token (if exists)"}};
-
-  for (const auto &[token, desc] : specialTokens) {
-    auto enc = m_tokenizer->encode(token, false);
-    if (!enc.ids().empty()) {
-      auto dec = m_tokenizer->decode(enc.ids(), false);
-      std::cout << desc << ": " << token << " -> ID(" << enc.ids()[0] << ") -> " << dec;
-      std::cout << " [" << (token == dec ? "OK" : "MISMATCH") << "]" << std::endl;
-    } else {
-      std::cout << desc << ": " << token << " -> [NOT FOUND]" << std::endl;
-    }
-  }
-
-  std::string userInput = "What is AI?";
-  auto testEncoding = BuildPromptEncoding(userInput, "");
-  std::vector<uint32_t> inputIds = testEncoding.ids();
-  ValidatePromptFormat(inputIds);
-
-  std::cout << "\nChat Template Test:" << std::endl;
-  std::cout << "Token count: " << testEncoding.ids().size() << std::endl;
-
-  std::string chatDecoded = m_tokenizer->decode(testEncoding.ids(), true);
-  std::cout << "Decoded prompt: " << chatDecoded << std::endl;
-
-  std::cout << "\nConfigured special tokens:" << std::endl;
-  std::cout << "EOS token ID: " << m_eosTokenId << std::endl;
-  std::cout << "BOS token ID: " << m_bosTokenId << std::endl;
-  std::cout << "PAD token ID: " << m_padTokenId << std::endl;
-
-  std::cout << "[Info] Generating with model: " << m_modelType << std::endl;
-  auto enc = m_tokenizer->encode("What is AI?");
-  auto ids = enc.ids();
-  for (auto id : ids) printf("%d ", id);
-
-  auto dec_str = m_tokenizer->decode(ids, true);
-  std::cout << std::endl << "dec_str:" << dec_str << std::endl;
-  std::cout << "=== Test Complete ===" << std::endl;
-}
-
 int64_t TextGenerator::Argmax(const float *data, size_t size) {
   if (size == 0) return -1;
   int64_t maxIndex = 0;
@@ -426,50 +328,6 @@ int64_t TextGenerator::Argmax(const float *data, size_t size) {
     }
   }
   return maxIndex;
-}
-
-void TextGenerator::AnalyzeModelInputShapes() {
-  std::cout << "\n=== Analyze Model Input Shapes ===" << std::endl;
-
-  Ort::AllocatorWithDefaultOptions allocator;
-
-  for (size_t i = 0; i < m_session->GetInputCount(); ++i) {
-    Ort::AllocatedStringPtr inputNamePtr = m_session->GetInputNameAllocated(i, allocator);
-    if (!inputNamePtr) continue;
-    std::string inputName = inputNamePtr.get();
-
-    Ort::TypeInfo typeInfo = m_session->GetInputTypeInfo(i);
-    auto shapeInfo = typeInfo.GetTensorTypeAndShapeInfo();
-    auto shape = shapeInfo.GetShape();
-    auto elemType = shapeInfo.GetElementType();
-
-    std::cout << "input" << i << " : " << inputName << "\n";
-    std::cout << "  shape: [";
-    for (size_t j = 0; j < shape.size(); ++j) {
-      if (j > 0) std::cout << ", ";
-      std::cout << (shape[j] == -1 ? "dyn" : std::to_string(shape[j]));
-    }
-    std::cout << "]  dtype: " << elemType << "\n";
-
-    if (inputName.find("past_key_values") != std::string::npos && shape.size() == 4) {
-      auto [layerIdx, isKey] = ParseKVCacheInputName(inputName);
-      KVShapeInfo si = DetectKVShapeLayout(shape);
-
-      std::cout << "  KV Cache layer=" << layerIdx << " type=" << (isKey ? "Key" : "Value") << "\n";
-
-      if (si.layout != KVCacheLayout::UNKNOWN) {
-        const char *layout_names[] = {"", "BHSD", "BSHD", "BHDS"};
-        std::cout << "  Layout: " << layout_names[static_cast<int>(si.layout)] << "\n";
-        std::cout << "  dim" << si.dim_heads << " = heads      = " << shape[si.dim_heads] << "\n";
-        std::cout << "  dim" << si.dim_seq << " = seq        = dyn\n";
-        std::cout << "  dim" << si.dim_head_dim << " = head_dim   = " << shape[si.dim_head_dim] << "\n";
-      } else {
-        std::cout << "  [WARN] Layout could not be determined\n";
-      }
-    }
-    std::cout << "\n";
-  }
-  std::cout << "=== Done ===" << std::endl;
 }
 
 void TextGenerator::GetModelMetadata() {
@@ -1037,23 +895,18 @@ int TextGenerator::GetCurrentCacheMaxSeq() const {
   }
 }
 
-void TextGenerator::UpdateCacheSeqCounters(size_t totalSeqLen) {
-  auto update = [&](auto &cache) {
-    for (int layer = 0; layer < cache.num_layers; ++layer) {
-      // buffer has written by ORT, just update the seq len for next iteration.
-      cache.layers[layer].seq = static_cast<int>(totalSeqLen);
-    }
-  };
-
+void TextGenerator::CommitKVCache(size_t totalSeqLen) {
+  if (totalSeqLen > static_cast<size_t>(std::numeric_limits<int>::max()))
+    throw std::out_of_range("Present KV sequence length exceeds cache counter range");
   switch (m_cacheDataType) {
     case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT:
-      update(m_floatCache);
+      m_floatCache.commit_present(static_cast<int>(totalSeqLen));
       break;
     case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16:
-      update(m_fp16Cache);
+      m_fp16Cache.commit_present(static_cast<int>(totalSeqLen));
       break;
     case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8:
-      update(m_int8Cache);
+      m_int8Cache.commit_present(static_cast<int>(totalSeqLen));
       break;
     default:
       break;
@@ -1064,64 +917,53 @@ void TextGenerator::BindKVCacheDirect(Ort::IoBinding &binding, const std::vector
                                       size_t totalSeqLen, const Ort::MemoryInfo &memInfo) {
   const std::vector<int64_t> shape = BuildKVShape(totalSeqLen);
   const size_t elementCount = GetElementCount(shape);
+  std::set<std::pair<size_t, bool>> bound;
+
+  auto bind = [&](auto &cache, const std::string &name, size_t layerIdx, bool isKey) {
+    if (layerIdx >= cache.layers.size()) throw std::out_of_range("Invalid present KV layer: " + name);
+    auto &layer = cache.layers[layerIdx];
+    auto &buffer = isKey ? layer.present_key : layer.present_value;
+    if (elementCount > buffer.size()) throw std::out_of_range("Present KV buffer capacity exceeded: " + name);
+    auto tensor = Ort::Value::CreateTensor(memInfo, buffer.data(), elementCount * sizeof(buffer[0]), shape.data(),
+                                           shape.size(), m_cacheDataType);
+    binding.BindOutput(name.c_str(), tensor);
+  };
 
   for (const auto &name : outputNames) {
-    // only dealwith present_key_values output，logits not be binded here.
     bool is_present = name.find("present") != std::string::npos || name.find("key_values") != std::string::npos;
     if (!is_present) continue;
+    // Hybrid models also have recurrent outputs containing "key_values".
+    // Those are allocated and propagated separately, not published as KV.
+    if (std::any_of(m_opaqueStates.begin(), m_opaqueStates.end(),
+                    [&](const auto &state) { return state.out_name == name; }))
+      continue;
 
     auto [layerIdx, isKey] = ParseKVCacheOutputName(name);
-    if (layerIdx >= m_numLayers) {
-      binding.BindOutput(name.c_str(), memInfo);
-      continue;
-    }
-
+    if (!bound.emplace(layerIdx, isKey).second) throw std::runtime_error("Duplicate present KV output: " + name);
     switch (m_cacheDataType) {
-      case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT: {
-        const size_t capacity =
-            static_cast<size_t>(m_floatCache.max_seq_len) * m_floatCache.layers[layerIdx].token_stride();
-        if (elementCount > capacity) {
-          DBUG_PRINT("warning", ("[BindKVOutput] layer %zu %s: elementCount=%zu > capacity=%zu, "
-                                 "falling back to ORT alloc",
-                                 layerIdx, isKey ? "key" : "val", elementCount, capacity));
-          binding.BindOutput(name.c_str(), memInfo);
-          break;
-        }
-        float *buf = isKey ? m_floatCache.key_data(layerIdx) : m_floatCache.value_data(layerIdx);
-        auto tensor = Ort::Value::CreateTensor<float>(memInfo, buf, elementCount, shape.data(), shape.size());
-        binding.BindOutput(name.c_str(), tensor);
-      } break;
-      case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16: {
-        const size_t capacity =
-            static_cast<size_t>(m_fp16Cache.max_seq_len) * m_fp16Cache.layers[layerIdx].token_stride();
-        if (elementCount > capacity) {
-          binding.BindOutput(name.c_str(), memInfo);
-          break;
-        }
-        void *buf = isKey ? static_cast<void *>(m_fp16Cache.key_data(layerIdx))
-                          : static_cast<void *>(m_fp16Cache.value_data(layerIdx));
-        auto tensor = Ort::Value::CreateTensor(memInfo, buf,
-                                               elementCount * sizeof(uint16_t),  // byteCount
-                                               shape.data(), shape.size(), ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16);
-        binding.BindOutput(name.c_str(), tensor);
-      } break;
-      case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8: {
-        const size_t capacity =
-            static_cast<size_t>(m_int8Cache.max_seq_len) * m_int8Cache.layers[layerIdx].token_stride();
-        if (elementCount > capacity) {
-          binding.BindOutput(name.c_str(), memInfo);
-          break;
-        }
-        void *buf = isKey ? static_cast<void *>(m_int8Cache.key_data(layerIdx))
-                          : static_cast<void *>(m_int8Cache.value_data(layerIdx));
-        auto tensor = Ort::Value::CreateTensor(memInfo, buf, elementCount * sizeof(int8_t), shape.data(), shape.size(),
-                                               ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8);
-        binding.BindOutput(name.c_str(), tensor);
-      } break;
-      default:
-        binding.BindOutput(name.c_str(), memInfo);
+      case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT:
+        bind(m_floatCache, name, layerIdx, isKey);
         break;
+      case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16:
+        bind(m_fp16Cache, name, layerIdx, isKey);
+        break;
+      case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8:
+        bind(m_int8Cache, name, layerIdx, isKey);
+        break;
+      default:
+        throw std::runtime_error("Unsupported present KV data type: " + name);
     }
+  }
+
+  // Never publish unwritten staging storage. Check the actual KV inputs rather
+  // than assuming layer indices are dense (hybrid attention/Mamba models).
+  for (const auto &name : m_inputNames) {
+    if (name.find("past_key_values") == std::string::npos) continue;
+    if (std::any_of(m_opaqueStates.begin(), m_opaqueStates.end(),
+                    [&](const auto &state) { return state.in_name == name; }))
+      continue;
+    if (bound.count(ParseKVCacheInputName(name)) == 0)
+      throw std::runtime_error("Missing present KV output for input: " + name);
   }
 }
 
@@ -1468,37 +1310,6 @@ void TextGenerator::UpdateTokenTracking(int64_t token) {
   }
 }
 
-void TextGenerator::PrintTopKLogits(const std::vector<float> &logits, int top_k) const {
-  float max_logit = *std::max_element(logits.begin(), logits.end());
-
-  std::vector<std::pair<int, float>> idx_logits;
-  idx_logits.reserve(logits.size());
-  for (int i = 0; i < (int)logits.size(); ++i) {
-    idx_logits.emplace_back(i, logits[i]);
-  }
-
-  std::partial_sort(idx_logits.begin(), idx_logits.begin() + top_k, idx_logits.end(),
-                    [](auto &a, auto &b) { return a.second > b.second; });
-
-  // softmax
-  float denom = 0.0f;
-  for (int i = 0; i < top_k; ++i) {
-    denom += std::exp(idx_logits[i].second - max_logit);
-  }
-
-  std::cout << "[Debug] Top-" << top_k << " token probabilities:" << std::endl;
-  for (int i = 0; i < top_k; ++i) {
-    auto [idx, logit] = idx_logits[i];
-    float prob = std::exp(logit - max_logit) / denom;
-
-    std::string token_str;
-    token_str = m_tokenizer->decode({static_cast<uint32_t>(idx)});
-
-    std::cout << "  [" << i << "] token_id=" << idx << ", token='" << token_str << "'"
-              << ", logit=" << logit << ", prob=" << prob * 100 << "%" << std::endl;
-  }
-}
-
 Ort::Value TextGenerator::CreateZeroCacheTensor(ONNXTensorElementDataType type, const std::vector<int64_t> &shape,
                                                 const Ort::MemoryInfo &memInfo) {
   size_t elementCount = 1;
@@ -1598,11 +1409,6 @@ TextGenerator::Result TextGenerator::Generate(const std::string &userPrompt, int
   auto &inputNames = m_inputNames;
   auto &outputNames = m_outputNames;
 
-#ifndef NDEBUG
-  TestTokenizerCompatibility();
-  AnalyzeModelInputShapes();
-#endif
-
   m_stepFloatBuffers.clear();
   m_stepInt64Buffers.clear();
 
@@ -1641,10 +1447,6 @@ TextGenerator::Result TextGenerator::Generate(const std::string &userPrompt, int
   auto modelStops = GetModelSpecificStopTokens(m_modelType);
   for (const auto &seq : modelStops) addStopTokenSequence(m_tokenizer->encode(seq, false).ids());
   for (const auto &seq : m_gen_option.stop_sequences) addStopTokenSequence(m_tokenizer->encode(seq, false).ids());
-
-#ifndef NDEBUG
-  ValidatePromptFormat(inputIds);
-#endif
 
   std::vector<int64_t> inputIds64;
   inputIds64.reserve(inputIds.size());
@@ -1805,10 +1607,6 @@ TextGenerator::Result TextGenerator::Generate(const std::string &userPrompt, int
       binding.BindInput(inputName.c_str(), tensor);
     }
 
-    // 5.2 bind KV cache outputs directly.
-    //   present_key_values KVCacheManager buffer，
-    BindKVCacheDirect(binding, outputNames, totalSeqLen, memInfo);
-
     // 5.2b bind opaque recurrent state outputs (conv_state / recurrent_state).
     //   ORT will allocate and fill them; we read them back in 5.5.
     for (const auto &st : m_opaqueStates) {
@@ -1834,16 +1632,17 @@ TextGenerator::Result TextGenerator::Generate(const std::string &userPrompt, int
 
     // 5.4 execute inference
     try {
+      // Present must never alias past: growing BHSD/BHDS tensors change the
+      // offsets of existing heads/channels while ORT is still reading them.
+      BindKVCacheDirect(binding, outputNames, totalSeqLen, memInfo);
       m_session->Run(Ort::RunOptions{nullptr}, binding);
-    } catch (const Ort::Exception &e) {
+      CommitKVCache(totalSeqLen);
+    } catch (const std::exception &e) {
       DBUG_PRINT("error", ("ORT Run failed at step %d: %s", step, e.what()));
       m_error_string = std::string("[ORT Run] step ") + std::to_string(step) + ": " + e.what();
       result.finish_reason = "error";
       break;
     }
-
-    // 5.5 update KV cache seq counters (ORT already wrote present KV to cache buffer)
-    UpdateCacheSeqCounters(totalSeqLen);
 
     // 5.5b propagate opaque recurrent states for the next step
     UpdateOpaqueStatesFromOutputs(binding, outputNames, memInfo);
@@ -1895,10 +1694,6 @@ TextGenerator::Result TextGenerator::Generate(const std::string &userPrompt, int
     if (m_logitsBuf.size() < static_cast<size_t>(vocabSize)) m_logitsBuf.resize(static_cast<size_t>(vocabSize));
     std::copy(logitsData + logitsOffset, logitsData + logitsOffset + vocabSize, m_logitsBuf.begin());
     float *currentLogits = m_logitsBuf.data();
-
-#ifndef NDEBUG
-    PrintTopKLogits(std::vector<float>(currentLogits, currentLogits + vocabSize), 5);
-#endif
 
     // 5.7 apply punishment
     ApplyRepeatPenalty(currentLogits, vocabSize, newTokens, m_gen_option.repeat_penalty);

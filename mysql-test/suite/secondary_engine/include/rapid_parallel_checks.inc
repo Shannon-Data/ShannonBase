@@ -155,10 +155,13 @@ if ($parallel_check == 'finalize_admission') {
   SELECT p.id,b.id,b.s FROM p JOIN b ON p.k=b.k AND p.k2=b.k2 LIMIT 256;
   --disable_result_log
   SET rapid_parallel_workers=2;
+  # Both parked builds must reach finalize despite dynamic scan scheduling.
+  SET debug='+d,rapid_parallel_join_test_headroom';
   --connect (build_one,localhost,root,,rapid_parallel_concurrent)
   SET use_secondary_engine=FORCED;
   SET rapid_parallel_workers=2;
   SET secondary_engine_cost_threshold=0;
+  SET debug='+d,rapid_parallel_join_test_headroom';
   --disable_warnings
   SET optimizer_switch='hypergraph_optimizer=on';
   --enable_warnings
@@ -170,6 +173,7 @@ if ($parallel_check == 'finalize_admission') {
   SET use_secondary_engine=FORCED;
   SET rapid_parallel_workers=2;
   SET secondary_engine_cost_threshold=0;
+  SET debug='+d,rapid_parallel_join_test_headroom';
   --disable_warnings
   SET optimizer_switch='hypergraph_optimizer=on';
   --enable_warnings
@@ -180,6 +184,7 @@ if ($parallel_check == 'finalize_admission') {
   --let $status = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_parallel_worker_status', Value, 1)
   --let $held = `SELECT '$status' LIKE 'limit=% active=4 peak=4 rejected=%'`
   if ($held == 0) {
+    --echo # Worker status at finalize: $status
     --die Build released its worker lease before finalize
   }
   --let $assert_query = SELECT SUM(v),COUNT(*) FROM t
@@ -193,12 +198,15 @@ if ($parallel_check == 'finalize_admission') {
   --output $MYSQLTEST_VARDIR/log/finalize_one.out
   --reap
   --disable_result_log
-  SET DEBUG_SYNC='RESET';
   --connection build_two
   --enable_result_log
   --output $MYSQLTEST_VARDIR/log/finalize_two.out
   --reap
   --disable_result_log
+  # RESET clears global signals, including the other reader's continuation.
+  # Reap both readers before either session resets debug sync.
+  SET DEBUG_SYNC='RESET';
+  --connection build_one
   SET DEBUG_SYNC='RESET';
   --connection default
   --diff_files $MYSQLTEST_VARDIR/log/finalize_expected.out $MYSQLTEST_VARDIR/log/finalize_one.out
@@ -217,6 +225,7 @@ if ($parallel_check == 'finalize_admission') {
   --source suite/secondary_engine/include/assert_rapid_matches_innodb.inc
   --disconnect build_one
   --disconnect build_two
+  SET debug='-d,rapid_parallel_join_test_headroom';
   SET DEBUG_SYNC='RESET';
   --enable_result_log
   --enable_query_log
