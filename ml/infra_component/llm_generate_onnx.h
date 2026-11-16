@@ -160,10 +160,8 @@ class TextGenerator {
   tokenizers::Tokenizer::Encoding BuildPromptEncoding(const std::string &userInput,
                                                       const std::string &systemPromptOverride);
 
-  void ValidatePromptFormat(const std::vector<uint32_t> &token_ids);
   int64_t Argmax(const float *data, size_t size);
 
-  void AnalyzeModelInputShapes();
   void GetModelMetadata();
   void DetectQueryHeadsFromOutputs(const std::vector<std::string> &outputNames);
   void DetectModelArchitecture(const std::vector<std::string> &inputNames, const std::vector<std::string> &outputNames);
@@ -203,9 +201,6 @@ class TextGenerator {
 
   std::vector<std::string> GetModelSpecificStopTokens(const std::string &modelType);
   bool ShouldStop(const std::vector<int64_t> &tokens, const std::vector<std::string> &stopSequences);
-
-  void TestTokenizerCompatibility();
-  void PrintTopKLogits(const std::vector<float> &logits, int top_k) const;
 
   Ort::Value CreateZeroCacheTensor(ONNXTensorElementDataType type, const std::vector<int64_t> &shape,
                                    const Ort::MemoryInfo &memInfo);
@@ -269,8 +264,6 @@ class TextGenerator {
   KVCacheManager<T> *get_cache_manager();
   template <typename T>
   const KVCacheManager<T> *get_cache_manager() const;
-  template <typename T>
-  void debug_print_cache(const KVCacheManager<T> &cache, int layer, const char *name);
 
   bool m_kvCacheInitialized = false;
 
@@ -299,7 +292,7 @@ class TextGenerator {
 
   void BindKVCacheDirect(Ort::IoBinding &binding, const std::vector<std::string> &outputNames, size_t totalSeqLen,
                          const Ort::MemoryInfo &memInfo);
-  void UpdateCacheSeqCounters(size_t totalSeqLen);
+  void CommitKVCache(size_t totalSeqLen);
   int GetCurrentCacheSeq() const;
   int GetCurrentCacheMaxSeq() const;
 

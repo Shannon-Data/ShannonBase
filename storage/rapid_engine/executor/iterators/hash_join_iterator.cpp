@@ -1360,7 +1360,11 @@ int VectorizedHashJoinIterator::TryBuildParallelHashTable() {
   const size_t final_row_bytes = row_bytes + key_bytes + sizeof(HashSlot) + sizeof(RowRef) + bucket_bytes_per_row;
   const size_t per_row = local_row_bytes + final_row_bytes;
   const uint64_t input_bound = source->max_ordinal();
-  const size_t desired = input_bound >= SIZE_MAX ? SIZE_MAX : SaturatingMultiply(input_bound + 1, per_row);
+  size_t desired = input_bound >= SIZE_MAX ? SIZE_MAX : SaturatingMultiply(input_bound + 1, per_row);
+
+  DBUG_EXECUTE_IF("rapid_parallel_join_test_headroom",
+                  { desired = SaturatingMultiply(desired, Morsel::ParallelWorkers(thd())); });
+
   while (m_max_memory_available < desired && TryGrowBuildBudget()) {
   }
 

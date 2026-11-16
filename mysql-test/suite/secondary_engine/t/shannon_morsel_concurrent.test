@@ -73,9 +73,10 @@ SET DEBUG_SYNC='now SIGNAL one_continue';
 SET DEBUG_SYNC='now SIGNAL two_continue';
 --connection one
 --reap
-SET DEBUG_SYNC='RESET';
 --connection two
 --reap
+SET DEBUG_SYNC='RESET';
+--connection one
 SET DEBUG_SYNC='RESET';
 --connection default
 --let $status = query_get_value(SHOW GLOBAL STATUS LIKE 'rapid_parallel_worker_status', Value, 1)
