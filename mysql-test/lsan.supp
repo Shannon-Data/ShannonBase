@@ -74,3 +74,6 @@ leak:ndb_select_all
 leak:ndb_select_count
 leak:ndb_show_tables
 leak:ndb_sign_keys
+
+# Ubuntu 26.04 ships Rust coreutils; their allocations look like leaks to LSan.
+leak:coreutils
