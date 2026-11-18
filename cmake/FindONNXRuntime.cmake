@@ -150,6 +150,18 @@ set(_download_path "${CMAKE_BINARY_DIR}/${_archive_name}")
 set(_extract_dir "${CMAKE_BINARY_DIR}/_deps")
 set(_install_dir "${_extract_dir}/onnxruntime")
 
+# Escape hatches for offline / mirrored / rate-limited environments.
+set(ONNXRUNTIME_ARCHIVE_URL "" CACHE STRING
+  "Override the ONNXRuntime archive URL (mirror or pre-published copy)")
+set(ONNXRUNTIME_ARCHIVE_SHA256 "" CACHE STRING
+  "Expected SHA256 of the ONNXRuntime archive (empty disables the check)")
+set(ONNXRUNTIME_DOWNLOAD_RETRIES "3" CACHE STRING
+  "Number of attempts when downloading the ONNXRuntime archive")
+
+if (ONNXRUNTIME_ARCHIVE_URL)
+  set(_onnx_url "${ONNXRUNTIME_ARCHIVE_URL}")
+endif()
+
 # ============================================================
 # 1. Prefer bundled native optimized ONNXRuntime if available
 # ============================================================
@@ -340,40 +352,229 @@ if (ONNXRUNTIME_INCLUDE_DIR AND ONNXRUNTIME_LIBRARY)
 endif()
 
 # Check if already downloaded and extracted
-if (EXISTS "${_install_dir}")
+if (EXISTS "${_install_dir}/include/onnxruntime_c_api.h")
   message(STATUS "[ONNXRuntime] Found existing installation at ${_install_dir}")
 else()
-  # If not found, download the binary archive
-  message(STATUS
-    "[ONNXRuntime] No native/system installation found. "
-    "Downloading generic official release: ${_onnx_url}")
+  # NuGet mirrors the official binaries behind a stable URL; .nupkg is a zip.
+  if (ONNXRUNTIME_BACKEND STREQUAL "gpu")
+    set(_ort_nuget_id "microsoft.ml.onnxruntime.gpu")
+  else()
+    set(_ort_nuget_id "microsoft.ml.onnxruntime")
+  endif()
+  set(_ort_nuget_file "${_ort_nuget_id}.${ONNXRUNTIME_VERSION}.nupkg")
+  set(_ort_nuget_url
+    "https://api.nuget.org/v3-flatcontainer/${_ort_nuget_id}/${ONNXRUNTIME_VERSION}/${_ort_nuget_file}")
 
-  file(DOWNLOAD ${_onnx_url} ${_download_path}
-       SHOW_PROGRESS STATUS _dl_status)
+  if (_os STREQUAL "linux")
+    if (_arch STREQUAL "aarch64")
+      set(_ort_rid "linux-arm64")
+    elseif(_arch STREQUAL "arm")
+      set(_ort_rid "linux-arm")
+    else()
+      set(_ort_rid "linux-x64")
+    endif()
+  elseif(_os STREQUAL "osx")
+    if (_arch STREQUAL "arm64")
+      set(_ort_rid "osx-arm64")
+    else()
+      set(_ort_rid "osx-x64")
+    endif()
+  else()
+    set(_ort_rid "win-x64")
+  endif()
 
-  list(GET _dl_status 0 _dl_code)
-  if (NOT _dl_code EQUAL 0)
-    message(FATAL_ERROR "[ONNXRuntime] Failed to download: ${_onnx_url}")
+  # Tried in order: explicit override, GitHub release tarball, NuGet package.
+  set(_ort_sources "")
+  if (ONNXRUNTIME_ARCHIVE_URL)
+    list(APPEND _ort_sources "tarball|${ONNXRUNTIME_ARCHIVE_URL}|${_archive_name}")
+  else()
+    list(APPEND _ort_sources "tarball|${_onnx_url}|${_archive_name}")
+    list(APPEND _ort_sources "nuget|${_ort_nuget_url}|${_ort_nuget_file}")
+  endif()
+
+  message(STATUS "[ONNXRuntime] No native/system installation found. Sources:")
+  foreach(_ort_source IN LISTS _ort_sources)
+    string(REPLACE "|" ";" _ort_src "${_ort_source}")
+    list(GET _ort_src 1 _ort_url)
+    message(STATUS "[ONNXRuntime]   ${_ort_url}")
+  endforeach()
+
+  set(_ort_dl_log "${CMAKE_BINARY_DIR}/onnxruntime-download.log")
+  set(_ort_archive "")
+  set(_ort_kind "")
+  set(_ort_failures "")
+  foreach(_ort_source IN LISTS _ort_sources)
+    string(REPLACE "|" ";" _ort_src "${_ort_source}")
+    list(GET _ort_src 0 _ort_kind_try)
+    list(GET _ort_src 1 _ort_url)
+    list(GET _ort_src 2 _ort_file)
+    set(_ort_path "${CMAKE_BINARY_DIR}/${_ort_file}")
+    set(_ort_ok FALSE)
+    set(_ort_error "no attempt made")
+
+    # A previously downloaded archive can be reused (CI caches, offline builds).
+    if (EXISTS "${_ort_path}")
+      file(SIZE "${_ort_path}" _ort_cached_size)
+      if (_ort_cached_size GREATER 1048576)
+        message(STATUS "[ONNXRuntime] Reusing cached ${_ort_file}")
+        set(_ort_ok TRUE)
+      else()
+        file(REMOVE "${_ort_path}")
+      endif()
+    endif()
+
+    set(_ort_attempt 0)
+    while (NOT _ort_ok AND _ort_attempt LESS ONNXRUNTIME_DOWNLOAD_RETRIES)
+      math(EXPR _ort_attempt "${_ort_attempt} + 1")
+      file(REMOVE "${_ort_path}")
+      message(STATUS
+        "[ONNXRuntime] ${_ort_kind_try} attempt ${_ort_attempt}/"
+        "${ONNXRUNTIME_DOWNLOAD_RETRIES}")
+
+      set(_ort_dl_args
+          STATUS _ort_dl_status
+          SHOW_PROGRESS
+          TIMEOUT 900
+          INACTIVITY_TIMEOUT 120)
+      if (CMAKE_VERSION VERSION_GREATER_EQUAL 3.18)
+        list(APPEND _ort_dl_args LOG "${_ort_dl_log}")
+      endif()
+      if (ONNXRUNTIME_ARCHIVE_SHA256 AND _ort_kind_try STREQUAL "tarball")
+        list(APPEND _ort_dl_args
+             EXPECTED_HASH "SHA256=${ONNXRUNTIME_ARCHIVE_SHA256}")
+      endif()
+      file(DOWNLOAD "${_ort_url}" "${_ort_path}" ${_ort_dl_args})
+
+      list(GET _ort_dl_status 0 _ort_dl_code)
+      list(LENGTH _ort_dl_status _ort_dl_len)
+      if (_ort_dl_len GREATER 1)
+        list(GET _ort_dl_status 1 _ort_error)
+      endif()
+
+      if (_ort_dl_code EQUAL 0 AND EXISTS "${_ort_path}")
+        file(SIZE "${_ort_path}" _ort_dl_size)
+        if (_ort_dl_size GREATER 1048576)
+          set(_ort_ok TRUE)
+        else()
+          set(_ort_error "archive is only ${_ort_dl_size} bytes")
+        endif()
+      else()
+        set(_ort_error "(${_ort_dl_code}) ${_ort_error}")
+      endif()
+      unset(_ort_dl_status)
+
+      if (NOT _ort_ok)
+        message(WARNING
+          "[ONNXRuntime] ${_ort_kind_try} attempt ${_ort_attempt} failed: ${_ort_error}")
+        if (_ort_attempt LESS ONNXRUNTIME_DOWNLOAD_RETRIES)
+          execute_process(COMMAND ${CMAKE_COMMAND} -E sleep 5)
+        endif()
+      endif()
+    endwhile()
+
+    if (_ort_ok)
+      set(_ort_archive "${_ort_path}")
+      set(_ort_kind "${_ort_kind_try}")
+      break()
+    endif()
+    string(APPEND _ort_failures "\n    ${_ort_url}\n      ${_ort_error}")
+  endforeach()
+
+  if (NOT _ort_archive)
+    message(FATAL_ERROR
+      "[ONNXRuntime] Could not obtain ONNX Runtime ${ONNXRUNTIME_VERSION}:"
+      "${_ort_failures}\n"
+      "  Workarounds: pass -DONNXRUNTIME_ARCHIVE_URL=<mirror or local copy>, "
+      "pre-place the archive at ${_download_path}, or provide a native build "
+      "under extra/onnxruntime (see extra/onnxruntime/readme.md).")
   endif()
 
   # Extract the archive
-  file(MAKE_DIRECTORY ${_extract_dir})
-  if (_archive_name MATCHES ".zip$")
+  file(MAKE_DIRECTORY "${_extract_dir}")
+  file(REMOVE_RECURSE "${_install_dir}")
+  set(_ort_tar_rc 0)
+  if (_ort_kind STREQUAL "nuget")
+    set(_ort_nuget_dir "${_extract_dir}/_ort_nuget")
+    file(REMOVE_RECURSE "${_ort_nuget_dir}")
+    file(MAKE_DIRECTORY "${_ort_nuget_dir}")
     execute_process(
-      COMMAND ${CMAKE_COMMAND} -E tar xzf ${_download_path} --format=zip
-      WORKING_DIRECTORY ${_extract_dir}
+      COMMAND ${CMAKE_COMMAND} -E tar xf "${_ort_archive}" --format=zip
+      WORKING_DIRECTORY "${_ort_nuget_dir}"
+      RESULT_VARIABLE _ort_tar_rc
+    )
+    if (_ort_tar_rc EQUAL 0)
+      # Lay the package out like the official tarball: include/ + lib/.
+      file(MAKE_DIRECTORY "${_install_dir}/include" "${_install_dir}/lib")
+      file(COPY "${_ort_nuget_dir}/build/native/include/"
+           DESTINATION "${_install_dir}/include")
+      file(GLOB _ort_rid_files "${_ort_nuget_dir}/runtimes/${_ort_rid}/native/*")
+      if (NOT _ort_rid_files)
+        message(FATAL_ERROR
+          "[ONNXRuntime] ${_ort_archive} has no runtimes/${_ort_rid}/native payload")
+      endif()
+      file(COPY ${_ort_rid_files} DESTINATION "${_install_dir}/lib")
+      file(REMOVE_RECURSE "${_ort_nuget_dir}")
+    endif()
+  elseif (_archive_name MATCHES "\\.zip$")
+    execute_process(
+      COMMAND ${CMAKE_COMMAND} -E tar xzf "${_ort_archive}" --format=zip
+      WORKING_DIRECTORY "${_extract_dir}"
+      RESULT_VARIABLE _ort_tar_rc
     )
   else()
     execute_process(
-      COMMAND ${CMAKE_COMMAND} -E tar xzf ${_download_path}
-      WORKING_DIRECTORY ${_extract_dir}
+      COMMAND ${CMAKE_COMMAND} -E tar xzf "${_ort_archive}"
+      WORKING_DIRECTORY "${_extract_dir}"
+      RESULT_VARIABLE _ort_tar_rc
     )
+  endif()
+  if (NOT _ort_tar_rc EQUAL 0)
+    file(REMOVE "${_ort_archive}")
+    message(FATAL_ERROR
+      "[ONNXRuntime] Failed to extract ${_ort_archive} (exit ${_ort_tar_rc}). "
+      "Removed the archive; re-run cmake to download it again.")
   endif()
 
   # Rename the extracted directory to a fixed path
-  file(GLOB _dirs "${_extract_dir}/onnxruntime-*")
-  list(GET _dirs 0 _extracted_dir)
-  file(RENAME ${_extracted_dir} ${_install_dir})
+  if (_ort_kind STREQUAL "tarball")
+    file(GLOB _dirs "${_extract_dir}/onnxruntime-*")
+    list(LENGTH _dirs _ort_dirs_len)
+    if (_ort_dirs_len EQUAL 0)
+      message(FATAL_ERROR
+        "[ONNXRuntime] ${_ort_archive} does not contain an onnxruntime-* directory")
+    endif()
+    list(GET _dirs 0 _extracted_dir)
+    file(RENAME "${_extracted_dir}" "${_install_dir}")
+  endif()
+endif()
+
+# The NuGet payload ships a bare libonnxruntime.so whose SONAME is
+# libonnxruntime.so.1. Rebuild the tarball layout (versioned file + SONAME
+# symlinks) so the DT_NEEDED name resolves at run time.
+if (_os STREQUAL "linux" AND
+    EXISTS "${_install_dir}/lib/libonnxruntime.so" AND
+    NOT IS_SYMLINK "${_install_dir}/lib/libonnxruntime.so")
+  set(_ort_soversion "${ONNXRUNTIME_VERSION}")
+  if (_ort_soversion MATCHES "^([0-9]+)")
+    set(_ort_soversion "${CMAKE_MATCH_1}")
+  endif()
+  set(_ort_versioned_name "libonnxruntime.so.${ONNXRUNTIME_VERSION}")
+  if (NOT EXISTS "${_install_dir}/lib/${_ort_versioned_name}")
+    file(RENAME "${_install_dir}/lib/libonnxruntime.so"
+         "${_install_dir}/lib/${_ort_versioned_name}")
+  else()
+    file(REMOVE "${_install_dir}/lib/libonnxruntime.so")
+  endif()
+  execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink
+    "${_ort_versioned_name}"
+    "${_install_dir}/lib/libonnxruntime.so.${_ort_soversion}")
+  execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink
+    "libonnxruntime.so.${_ort_soversion}"
+    "${_install_dir}/lib/libonnxruntime.so")
+  message(STATUS
+    "[ONNXRuntime] Normalized ${_install_dir}/lib to the versioned layout "
+    "(libonnxruntime.so -> libonnxruntime.so.${_ort_soversion} -> "
+    "${_ort_versioned_name})")
 endif()
 
 # Register the ONNX Runtime include and lib paths
@@ -389,5 +590,11 @@ else()
   set(ONNXRUNTIME_LIBRARY "${_install_dir}/lib/libonnxruntime.so")
 endif()
 set(ONNXRUNTIME_LIBRARIES ${ONNXRUNTIME_LIBRARY})
+
+if (NOT EXISTS "${ONNXRUNTIME_LIBRARY}")
+  message(FATAL_ERROR
+    "[ONNXRuntime] ${_install_dir} is incomplete: ${ONNXRUNTIME_LIBRARY} is "
+    "missing. Delete ${_download_path} and ${_install_dir}, then re-run cmake.")
+endif()
 
 _ort_finalize()
