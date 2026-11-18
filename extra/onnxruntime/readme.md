@@ -60,6 +60,26 @@ The ONNXRuntime selection order is:
 2. System-wide ONNXRuntime installation
 3. Official generic ONNXRuntime release package
 
+## Offline / mirror builds
+
+The GitHub release tarball is tried first; if it is unavailable the official
+NuGet package (`Microsoft.ML.OnnxRuntime`, or `.Gpu` when `USE_GPU` is set) is
+used instead and laid out as `include/` + `lib/`. The NuGet payload only ships
+a bare `libonnxruntime.so` whose `SONAME` is `libonnxruntime.so.1`, so it is
+renamed into the tarball layout (`libonnxruntime.so -> libonnxruntime.so.1 ->
+libonnxruntime.so.<ver>`) during configure; without that the loader cannot
+resolve the recorded `DT_NEEDED` and every binary fails to start.
+
+```bash
+cmake .. \
+  -DONNXRUNTIME_ARCHIVE_URL=https://my.mirror/onnxruntime-linux-x64-1.24.4.tgz \
+  -DONNXRUNTIME_ARCHIVE_SHA256=<sha256> \
+  -DONNXRUNTIME_DOWNLOAD_RETRIES=5
+```
+
+An archive already present at `<build>/onnxruntime-linux-x64-<ver>.tgz` is
+reused instead of being downloaded again.
+
 ## Notes
 
 Native optimized builds may not be portable across different CPU architectures or machines.
