@@ -2645,6 +2645,11 @@ ADD_SUBDIRECTORY(libservices)
 IF(NOT WITHOUT_SERVER)
   ADD_SUBDIRECTORY(testclients)
   ADD_SUBDIRECTORY(sql)
+
+  # Boost.Geometry overlay rounding breaks ST_SymDifference when FMA is contracted.
+  IF(TARGET sql_gis AND MY_COMPILER_IS_GNU_OR_CLANG)
+    TARGET_COMPILE_OPTIONS(sql_gis PRIVATE -ffp-contract=off)
+  ENDIF()
 ENDIF()
 
 # Some unit tests need to link with the entire server, use this library:

@@ -1,7 +1,6 @@
 # Workflow: Weekly ShannonBase Compile & MTR
 # Purpose: Builds and tests ShannonBase (MySQL-based project) on x86 and ARM architectures
 # Triggers:
-#   - Push to tags matching "*v*" (e.g., version tags like v1.0.0)
 #   - Weekly schedule at Saturday 6:30 AM Beijing time (UTC+8, equivalent to Friday 10:30 PM UTC)
 # Jobs:
 #   - lint: Checks code formatting for storage/rapid_engine and ml directories
@@ -11,16 +10,14 @@
 # Notes:
 #   - Uses concurrency to cancel in-progress runs for the same workflow/ref
 #   - Includes disk space optimizations to prevent 'No space left on device' errors
-#   - Commented-out alternative test commands (collections/default.weekly) for future use with faster runners
+#   - Commented-out alternative test commands (collections/default.push, default.weekly)
+#     are kept for when faster runners make the official collections practical
 #   - lint uses the distro default clang-format and only blocks builds on pull_request events
 #
-#    Copyright (c) 2023, 2024, 2025 Shannon Data AI and/or its affiliates.   
+#    Copyright (c) 2023, 2024, 2025 Shannon Data AI and/or its affiliates.
 name: weekly
 
 on:
-  push:
-    tags:
-      - "*v*"
   schedule:
     - cron: '30 6 * * 6'   # every saturday 6:30AM
       timezone: 'Asia/Shanghai'
@@ -82,7 +79,7 @@ jobs:
     - uses: actions/checkout@v7
       with:
         submodules: recursive
-        fetch-depth: 0    
+        fetch-depth: 0
     - name: Clean old build cache
       run: |
         rm -rf ${{ github.workspace }}/cmake_build
@@ -121,7 +118,7 @@ jobs:
         -DWITH_HYPERGRAPH_OPTIMIZER=ON \
         -DCOMPILATION_COMMENT="MySQL Community Server, and Shannon Data AI Alpha V."
         make -j"$(nproc)" && sudo make install
-        sudo find ${SHANNON_PREFIX}/bin -type f -executable -exec strip --strip-unneeded {} \; || true        
+        sudo find ${SHANNON_PREFIX}/bin -type f -executable -exec strip --strip-unneeded {} \; || true
     - name: Run Rapid unit tests (x86)
       run: |
         cd ${{ github.workspace }}/cmake_build
@@ -155,7 +152,7 @@ jobs:
         sudo chown -R $USER:$USER ${SHANNON_PREFIX}/
         cd ${SHANNON_PREFIX}/mysql-test/
         sudo chmod -R u+rwx mysql-test-run.pl
-        ./mysql-test-run.pl --mysqld=--loose-rapid_schema_embedding=OFF --big-test --mysqld=--user=$USER --mysqld=--default-storage-engine=innodb --nowarnings --force \
+        ./mysql-test-run.pl --mysqld=--loose-rapid_schema_embedding=OFF --mysqld=--user=$USER --mysqld=--default-storage-engine=innodb --force \
         --big-test --nocheck-testcases --report-unstable-tests --retry=3 --parallel=$(nproc)
         # when we have a fast git action runner, we can use the following command to run the test.
         #sudo chmod +x ./collections/default.weekly && chmod +x ./collections/default.weekly.basic
@@ -247,8 +244,8 @@ jobs:
           sudo chown -R $USER:$USER ${SHANNON_PREFIX}/
           cd ${SHANNON_PREFIX}/mysql-test/
           sudo chmod -R u+rwx mysql-test-run.pl
-          ./mysql-test-run.pl --mysqld=--loose-rapid_schema_embedding=OFF --mysqld=--user=$USER --mysqld=--default-storage-engine=innodb --nowarnings --force \
-          --big-test --nocheck-testcases --report-unstable-tests --retry=3 --skip-test-list=skip-tests.arm --parallel=$(nproc)
+          ./mysql-test-run.pl --mysqld=--loose-rapid_schema_embedding=OFF --mysqld=--user=$USER --mysqld=--default-storage-engine=innodb --force \
+          --big-test --nocheck-testcases --report-unstable-tests --retry=3 --parallel=$(nproc)
           # when we have a fast git action runner, we can use the following command to run the test.
           #sudo chmod +x ./collections/default.weekly && chmod +x ./collections/default.weekly.basic
           #./collections/default.weekly.basic
@@ -342,7 +339,7 @@ jobs:
           sudo chmod -R u+rwx mysql-test-run.pl
           # Keep the existing Debug suite coverage with optimized execution.
           ./mysql-test-run.pl --mysqld=--loose-rapid_schema_embedding=OFF --suite=main,agent,innodb,secondary_engine,ml,sys_vars,binlog,binlog_gtid,binlog_nogtid \
-          --mysqld=--user=$USER --mysqld=--default-storage-engine=innodb --nowarnings --force --nocheck-testcases --report-unstable-tests --retry=3 --parallel=$(nproc)
+          --mysqld=--user=$USER --mysqld=--default-storage-engine=innodb --force --nocheck-testcases --report-unstable-tests --retry=3 --parallel=$(nproc)
       - name: Remove per-run install tree (x86, Debug)
         if: always()
         run: sudo rm -rf "${SHANNON_PREFIX}"
@@ -427,7 +424,7 @@ jobs:
           cd ${SHANNON_PREFIX}/mysql-test/
           sudo chmod -R u+rwx mysql-test-run.pl
           ./mysql-test-run.pl --mysqld=--loose-rapid_schema_embedding=OFF --suite=main,agent,innodb,secondary_engine,ml,sys_vars,binlog,binlog_gtid,binlog_nogtid \
-          --mysqld=--user=$USER --mysqld=--default-storage-engine=innodb --nowarnings --force --nocheck-testcases --report-unstable-tests --retry=3 --parallel=$(nproc)
+          --mysqld=--user=$USER --mysqld=--default-storage-engine=innodb --force --nocheck-testcases --report-unstable-tests --retry=3 --parallel=$(nproc)
       - name: Remove per-run install tree (ARM, Debug)
         if: always()
         run: sudo rm -rf "${SHANNON_PREFIX}"

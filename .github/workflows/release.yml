@@ -1,0 +1,155 @@
+# Workflow: ShannonBase release gate
+# Purpose: Runs the upstream release collection (mysql-test/collections/default.release)
+#          on a tag push, replacing the old behaviour where `*v*` tags triggered
+#          both nightly.yaml and weekly.yaml.
+# Triggers:
+#   - Creation of a new tag whose name contains "v" (the release tag convention),
+#     e.g. `git push origin v8.4.11`. Re-pushing/updating an existing tag does
+#     not trigger it, because the workflow listens to `create`, not `push`.
+#   - Manual dispatch
+# Jobs:
+#   - lint: clang-format 18 check on storage/rapid_engine and ml
+#   - mtr_release: Debug build on x86, then collections/default.release
+# Notes:
+#   - default.release has a --debug-server leg and a normal leg. A single Debug
+#     build is used, so the normal leg also runs the debug binary; this keeps
+#     the debug assertions on both legs at the cost of speed.
+#   - The collection is executed line by line with execv() semantics, so '|'
+#     inside --exclude-platform=... is not treated as a shell pipe.
+#
+#    Copyright (c) 2023, 2024, 2025 Shannon Data AI and/or its affiliates.
+name: release
+
+on:
+  create:
+  workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.event.ref || github.ref }}
+  # A release gate is never cancelled by a newer run.
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  PROTOC: protoc
+  SHANNON_PREFIX: /home/shannon-bin-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  lint:
+    name: lint
+    # `create` also fires for branches; only a new "*v*" tag is a release.
+    if: github.event_name == 'workflow_dispatch' || (github.event.ref_type == 'tag' && contains(github.event.ref, 'v'))
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.ref || github.ref }}
+          fetch-depth: 0
+      - name: Ensure clang-format is available
+        run: |
+          command -v clang-format-18 > /dev/null || (
+            sudo apt-get -o DPkg::Lock::Timeout=600 update &&
+            sudo apt-get -o DPkg::Lock::Timeout=600 install -y clang-format-18
+          )
+      - name: Format check
+        run: |
+          BASE_SHA=$(git merge-base HEAD origin/main 2>/dev/null || git rev-parse --verify -q HEAD^ || echo HEAD)
+          echo "Checking formatting of ${BASE_SHA}..HEAD"
+          git diff -U0 --no-color "$BASE_SHA" HEAD storage/rapid_engine ml |
+            clang-format-diff-18 -p1 -binary "$(command -v clang-format-18)" |
+            tee /tmp/.clang-format-diff
+          if [ -s /tmp/.clang-format-diff ]; then
+            echo "::error::clang-format 18 reformatted the lines in the diff above"
+            exit 1
+          fi
+
+  mtr_release:
+    needs: lint
+    if: github.event_name == 'workflow_dispatch' || (github.event.ref_type == 'tag' && contains(github.event.ref, 'v'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.ref || github.ref }}
+          submodules: recursive
+          fetch-depth: 0
+      - name: Clean old build cache
+        run: |
+          rm -rf ${{ github.workspace }}/cmake_build
+      - name: Install x86 dependencies
+        run: |
+          sudo apt -o DPkg::Lock::Timeout=600 update -y
+          sudo apt -o DPkg::Lock::Timeout=600 install -y libtirpc-dev libboost-all-dev libexpect-perl
+      - name: Build and install (x86, Debug)
+        run: |
+          cd ${{ github.workspace }}
+          mkdir cmake_build && cd cmake_build
+          sudo mkdir -p ${SHANNON_PREFIX} && sudo mkdir -p ${SHANNON_PREFIX}/data
+          sudo chown -R $USER:$USER ${SHANNON_PREFIX}/
+          git config --global --add safe.directory ${{ github.workspace }}
+          git fetch --tags -f
+          cmake ../ \
+          -DCMAKE_BUILD_TYPE=Debug \
+          -DWITH_DEBUG=ON \
+          -DOPTIMIZE_DEBUG_BUILDS=OFF \
+          -DENABLE_LTO=OFF \
+          -DCMAKE_C_FLAGS_DEBUG="-O2 -g -fPIC" \
+          -DCMAKE_CXX_FLAGS_DEBUG="-O2 -g -fPIC" \
+          -DMYSQL_MAINTAINER_MODE=OFF \
+          -DCMAKE_INSTALL_PREFIX=${SHANNON_PREFIX}/ \
+          -DMYSQL_DATADIR=${SHANNON_PREFIX}/data \
+          -DSYSCONFDIR=${SHANNON_PREFIX}/ \
+          -DMYSQL_UNIX_ADDR=${SHANNON_PREFIX}/temp/mysql.sock \
+          -DWITH_MYISAM_STORAGE_ENGINE=1 \
+          -DWITH_INNOBASE_STORAGE_ENGINE=1 \
+          -DMYSQL_TCP_PORT=3306 \
+          -DENABLED_LOCAL_INFILE=1 \
+          -DWITH_PROTOBUF=bundled \
+          -DWITH_CURL=bundled \
+          -DWITH_UNIT_TESTS=ON \
+          -DWITH_HYPERGRAPH_OPTIMIZER=ON \
+          -DCOMPILATION_COMMENT="MySQL Community Server, and Shannon Data AI Alpha V."
+          make -j"$(nproc)" && sudo make install
+      - name: Run official release collection (collections/default.release)
+        run: |
+          sudo mkdir -p ${SHANNON_PREFIX}/log
+          sudo chown -R $USER:$USER ${SHANNON_PREFIX}/
+          cd ${SHANNON_PREFIX}/mysql-test/
+          chmod u+rwx mysql-test-run.pl
+          # Upstream's harness forces a host --parallel, and this tree needs
+          # rapid_schema_embedding=OFF (the model is not in the install tree).
+          # Retry stays as a CI concession: flaky tests are common here, and
+          # --report-unstable-tests only hard-fails repeatable failures.
+          while IFS= read -r line; do
+            if [[ -z "${line// /}" || "$line" == \#* ]]; then
+              continue
+            fi
+            read -r -a argv <<< "$line"
+            has_parallel=0
+            has_retry=0
+            for arg in "${argv[@]}"; do
+              if [[ "$arg" == --parallel* ]]; then
+                has_parallel=1
+              fi
+              if [[ "$arg" == --retry* ]]; then
+                has_retry=1
+              fi
+            done
+            if [[ $has_parallel -eq 0 ]]; then
+              argv+=("--parallel=$(nproc)")
+            fi
+            if [[ $has_retry -eq 0 ]]; then
+              argv+=("--retry=3" "--report-unstable-tests")
+            fi
+            argv+=("--mysqld=--loose-rapid_schema_embedding=OFF")
+            echo "+ ${argv[*]}"
+            "${argv[@]}"
+          done < collections/default.release
+      - name: Remove per-run install tree (x86)
+        if: always()
+        run: sudo rm -rf "${SHANNON_PREFIX}"
