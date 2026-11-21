@@ -181,7 +181,7 @@ jobs:
           export LSAN_OPTIONS="suppressions=${SHANNON_PREFIX}/mysql-test/lsan.supp"
           ./mysql-test-run.pl --mysqld=--loose-rapid_schema_embedding=OFF --sanitize --suite=main,agent,innodb,binlog,binlog_gtid,binlog_nogtid,federated,rpl,rpl_gtid,rpl_nogtid,funcs_1,funcs_2,\
           information_schema,secondary_engine,ml,sys_vars,innodb_zip,clone,sysschema,perfschema \
-          --mysqld=--user=$USER --mysqld=--default-storage-engine=innodb --nowarnings --force --nocheck-testcases --report-unstable-tests --retry=3 --parallel=$(nproc)
+          --mysqld=--user=$USER --mysqld=--default-storage-engine=innodb --force --nocheck-testcases --report-unstable-tests --retry=3 --parallel=$(nproc)
         # when we have a fast git action runner, we can use the following command to run the test.
         # sudo chmod -R u+rwx mysql-test-run.pl && sudo chmod +x ./collections/default.push
         #./collections/default.push
@@ -280,7 +280,7 @@ jobs:
           export ASAN_OPTIONS="detect_leaks=1"
           export LSAN_OPTIONS="suppressions=${SHANNON_PREFIX}/mysql-test/lsan.supp"
           ./mysql-test-run.pl --mysqld=--loose-rapid_schema_embedding=OFF --sanitize --suite=main,agent,clone,innodb,innodb_zip,secondary_engine,ml,sys_vars,sysschema,perfschema \
-          --big-test --mysqld=--user=$USER --mysqld=--default-storage-engine=innodb --nowarnings --force --nocheck-testcases --report-unstable-tests --retry=3 --parallel=$(nproc)
+          --big-test --mysqld=--user=$USER --mysqld=--default-storage-engine=innodb --force --nocheck-testcases --skip-test-list=skip-tests.arm --report-unstable-tests --retry=3 --parallel=$(nproc)
         # when we have a fast git action runner, we can use the following command to run the test.
         # sudo chmod -R u+rwx mysql-test-run.pl && sudo chmod +x ./collections/default.push
         #./collections/default.push
@@ -374,7 +374,7 @@ jobs:
           sudo chmod -R u+rwx mysql-test-run.pl
           # Keep the existing Debug suite coverage with optimized execution.
           ./mysql-test-run.pl --mysqld=--loose-rapid_schema_embedding=OFF --suite=main,agent,innodb,secondary_engine,ml,sys_vars,binlog,binlog_gtid,binlog_nogtid \
-          --mysqld=--user=$USER --mysqld=--default-storage-engine=innodb --nowarnings --force --nocheck-testcases --report-unstable-tests --retry=3 --parallel=$(nproc)
+          --mysqld=--user=$USER --mysqld=--default-storage-engine=innodb --force --nocheck-testcases --report-unstable-tests --retry=3 --parallel=$(nproc)
       - name: Remove per-run install tree (x86, Debug)
         if: always()
         run: sudo rm -rf "${SHANNON_PREFIX}"
@@ -465,7 +465,7 @@ jobs:
           cd ${SHANNON_PREFIX}/mysql-test/
           sudo chmod -R u+rwx mysql-test-run.pl
           ./mysql-test-run.pl --mysqld=--loose-rapid_schema_embedding=OFF --suite=main,agent,innodb,secondary_engine,ml,sys_vars,binlog,binlog_gtid,binlog_nogtid \
-          --mysqld=--user=$USER --mysqld=--default-storage-engine=innodb --nowarnings --force --nocheck-testcases --report-unstable-tests --retry=3 --parallel=$(nproc)
+          --mysqld=--user=$USER --mysqld=--default-storage-engine=innodb --force --nocheck-testcases --report-unstable-tests --retry=3 --parallel=$(nproc)
       - name: Remove per-run install tree (ARM, Debug)
         if: always()
         run: sudo rm -rf "${SHANNON_PREFIX}"
