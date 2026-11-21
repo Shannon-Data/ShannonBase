@@ -1,7 +1,6 @@
 # Workflow: Nightly ShannonBase Compile & MTR
 # Purpose: Builds and tests ShannonBase (MySQL-based project) on x86 and ARM architectures
 # Triggers:
-#   - Push to tags matching "*v*" (e.g., version tags like v1.0.0)
 #   - Daily at 1:30 AM Beijing time (UTC+8, equivalent to 5:30 PM UTC previous day)
 #   - Manual dispatch via workflow_dispatch
 # Jobs:
@@ -20,9 +19,6 @@
 name: nightly
 
 on:
-  push:
-    tags:
-      - "*v*"
   schedule:
     - cron: "30 4 * * *"
       timezone: "Asia/Shanghai"
@@ -159,7 +155,7 @@ jobs:
         sudo chmod -R u+rwx mysql-test-run.pl
         ./mysql-test-run.pl --mysqld=--loose-rapid_schema_embedding=OFF --suite=main,agent,innodb,innodb_zip,federated,clone,rpl,rpl_ndb,rpl_gtid,rpl_nogtid,\
         funcs_1,funcs_2,information_schema,sys_vars,opt_trace,secondary_engine,ml,sysschema,perfschema \
-        --big-test --mysqld=--user=$USER --mysqld=--default-storage-engine=innodb --nowarnings --force --nocheck-testcases --report-unstable-tests --retry=3 --parallel=$(nproc)
+        --big-test --mysqld=--user=$USER --mysqld=--default-storage-engine=innodb --force --nocheck-testcases --report-unstable-tests --retry=3 --parallel=$(nproc)
         # binlog,binlog_gtid,binlog_nogtid, due to disk space limition on github runner, when we have a fast git action runner, we can use the following command to run the test.
         #sudo chmod +x ./collections/default.push && ./collections/default.daily
     - name: Remove per-run install tree (x86)
@@ -250,7 +246,7 @@ jobs:
           sudo chmod -R u+rwx mysql-test-run.pl
           ./mysql-test-run.pl --mysqld=--loose-rapid_schema_embedding=OFF --suite=main,agent,clone,innodb,innodb_zip,rpl,rpl_ndb,rpl_gtid,rpl_nogtid,binlog,\
           binlog_gtid,binlog_nogtid,secondary_engine,ml,sysschema,perfschema \
-          --big-test --mysqld=--user=$USER --mysqld=--default-storage-engine=innodb --nowarnings --force --nocheck-testcases --skip-test-list=skip-tests.arm --report-unstable-tests --retry=3 --parallel=$(nproc)
+          --big-test --mysqld=--user=$USER --mysqld=--default-storage-engine=innodb --force --nocheck-testcases --skip-test-list=skip-tests.arm --report-unstable-tests --retry=3 --parallel=$(nproc)
           # when we have a fast git action runner, we can use the following command to run the test.
           #sudo chmod +x ./collections/default.push && ./collections/default.daily
       - name: Remove per-run install tree (ARM)
@@ -342,7 +338,7 @@ jobs:
           sudo chmod -R u+rwx mysql-test-run.pl
           # Keep the existing Debug suite coverage with optimized execution.
           ./mysql-test-run.pl --mysqld=--loose-rapid_schema_embedding=OFF --suite=main,agent,innodb,secondary_engine,ml,sys_vars,binlog,binlog_gtid,binlog_nogtid \
-          --mysqld=--user=$USER --mysqld=--default-storage-engine=innodb --nowarnings --force --nocheck-testcases --report-unstable-tests --retry=3 --parallel=$(nproc)
+          --mysqld=--user=$USER --mysqld=--default-storage-engine=innodb --force --nocheck-testcases --report-unstable-tests --retry=3 --parallel=$(nproc)
       - name: Remove per-run install tree (x86, Debug)
         if: always()
         run: sudo rm -rf "${SHANNON_PREFIX}"
@@ -427,7 +423,7 @@ jobs:
           cd ${SHANNON_PREFIX}/mysql-test/
           sudo chmod -R u+rwx mysql-test-run.pl
           ./mysql-test-run.pl --mysqld=--loose-rapid_schema_embedding=OFF --suite=main,agent,innodb,secondary_engine,ml,sys_vars,binlog,binlog_gtid,binlog_nogtid \
-          --mysqld=--user=$USER --mysqld=--default-storage-engine=innodb --nowarnings --force --nocheck-testcases --report-unstable-tests --retry=3 --parallel=$(nproc)
+          --mysqld=--user=$USER --mysqld=--default-storage-engine=innodb --force --nocheck-testcases --report-unstable-tests --retry=3 --parallel=$(nproc)
       - name: Remove per-run install tree (ARM, Debug)
         if: always()
         run: sudo rm -rf "${SHANNON_PREFIX}"
