@@ -6,7 +6,7 @@
 # Jobs:
 #   - lint: Checks code formatting for storage/rapid_engine and ml directories
 #   - build_x86: Builds and runs MTR tests on x86 with AddressSanitizer enabled
-#   - build_arm: Builds and runs MTR tests on ARM with AddressSanitizer and a skip-test list
+#   - build_arm: Builds and runs MTR tests on ARM with AddressSanitizer
 #   - build_x86_debug / build_arm_debug: Optimized Debug with assertions, Rapid gunit and core MTR suites
 # Notes:
 #   - Uses concurrency to cancel in-progress runs for the same workflow/ref/event
@@ -280,7 +280,7 @@ jobs:
           export ASAN_OPTIONS="detect_leaks=1"
           export LSAN_OPTIONS="suppressions=${SHANNON_PREFIX}/mysql-test/lsan.supp"
           ./mysql-test-run.pl --mysqld=--loose-rapid_schema_embedding=OFF --sanitize --suite=main,agent,clone,innodb,innodb_zip,secondary_engine,ml,sys_vars,sysschema,perfschema \
-          --big-test --mysqld=--user=$USER --mysqld=--default-storage-engine=innodb --force --nocheck-testcases --skip-test-list=skip-tests.arm --report-unstable-tests --retry=3 --parallel=$(nproc)
+          --big-test --mysqld=--user=$USER --mysqld=--default-storage-engine=innodb --force --nocheck-testcases --report-unstable-tests --retry=3 --parallel=$(nproc)
         # when we have a fast git action runner, we can use the following command to run the test.
         # sudo chmod -R u+rwx mysql-test-run.pl && sudo chmod +x ./collections/default.push
         #./collections/default.push
