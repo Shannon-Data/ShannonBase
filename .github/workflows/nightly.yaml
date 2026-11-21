@@ -6,7 +6,7 @@
 # Jobs:
 #   - lint: Checks code formatting for storage/rapid_engine and ml directories
 #   - build_x86: Builds and runs selected MTR tests on x86 architecture
-#   - build_arm: Builds and runs selected MTR tests on ARM architecture with skip-test list
+#   - build_arm: Builds and runs selected MTR tests on ARM architecture
 #   - build_x86_debug / build_arm_debug: Debug builds (asserts on), core MTR suites + binlog
 # Notes:
 #   - Uses concurrency to cancel in-progress runs for the same workflow/ref
@@ -246,7 +246,7 @@ jobs:
           sudo chmod -R u+rwx mysql-test-run.pl
           ./mysql-test-run.pl --mysqld=--loose-rapid_schema_embedding=OFF --suite=main,agent,clone,innodb,innodb_zip,rpl,rpl_ndb,rpl_gtid,rpl_nogtid,binlog,\
           binlog_gtid,binlog_nogtid,secondary_engine,ml,sysschema,perfschema \
-          --big-test --mysqld=--user=$USER --mysqld=--default-storage-engine=innodb --force --nocheck-testcases --skip-test-list=skip-tests.arm --report-unstable-tests --retry=3 --parallel=$(nproc)
+          --big-test --mysqld=--user=$USER --mysqld=--default-storage-engine=innodb --force --nocheck-testcases --report-unstable-tests --retry=3 --parallel=$(nproc)
           # when we have a fast git action runner, we can use the following command to run the test.
           #sudo chmod +x ./collections/default.push && ./collections/default.daily
       - name: Remove per-run install tree (ARM)
