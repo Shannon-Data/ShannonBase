@@ -17,6 +17,8 @@
 # Every reading is taken three ways -- InnoDB, Rapid/legacy, Rapid/hypergraph --
 # so a divergence fails instead of being recorded as expected.
 
+--source include/no_ps_protocol.inc
+
 --source include/have_hypergraph.inc
 
 --disable_warnings

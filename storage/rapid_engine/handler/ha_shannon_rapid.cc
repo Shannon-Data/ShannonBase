@@ -1268,9 +1268,11 @@ const char *table_offload_blocker(const LEX *lex) {
   // the refusal. Top-level set operations and pure derived UNION stay eligible.
   for (const Query_block *block = lex->all_query_blocks_list; block != nullptr; block = block->next_select_in_list()) {
     for (const Table_ref *table = block->get_table_list(); table != nullptr; table = table->next_local) {
-      if (!table->is_derived()) continue;
+      // Merged derived tables store (Query_expression *)1 in Table_ref::derived
+      // (sql_resolver.cc); dereferencing it crashed prepared-statement execute.
+      if (!table->is_derived() || table->is_merged()) continue;
       const Query_expression *derived = table->derived_query_expression();
-      if (derived == nullptr) continue;
+      if (derived == nullptr || derived == reinterpret_cast<Query_expression *>(1)) continue;
       for (const Query_term *term : derived->query_terms<>()) {
         if (term->term_type() == QT_INTERSECT || term->term_type() == QT_EXCEPT)
           return "derived INTERSECT/EXCEPT materialization is not supported in Rapid";
