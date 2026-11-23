@@ -3,6 +3,8 @@
 # the corresponding SECONDARY_ENGINE plugin is not installed.
 # Following tests are with SECONDARY_ENGINE plugin that doesn't exist.
 
+--source include/no_ps_protocol.inc
+
 # USED FOR retrieve schema metadata.
 delete from mysql.schema_embeddings;
 create database sh_retrieve;

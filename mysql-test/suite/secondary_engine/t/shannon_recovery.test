@@ -3,6 +3,8 @@
 # the corresponding SECONDARY_ENGINE plugin is not installed.
 # Following tests are with SECONDARY_ENGINE plugin that doesn't exist.
 
+--source include/no_ps_protocol.inc
+
 create database sh_test_recovery CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci;
 use sh_test_recovery;
 --disable_warnings

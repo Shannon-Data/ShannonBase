@@ -3,6 +3,8 @@
 # the corresponding SECONDARY_ENGINE plugin is not installed.
 # Following tests are with SECONDARY_ENGINE plugin that doesn't exist.
 
+--source include/no_ps_protocol.inc
+
 # USED FOR RAG.
 create database sh_javascript_sp;
 use sh_javascript_sp;
